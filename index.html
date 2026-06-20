@@ -17962,20 +17962,21 @@ function processPixels(src, adj, imgStats) {
       r+=bShift; g+=bShift; b+=bShift;
     }
 
-    // 3. Contrast -- midtone-only, never touches shadows or highlights
+    // 3. Contrast -- classic full-range pivot around mid-grey. Previously
+    // gated to only the 30%-75% luma band, which meant photos that were
+    // mostly bright, mostly dark, or already high/low-key (most pixels
+    // outside that band) saw almost no change at any slider value. Now
+    // applies across the whole tonal range like a standard contrast
+    // control -- clamp() naturally rolls off/clips at the true black and
+    // white points, which is the expected look of "more contrast".
     if (adj.contrast !== 0) {
       const t    = adj.contrast / 100;
       const lumC = 0.299*clamp(r)+0.587*clamp(g)+0.114*clamp(b);
       const n    = lumC / 255;
-      // Only apply to midtone band 30%-75% lum -- shadows and highlights left alone
-      if (t !== 0 && n > 0.30 && n < 0.75) {
-        // Simple additive pivot: push midtones away from 0.5
-        const delta  = (n - 0.5) * t * 0.40; // up to 10% push at +100
-        const lumOut = clamp((n + delta) * 255);
-        const lumScale = lumC > 2 ? lumOut / lumC : 1;
-        r=clamp(r*lumScale); g=clamp(g*lumScale); b=clamp(b*lumScale);
-      }
-      // Shadows <30% and highlights >75%: no change at all
+      const factor = 1 + t * 0.8; // up to 1.8x (or 0.2x at -100) around mid-grey
+      const lumOut = clamp(((n - 0.5) * factor + 0.5) * 255);
+      const lumScale = lumC > 2 ? lumOut / lumC : 1;
+      r=clamp(r*lumScale); g=clamp(g*lumScale); b=clamp(b*lumScale);
     }
 
     // 4. White Balance + Warmth -- only R and B channels
