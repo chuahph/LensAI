@@ -17575,6 +17575,21 @@ function analyzeImage(data) {
 }
 
 
+// processPixels' per-pass "snapshot before this pass mutates out" buffer
+// (sky enhancement, dehaze, structure, noise reduction, sharpening each
+// need one). Every pass runs sequentially and fully consumes its snapshot
+// before the next pass starts one, so a single reused buffer is always
+// safe -- avoids each pass allocating its own fresh full-resolution copy,
+// which on a large photo is several ~100s of unique transient allocations
+// the allocator has to find room for back-to-back, a contributor to
+// hitting a mobile tab's memory ceiling during full-res export.
+let _scratchBuf = null;
+function _snapshot(out) {
+  if (!_scratchBuf || _scratchBuf.length !== out.length) _scratchBuf = new Uint8ClampedArray(out.length);
+  _scratchBuf.set(out);
+  return _scratchBuf;
+}
+
 // ============================================================
 // SKY ENHANCEMENT PASS - deep blue sky, not blown out
 // ============================================================
@@ -17594,7 +17609,7 @@ function enhanceSky(out, w, h, strength, toneBias, extraAdj) {
   const hdrRecoverN = Math.max(0, -(ea.highlights || 0) / 100); // 0..1, only when recovering
   // Snapshot for neighbour-sampling (cloud texture pop) so we never read
   // already-mutated pixels from earlier in this same pass.
-  const orig = new Uint8ClampedArray(out);
+  const orig = _snapshot(out);
 
   for (let y = 0; y < h; y++) {
     const yFrac = y / h;
@@ -17810,7 +17825,7 @@ function dehazePass(out, w, h, strength) {
   // omega=0.85 (haze removal strength), t_min=0.20 (preserve some depth)
   const omega=0.82+sv*0.12;  // 0.82-0.94 based on strength
   const tMin =Math.max(0.12, 0.30-sv*0.18); // lower t = stronger removal
-  const orig=new Uint8ClampedArray(out);
+  const orig=_snapshot(out);
 
   for (let i=0;i<out.length;i+=4) {
     const r=orig[i],g=orig[i+1],b=orig[i+2];
@@ -18100,7 +18115,7 @@ function processPixels(src, adj, imgStats) {
   if (adj.structure>0) {
     const structScale = (imgStats && imgStats.contrast>65) ? 0.55 : 1.0;
     const sfBase = (adj.structure/100)*2.0*structScale;
-    const orig=new Uint8ClampedArray(out);
+    const orig=_snapshot(out);
     const R1=4, R2=9; // local-contrast radii in pixels
     const o1=R1*4, o2=R2*4;
     const margin=R2+1;
@@ -18135,7 +18150,7 @@ function processPixels(src, adj, imgStats) {
   // 11b. Noise reduction - smooth flat areas before sharpening
   // Only applies where edge signal is very low (flat sky, concrete walls)
   if (adj.sharpening>0 || adj.structure>0) {
-    const noiseOrig=new Uint8ClampedArray(out);
+    const noiseOrig=_snapshot(out);
     for (let y=1;y<h-1;y++) {
       for (let x=1;x<w-1;x++) {
         const idx=(y*w+x)*4;
@@ -18176,7 +18191,7 @@ function processPixels(src, adj, imgStats) {
     const sfCoarse = (adj.sharpening/100)*1.4;  // structural edges
     const thrFine  = 3.0;  // lower threshold catches more detail
     const thrCoarse= 8.0;  // only strong structural edges
-    const orig = new Uint8ClampedArray(out);
+    const orig = _snapshot(out);
 
     for (let y=2;y<h-2;y++) {
       for (let x=2;x<w-2;x++) {
