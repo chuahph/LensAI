@@ -18839,7 +18839,7 @@ function App() {
       // processed/rotated/warped result, matching what the on-photo crop
       // handles show relative to the rest of the pipeline.
       const hasCrop = crop.x>0 || crop.y>0 || crop.w<1 || crop.h<1;
-      let dataUrl;
+      let exportCv=offscreen;
       if (hasCrop) {
         const cropPx = {
           x: Math.round(crop.x*expW), y: Math.round(crop.y*expH),
@@ -18848,10 +18848,14 @@ function App() {
         const cropCv=document.createElement("canvas");
         cropCv.width=cropPx.w; cropCv.height=cropPx.h;
         cropCv.getContext("2d").drawImage(offscreen, cropPx.x, cropPx.y, cropPx.w, cropPx.h, 0, 0, cropPx.w, cropPx.h);
-        dataUrl=cropCv.toDataURL("image/jpeg",0.96);
-      } else {
-        dataUrl=offscreen.toDataURL("image/jpeg",0.96);
+        exportCv=cropCv;
       }
+      // toBlob (binary) instead of toDataURL (base64 string, ~33% larger
+      // plus a second copy when later re-decoded via fetch) -- meaningfully
+      // less peak memory on a large full-res export, where this is the
+      // single biggest avoidable allocation in the whole pipeline.
+      const blob = await new Promise(resolve => exportCv.toBlob(resolve, "image/jpeg", 0.96));
+      if (!blob) throw new Error("Could not encode exported image");
 
       // Name from the original file (so it's recognisable) but always append
       // "-edited" plus a timestamp: this is a brand-new export at a different
@@ -18868,7 +18872,6 @@ function App() {
       const isMobile=/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
       if (isMobile && navigator.share && navigator.canShare) {
         try {
-          const blob=await (await fetch(dataUrl)).blob();
           const file=new File([blob], filename, { type: "image/jpeg" });
           if (navigator.canShare({ files: [file] })) {
             await navigator.share({ files: [file], title: "LensAI photo" });
@@ -18880,12 +18883,14 @@ function App() {
           // fall through to direct download below
         }
       }
+      const objUrl=URL.createObjectURL(blob);
       const a=document.createElement("a");
-      a.href=dataUrl;
+      a.href=objUrl;
       a.download=filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
+      URL.revokeObjectURL(objUrl);
       showToast("Photo downloaded");
     } catch(err) {
       console.error("[LensAI] Save failed:", err);
