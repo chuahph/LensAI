@@ -18464,16 +18464,16 @@ function buildFallback(stats) {
 
   // === HIGHLIGHTS: based on actual blown percentage ===
   let hiR=0;
-  if (s.pctBlown>12) hiR=-55;       // heavy clipping -> strong recovery
-  else if (s.pctBlown>5) hiR=-35;   // moderate clipping
-  else if (s.pctBlown>2) hiR=-18;   // slight clipping
-  else hiR=-5;                       // clean -- minimal touch
+  if (s.pctBlown>12) hiR=-32;       // heavy clipping -> strong recovery
+  else if (s.pctBlown>5) hiR=-20;   // moderate clipping
+  else if (s.pctBlown>2) hiR=-10;   // slight clipping
+  else hiR=-3;                       // clean -- minimal touch
 
   // === SHADOWS: based on blocked shadows + dark detail ===
   let shR=0;
-  if (s.pctBlocked>20) shR=20;      // heavy shadows -> lift
-  else if (s.pctBlocked>10) shR=12;
-  else shR=6;                        // always open slightly
+  if (s.pctBlocked>20) shR=12;      // heavy shadows -> lift
+  else if (s.pctBlocked>10) shR=7;
+  else shR=3;                        // always open slightly
 
   // === DEHAZE: only when haze actually detected ===
   const dhR = s.isHazy ? Math.min(55, Math.round(s.pctLowSat*0.6)) : 0;
