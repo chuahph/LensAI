@@ -18138,12 +18138,52 @@ function processPixels(src, adj, imgStats) {
 
 // Straightens the image by rotationDeg, scaling up just enough that the
 // rotated frame still fully covers the canvas (no empty corners).
-function applyRotation(ctx, imageData, rotationDeg) {
-  const w = imageData.width, h = imageData.height;
-  if (!rotationDeg) { ctx.putImageData(imageData, 0, 0); return; }
-  const scratch = document.createElement("canvas");
-  scratch.width = w; scratch.height = h;
-  scratch.getContext("2d").putImageData(imageData, 0, 0);
+let _scratchA = null, _scratchB = null;
+function _getScratch(which, w, h) {
+  let c = which === "A" ? _scratchA : _scratchB;
+  if (!c) { c = document.createElement("canvas"); if (which === "A") _scratchA = c; else _scratchB = c; }
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  return c;
+}
+
+function imageDataToCanvas(imageData) {
+  const c = _getScratch("A", imageData.width, imageData.height);
+  c.getContext("2d").putImageData(imageData, 0, 0);
+  return c;
+}
+
+// Vertical keystone correction: warps the image into a trapezoid (one edge
+// narrower, the other wider) by drawing it as a stack of independently
+// horizontally-scaled strips, then scales the whole result up just enough
+// that even the narrowest strip still spans the full canvas width (so the
+// sides never show empty space -- excess on wider strips is simply clipped
+// by the canvas bounds).
+function applyPerspective(src, w, h, perspectiveValue) {
+  if (!perspectiveValue) return src;
+  const dst = _getScratch("B", w, h);
+  const dctx = dst.getContext("2d");
+  dctx.clearRect(0, 0, w, h);
+
+  const skew = (perspectiveValue / 100) * 0.5;
+  const overallScale = 1 / (1 - Math.abs(skew) / 2);
+  const STRIPS = Math.min(h, 240);
+  const stripH = h / STRIPS;
+
+  for (let i = 0; i < STRIPS; i++) {
+    const t = (i + 0.5) / STRIPS;
+    const rowScale = (1 + skew * (t - 0.5)) * overallScale;
+    const rowY = i * stripH;
+    const drawW = w * rowScale;
+    const drawX = (w - drawW) / 2;
+    dctx.drawImage(src, 0, rowY, w, stripH, drawX, rowY, drawW, stripH + 1);
+  }
+  return dst;
+}
+
+// Straightens the image by rotationDeg, scaling up just enough that the
+// rotated frame still fully covers the canvas (no empty corners).
+function applyRotation(ctx, src, w, h, rotationDeg) {
+  if (!rotationDeg) { ctx.clearRect(0, 0, w, h); ctx.drawImage(src, 0, 0, w, h); return; }
 
   const rad = rotationDeg * Math.PI / 180;
   const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
@@ -18154,7 +18194,7 @@ function applyRotation(ctx, imageData, rotationDeg) {
   ctx.translate(w / 2, h / 2);
   ctx.rotate(rad);
   ctx.scale(scale, scale);
-  ctx.drawImage(scratch, -w / 2, -h / 2, w, h);
+  ctx.drawImage(src, -w / 2, -h / 2, w, h);
   ctx.restore();
 }
 
@@ -18421,12 +18461,20 @@ function App() {
 
   useEffect(()=>{ hdrRef.current=activeHDR; },[activeHDR]);
 
-  // Render on every adj change
+  // Render on every adj change. Coalesced to one render per animation frame
+  // so rapid-fire slider drag events (which can outpace processPixels'
+  // per-pixel cost) don't queue up a backlog of stale renders.
   useEffect(()=>{
     if (!img||!canvasRef.current) return;
     const ctx=canvasRef.current.getContext("2d");
     if (comparing) { ctx.putImageData(img,0,0); return; }
-    applyRotation(ctx, processPixels(img, adj, statsRef.current), adj.rotation);
+    const raf = requestAnimationFrame(()=>{
+      const processed = processPixels(img, adj, statsRef.current);
+      const w = processed.width, h = processed.height;
+      const warped = applyPerspective(imageDataToCanvas(processed), w, h, adj.perspective);
+      applyRotation(ctx, warped, w, h, adj.rotation);
+    });
+    return ()=>cancelAnimationFrame(raf);
   },[adj,img,comparing]);
 
   const showToast=useCallback((msg)=>{
@@ -18622,7 +18670,9 @@ function App() {
     offscreen.height=srcData.height;
     const octx=offscreen.getContext("2d");
     const processed=processPixels(srcData, adj, srcStats);
-    applyRotation(octx, processed, adj.rotation);
+    const expW=processed.width, expH=processed.height;
+    const expWarped=applyPerspective(imageDataToCanvas(processed), expW, expH, adj.perspective);
+    applyRotation(octx, expWarped, expW, expH, adj.rotation);
     const dataUrl=offscreen.toDataURL("image/jpeg",0.96);
     setSaveDataUrl(dataUrl);
     setSaveModal(true);
