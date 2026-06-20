@@ -18586,6 +18586,7 @@ function App() {
   const [saveModal, setSaveModal] = useState(false);
   const [saveDataUrl,setSaveDataUrl]=useState(null);
   const [exportDims,setExportDims]=useState(null);
+  const [origFileName,setOrigFileName]=useState(null);
   // Normalized crop rect (0..1) -- dragged directly on the preview photo,
   // applied only at export time so it stays non-destructive like the
   // other adjustments.
@@ -18707,6 +18708,7 @@ function App() {
 
   const onFile=(e)=>{
     const f=e.target.files[0]; if(!f) return;
+    setOrigFileName(f.name||null);
     const r=new FileReader();
     r.onload=ev=>loadImage(ev.target.result);
     // Previously missing: without this, a file the browser fails to read
@@ -18852,9 +18854,15 @@ function App() {
 
   const downloadImg=()=>{
     if(!saveDataUrl) return;
+    // Name the download from the original file (so it's recognisable) but
+    // always append "-edited" plus a timestamp: this is a brand-new export
+    // at a different resolution/format than whatever was opened, and must
+    // never collide with -- let alone silently overwrite -- the original
+    // file sitting in the same Downloads/Photos folder.
+    const stem=(origFileName||"photo").replace(/\.[^/.]+$/,"");
     const a=document.createElement("a");
     a.href=saveDataUrl;
-    a.download="lensai-"+Date.now()+".jpg";
+    a.download=stem+"-edited-"+Date.now()+".jpg";
     document.body.appendChild(a);
     a.click();
     a.remove();
