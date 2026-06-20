@@ -17953,9 +17953,16 @@ function processPixels(src, adj, imgStats) {
         protect = Math.min(1.0, curLum/0.12 + 0.15);
       } else if (bShiftBase > 0) {
         // Brightening: protect BOTH already-bright pixels (blowout) AND
-        // very-dark pixels (keep true blacks/night-sky dark and intentional)
+        // very-dark pixels (keep true blacks/night-sky dark and intentional).
+        // shadowProtect previously had a +0.10 floor, so even pure-black
+        // pixels still got >=10% of the brightness lift -- that lifted the
+        // black point off zero on every brightened photo and read as a
+        // whitish/milky veil over the shadows. Replaced with a power curve
+        // that tapers true blacks to zero lift and ramps in smoothly,
+        // anchoring the black point while still fully brightening the
+        // shadows/midtones above ~luma 51.
         const highlightProtect = Math.min(1.0, (1-curLum)/0.25 + 0.35);
-        const shadowProtect    = Math.min(1.0, curLum/0.22 + 0.10);
+        const shadowProtect    = Math.pow(Math.min(1.0, curLum/0.20), 1.2);
         protect = Math.min(highlightProtect, shadowProtect);
       }
       const bShift = bShiftBase * protect;
