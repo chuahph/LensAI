@@ -17969,8 +17969,8 @@ function processPixels(src, adj, imgStats) {
       const n    = lumC / 255;
       // Only apply to midtone band 30%-75% lum -- shadows and highlights left alone
       if (t !== 0 && n > 0.30 && n < 0.75) {
-        // Simple additive pivot: push midtones slightly away from 0.5
-        const delta  = (n - 0.5) * t * 0.06; // very subtle, max 3% push at +100
+        // Simple additive pivot: push midtones away from 0.5
+        const delta  = (n - 0.5) * t * 0.40; // up to 10% push at +100
         const lumOut = clamp((n + delta) * 255);
         const lumScale = lumC > 2 ? lumOut / lumC : 1;
         r=clamp(r*lumScale); g=clamp(g*lumScale); b=clamp(b*lumScale);
@@ -18447,9 +18447,13 @@ function buildFallback(stats) {
   if (s.isUnderexposed)  bR=Math.min(30, Math.round((95-s.lumAvg)*0.35));
   else if (s.isOverexposed) bR=Math.max(-30, Math.round((160-s.lumAvg)*0.35));
 
-  // === CONTRAST: only recommend if image is flat ===
-  // Never recommend high contrast -- avoid whitish dark areas
-  const cR = s.contrast<30 ? 8 : 0; // only boost if very flat
+  // === CONTRAST: graduated with how flat the image measures, plus a ===
+  // gentle pullback on scenes that are already harsh/contrasty.
+  let cR=0;
+  if (s.contrast<20) cR=26;
+  else if (s.contrast<30) cR=16;
+  else if (s.contrast<40) cR=8;
+  else if (s.contrast>75) cR=-12;
 
   // === SATURATION: based on measured avg saturation ===
   let sR=0;
@@ -18503,6 +18507,14 @@ function buildFallback(stats) {
   else if (s.isWarmCast&&s.tempAxis>20) { ctR=25; ctReason="Golden-hour warmth"; }
   else if (s.scene==="portrait")    { ctR=10;  ctReason="Gentle flattering warmth"; }
 
+  // === FADE: soft matte wash, only for moods where it reads as an ===
+  // intentional look rather than just "washed out" -- golden-hour and
+  // portrait scenes benefit most. Everything else stays untouched (it's
+  // a creative effect, not a defect fix, so most scenes get 0).
+  let fdR=0, fdReason="No fade needed";
+  if (s.isWarmCast&&s.tempAxis>20) { fdR=14; fdReason="Soft golden-hour matte"; }
+  else if (s.scene==="portrait")   { fdR=8;  fdReason="Gentle matte finish"; }
+
   // === QUALITY SCORE ===
   // Penalise blown, blocked, haze, blur
   let score=78;
@@ -18528,7 +18540,7 @@ function buildFallback(stats) {
     hdrRec:autoSelectHDR(s),
     adjustments:{
       brightness:   {rec:bR,   sev:sv(bR),   reason:s.isUnderexposed?"Lift exposure":s.isOverexposed?"Reduce exposure":"Balanced"},
-      contrast:     {rec:cR,   sev:sv(cR),   reason:cR>0?"Image is flat":"Contrast OK"},
+      contrast:     {rec:cR,   sev:sv(cR),   reason:cR>0?"Image is flat":cR<0?"Soften harsh contrast":"Contrast OK"},
       saturation:   {rec:sR,   sev:sv(sR),   reason:s.pctLowSat>50?"Boost muted colours":"Color balanced"},
       ambiance:     {rec:ambR, sev:"low",    reason:"Micro-contrast"},
       highlights:   {rec:hiR,  sev:hiR<-30?"high":hiR<-10?"med":"low", reason:s.pctBlown>5?"Recover blown highlights":"Gentle rolloff"},
@@ -18543,7 +18555,7 @@ function buildFallback(stats) {
       perspective:  {rec:0,    sev:"low",    reason:"No correction"},
       rotation:     {rec:0,    sev:"low",    reason:"Aligned"},
       vignette:     {rec:s.hasSky?10:8, sev:"low", reason:"Draw eye to subject"},
-      fade:         {rec:0,    sev:"low",    reason:"Keep original"},
+      fade:         {rec:fdR,  sev:"low",    reason:fdReason},
     },
   };
 }
