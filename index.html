@@ -18017,8 +18017,8 @@ function processPixels(src, adj, imgStats) {
         const chromaN = chroma / Math.max(1, maxC); // HSV saturation 0-1
         if (adj.saturation > 0) {
           // Vibrance: boost less-saturated more, cap sf to avoid bleed
-          const vibF = Math.max(0.04, Math.exp(-chromaN*18)); // steeper decay: protects concrete/steel greys
-          const sf   = Math.min(1.30, 1 + (adj.saturation/100) * 1.00 * vibF * Math.max(0.78, contScale));
+          const vibF = Math.max(0.08, Math.exp(-chromaN*18)); // steeper decay: protects concrete/steel greys
+          const sf   = Math.min(1.45, 1 + (adj.saturation/100) * 1.15 * vibF * Math.max(0.78, contScale));
           r=clamp(luma + sf*(cr-luma));
           g=clamp(luma + sf*(cg-luma));
           b=clamp(luma + sf*(cb-luma));
@@ -18453,8 +18453,9 @@ function buildFallback(stats) {
 
   // === SATURATION: based on measured avg saturation ===
   let sR=0;
-  if (s.pctLowSat>50) sR=Math.min(35, Math.round((45-Math.min(s.avgSat,40))*0.7));
+  if (s.pctLowSat>50) sR=Math.min(50, Math.round((45-Math.min(s.avgSat,40))*0.9));
   else if (s.avgSat>60) sR=Math.max(-15, -Math.round((s.avgSat-55)*0.3));
+  else sR=12; // even balanced scenes get a modest vibrance push by default
 
   // === HIGHLIGHTS: based on actual blown percentage ===
   let hiR=0;
@@ -18495,12 +18496,12 @@ function buildFallback(stats) {
   // the same scene-based mood mapping used for HDR preset colorTone values
   // (cool for urban/night, warm for nature/food/golden-hour casts).
   let ctR=0, ctReason="No strong mood signal";
-  if (s.scene==="urban")            { ctR=-16; ctReason="Cool urban grade"; }
-  else if (s.scene==="night")       { ctR=-10; ctReason="Cool night mood"; }
-  else if (s.scene==="food")        { ctR=12;  ctReason="Warm appetising tone"; }
-  else if (s.scene==="nature")      { ctR=12;  ctReason="Warm natural tone"; }
-  else if (s.isWarmCast&&s.tempAxis>20) { ctR=18; ctReason="Golden-hour warmth"; }
-  else if (s.scene==="portrait")    { ctR=6;   ctReason="Gentle flattering warmth"; }
+  if (s.scene==="urban")            { ctR=-22; ctReason="Cool urban grade"; }
+  else if (s.scene==="night")       { ctR=-15; ctReason="Cool night mood"; }
+  else if (s.scene==="food")        { ctR=18;  ctReason="Warm appetising tone"; }
+  else if (s.scene==="nature")      { ctR=18;  ctReason="Warm natural tone"; }
+  else if (s.isWarmCast&&s.tempAxis>20) { ctR=25; ctReason="Golden-hour warmth"; }
+  else if (s.scene==="portrait")    { ctR=10;  ctReason="Gentle flattering warmth"; }
 
   // === QUALITY SCORE ===
   // Penalise blown, blocked, haze, blur
