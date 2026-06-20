@@ -17311,6 +17311,8 @@ const ADJUSTMENTS = [
 
 // HDR presets - each tuned for its scene, WB kept neutral/cool bias
 const HDR_PRESETS = [
+  { id: "smartHDR", label: "Smart HDR",  color: "#00d4ff", skyBoost: true,
+    values: { brightness:7,  contrast:0,   saturation:66, ambiance:2,  highlights:-46, shadows:4,  warmth:0, sharpening:16, structure:8,  dehaze:42, whiteBalance:0, colorTone:0,  vignette:10, fade:0 }},
   { id: "nature",   label: "Nature",    color: "#22c55e", skyBoost: true,
     values: { brightness:18, contrast:0,  saturation:60, ambiance:14, highlights:-19, shadows:16, warmth:14, sharpening:16, structure:14, dehaze:6,  whiteBalance:6,  colorTone:18, vignette:10, fade:0 }},
   { id: "people",   label: "People",    color: "#818cf8", skyBoost: false,
@@ -17327,8 +17329,6 @@ const HDR_PRESETS = [
     values: { brightness:15, contrast:0 ,  saturation:42,  ambiance:3,  highlights:-10,  shadows:9, warmth:6,  sharpening:5,  structure:1,  dehaze:0,  whiteBalance:4,  colorTone:10, vignette:18, fade:0 }},
   { id: "macro",    label: "Macro",     color: "#34d399", skyBoost: false,
     values: { brightness:13, contrast:0 ,  saturation:44, ambiance:6, highlights:-15, shadows:8, warmth:1,  sharpening:28, structure:16, dehaze:18,  whiteBalance:2,  colorTone:8,  vignette:12, fade:0 }},
-  { id: "smartHDR", label: "Smart HDR",  color: "#00d4ff", skyBoost: true,
-    values: { brightness:7,  contrast:0,   saturation:66, ambiance:2,  highlights:-46, shadows:4,  warmth:0, sharpening:16, structure:8,  dehaze:42, whiteBalance:0, colorTone:0,  vignette:10, fade:0 }},
   { id: "golden",   label: "Golden Hr", color: "#fb923c", skyBoost: false,
     values: { brightness:14, contrast:0 , saturation:62, ambiance:8, highlights:-14, shadows:10, warmth:20, sharpening:10, structure:12, dehaze:8,  whiteBalance:10, colorTone:28, vignette:14, fade:0 }},
   { id: "snow",     label: "Snow",      color: "#7dd3fc", skyBoost: false,
@@ -18464,12 +18464,14 @@ function autoSelectHDR(stats) {
   // Rescue preset for backlit/overexposed-sky and hazy/high-contrast shots.
   // Scored on equal footing with every other preset below -- it wins only
   // when its own signals genuinely outscore the rest, not via a bonus.
-  if (hasSky && pctBlown > 6 && !isNight) scores.smartHDR += 45;
-  if (hasSky && pctBlown > 14 && !isNight) scores.smartHDR += 20; // severe case
+  if (hasSky && pctBlown > 4 && !isNight) scores.smartHDR += 45; // lowered from 6 -- catches more borderline backlit-sky shots
+  if (hasSky && pctBlown > 10 && !isNight) scores.smartHDR += 20; // severe case, lowered from 14
   if (isHighContrast && hasSky && !isNight) scores.smartHDR += 14;
-  if (isHighContrast && !isNight) scores.smartHDR += 6; // even without sky
+  if (isHighContrast && !isNight) scores.smartHDR += 10; // even without sky, raised from 6
+  if (pctBlown > 2 && pctBlocked > 8 && !isNight) scores.smartHDR += 20; // blown highlights + blocked shadows together is the clearest dynamic-range signal, sky or not
   if (isHazy && hasSky && !isNight) scores.smartHDR += 16; // dehaze is its hallmark
-  if (isWashedSky && !isNight) scores.smartHDR += 14;
+  if (isHazy && !isNight) scores.smartHDR += 8; // even without sky
+  if (isWashedSky && !isNight) scores.smartHDR += 18; // raised from 14
 
   // --- Urban: now driven primarily by isStructured (axis-aligned edge
   // density), the actual architectural signal, instead of contrast/sky
