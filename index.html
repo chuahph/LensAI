@@ -18884,33 +18884,6 @@ function App() {
       const stem=(origFileName||"photo").replace(/\.[^/.]+$/,"");
       const filename=stem+"-edited-"+Date.now()+".jpg";
 
-      // On iOS, a plain anchor download lands in the Files app, not Photos --
-      // the OS share sheet's "Save Image" action is the only way a web page
-      // can get a file into the actual photo library. Android's share sheet
-      // has no equivalent reliable "save to gallery" target (it varies by
-      // OEM/launcher and often just re-offers the same file picker), so
-      // Android keeps the plain download, which already lands in a
-      // user-visible Downloads folder. Desktop has no share sheet either,
-      // so both always fall through to a direct download.
-      // iPadOS 13+ Safari masquerades as desktop Safari in the UA string
-      // (no "iPad" substring) to get desktop-class sites -- the touch-point
-      // check is the standard way to still tell it apart from an actual Mac.
-      const isIOS=/iPhone|iPad|iPod/i.test(navigator.userAgent)
-        || (navigator.platform==="MacIntel" && navigator.maxTouchPoints>1);
-      if (isIOS && navigator.share && navigator.canShare) {
-        try {
-          const file=new File([blob], filename, { type: "image/jpeg" });
-          if (navigator.canShare({ files: [file] })) {
-            await navigator.share({ files: [file], title: "LensAI photo" });
-            showToast("Photo shared");
-            return;
-          }
-          console.warn("[LensAI] navigator.canShare rejected the exported file; falling back to download");
-        } catch(err) {
-          if (err && err.name==="AbortError") return; // user dismissed the share sheet
-          console.error("[LensAI] navigator.share failed, falling back to download:", err);
-        }
-      }
       const objUrl=URL.createObjectURL(blob);
       const a=document.createElement("a");
       a.href=objUrl;
