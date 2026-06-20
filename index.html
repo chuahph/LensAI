@@ -18462,10 +18462,8 @@ function autoSelectHDR(stats) {
 
   // --- SmartHDR: blown sky + real dynamic range problem ---
   // Rescue preset for backlit/overexposed-sky and hazy/high-contrast shots.
-  // Prioritized over the other presets: thresholds are intentionally lower
-  // and it gets a flat bonus below so it wins close contests, since
-  // recovering dynamic range is broadly the safer call whenever a photo
-  // shows any sign of needing it.
+  // Scored on equal footing with every other preset below -- it wins only
+  // when its own signals genuinely outscore the rest, not via a bonus.
   if (hasSky && pctBlown > 6 && !isNight) scores.smartHDR += 45;
   if (hasSky && pctBlown > 14 && !isNight) scores.smartHDR += 20; // severe case
   if (isHighContrast && hasSky && !isNight) scores.smartHDR += 14;
@@ -18520,11 +18518,9 @@ function autoSelectHDR(stats) {
   // --- People: catch-all for indoor/social scenes, low contrast ---
   if (!hasSky && !hasFace && contrast < 50 && scene === "people") scores.people += 15;
 
-  // Smart HDR is the prioritized preset: give it a flat bonus whenever it
-  // has picked up any qualifying signal at all, so it wins close contests
-  // against scene presets like nature/urban instead of needing to outscore
-  // them outright.
-  if (scores.smartHDR > 0) scores.smartHDR += 10;
+  // Smart HDR wins only when it actually outscores every other preset on
+  // its own signals -- no artificial bonus tipping close contests in its
+  // favor against scene presets like nature/urban.
 
   // Find highest-scoring preset
   let best = "people", bestScore = -1;
