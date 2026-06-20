@@ -18872,7 +18872,11 @@ function App() {
       // Android keeps the plain download, which already lands in a
       // user-visible Downloads folder. Desktop has no share sheet either,
       // so both always fall through to a direct download.
-      const isIOS=/iPhone|iPad|iPod/i.test(navigator.userAgent);
+      // iPadOS 13+ Safari masquerades as desktop Safari in the UA string
+      // (no "iPad" substring) to get desktop-class sites -- the touch-point
+      // check is the standard way to still tell it apart from an actual Mac.
+      const isIOS=/iPhone|iPad|iPod/i.test(navigator.userAgent)
+        || (navigator.platform==="MacIntel" && navigator.maxTouchPoints>1);
       if (isIOS && navigator.share && navigator.canShare) {
         try {
           const file=new File([blob], filename, { type: "image/jpeg" });
@@ -18881,9 +18885,10 @@ function App() {
             showToast("Photo shared");
             return;
           }
+          console.warn("[LensAI] navigator.canShare rejected the exported file; falling back to download");
         } catch(err) {
           if (err && err.name==="AbortError") return; // user dismissed the share sheet
-          // fall through to direct download below
+          console.error("[LensAI] navigator.share failed, falling back to download:", err);
         }
       }
       const objUrl=URL.createObjectURL(blob);
