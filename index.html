@@ -18783,14 +18783,21 @@ function App() {
           saveHist();
           setAdj(prevAdj => {
             const na = { ...prevAdj };
-            Object.entries(currentFixes).forEach(([k,v]) => { na[k]=v; });
             const hdrId = currentAnalysis.hdrRec || autoHDR || "nature";
             const p = HDR_PRESETS.find(h=>h.id===hdrId);
             if (p) {
-              Object.entries(p.values).forEach(([k,v]) => { na[k]=v; });
+              // contrast/fade are excluded from the preset spread: they're a
+              // per-photo creative choice driven by buildFallback's own cR/fdR
+              // recommendation, not a scene-tied "look" value. Most presets
+              // hardcode them near 0, and most photos' cR/fdR also come back
+              // 0 (no recommendation needed) -- so applying the preset's 0
+              // unconditionally was silently wiping out whatever the user had
+              // already dragged the slider to, any time they hit Analyze.
+              Object.entries(p.values).forEach(([k,v]) => { if (k!=="contrast"&&k!=="fade") na[k]=v; });
               hdrRef.current = hdrId;
               setActiveHDR(hdrId);
             }
+            Object.entries(currentFixes).forEach(([k,v]) => { na[k]=v; });
             return na;
           });
           showToast("Auto-applied: corrections + HDR "+(HDR_PRESETS.find(h=>h.id===(currentAnalysis.hdrRec||autoHDR))?.label||""));
@@ -18824,7 +18831,10 @@ function App() {
   const applyHDR=(id)=>{
     const p=HDR_PRESETS.find(h=>h.id===id); if(!p) return;
     saveHist();
-    const m={...adj}; Object.entries(p.values).forEach(([k,v])=>{m[k]=v;});
+    // contrast/fade stay under the user's own slider control -- see the
+    // matching note in autoApplyAfterAnalysis for why presets shouldn't
+    // touch them.
+    const m={...adj}; Object.entries(p.values).forEach(([k,v])=>{ if(k!=="contrast"&&k!=="fade") m[k]=v; });
     hdrRef.current=id; setActiveHDR(id); setAdj(m);
     showToast("HDR "+p.label+" applied");
   };
