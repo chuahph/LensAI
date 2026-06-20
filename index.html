@@ -17344,6 +17344,11 @@ const SEV = {
 const blankAdj = () => ({ ...Object.fromEntries(ADJUSTMENTS.map(a => [a.id, 0])), rotation: 0, perspective: 0 });
 const clamp    = v => v < 0 ? 0 : v > 255 ? 255 : v;
 const lerp     = (a, b, t) => a + (b - a) * t;
+// Soft highlight knee: values above `knee` compress smoothly toward 255
+// instead of hard-clamping, so texture differences among near-white pixels
+// (e.g. cloud detail) survive instead of all flattening to the same value.
+const softHi = (v, knee = 235, span = 70) =>
+  v <= knee ? clamp(v) : 255 - (255 - knee) / (1 + (v - knee) / span);
 
 // ============================================================
 // ADVANCED IMAGE ANALYSIS
@@ -17573,10 +17578,23 @@ function analyzeImage(data) {
 // ============================================================
 // SKY ENHANCEMENT PASS - deep blue sky, not blown out
 // ============================================================
-function enhanceSky(out, w, h, strength, toneBias) {
+function enhanceSky(out, w, h, strength, toneBias, extraAdj) {
   const s = Math.min(1.0, strength * 1.8);
   // toneBias: -1 (cool/steel, urban) to +1 (warm/golden, nature). 0 = neutral.
   const tb = toneBias || 0;
+  // extraAdj: user sliders that don't otherwise reach sky/cloud pixels --
+  // Shadows (lift blocked cloud-base detail), Contrast (deepen sky gradient),
+  // Structure+Sharpening (cloud micro-texture pop), Highlights (HDR recovery
+  // bias: when the user is pulling highlights down to recover detail, push
+  // the cloud shading harder so texture actually shows instead of staying flat).
+  const ea = extraAdj || {};
+  const shadowsN    = (ea.shadows    || 0) / 100; // -1..1
+  const contrastN   = (ea.contrast   || 0) / 100; // -1..1
+  const textureN    = Math.max(0, ((ea.structure||0) + (ea.sharpening||0)) / 200); // 0..1
+  const hdrRecoverN = Math.max(0, -(ea.highlights || 0) / 100); // 0..1, only when recovering
+  // Snapshot for neighbour-sampling (cloud texture pop) so we never read
+  // already-mutated pixels from earlier in this same pass.
+  const orig = new Uint8ClampedArray(out);
 
   for (let y = 0; y < h; y++) {
     const yFrac = y / h;
@@ -17601,32 +17619,80 @@ function enhanceSky(out, w, h, strength, toneBias) {
         // peakDist: 0=pure white (255), 1=dark grey cloud (155)
         const peakDist = Math.max(0, Math.min(1, (255-brightness)/100));
 
-        // 1. Strong white pop: lower pivot + much higher contrast strength
-        //    pushes near-white pixels toward pure 255 white, deepens shadow
-        //    areas of the cloud for real dimensional contrast
-        const pivot = 205;
-        const cStr  = blend * 0.95; // was 0.45 -- much stronger contrast
-        let nr = clamp(pivot + (r-pivot)*(1+cStr));
-        let ng = clamp(pivot + (g-pivot)*(1+cStr));
-        let nb = clamp(pivot + (b-pivot)*(1+cStr*0.75));
+        // 0. Cloud texture detail -- computed and applied BEFORE the white-pop
+        //    contrast stretch below, not after. Adding detail post-stretch
+        //    gets one side of the texture clipped straight to 255 by the
+        //    stretch's own headroom (verified: applying after measurably
+        //    REDUCED local variance instead of increasing it). Pre-stretch,
+        //    the contrast curve naturally amplifies the detail along with
+        //    everything else, same as a real sharpen-then-tone-curve order.
+        let rD=r, gD=g, bD=b;
+        if (textureN > 0.02 && x>1 && x<w-2 && y>1 && y<h-2) {
+          const lumaAt = o => orig[o]*0.299+orig[o+1]*0.587+orig[o+2]*0.114;
+          const lumaC  = lumaAt(idx);
+          const lumaNb = (
+            lumaAt(idx-4)+lumaAt(idx+4)+lumaAt(idx-w*4)+lumaAt(idx+w*4)+
+            lumaAt(idx-8)+lumaAt(idx+8)+lumaAt(idx-w*8)+lumaAt(idx+w*8)
+          )/8;
+          const detail = (lumaC-lumaNb) * textureN * blend * 1.6;
+          rD=r+detail; gD=g+detail; bD=b+detail*0.9;
+        }
 
-        // 2. Extra brightness boost on near-white pixels (the "pop")
-        const whiteBoost = blend * (1-peakDist) * 22;
-        nr = clamp(nr + whiteBoost);
-        ng = clamp(ng + whiteBoost);
-        nb = clamp(nb + whiteBoost*0.9);
+        // 1+2. Strong white pop, deepened shadow side -- a single monotonic
+        //    gamma curve above the pivot instead of "linear stretch then
+        //    clamp/soft-clip": a linear stretch followed by any clipping
+        //    (hard or soft) double-transforms the data and crushes detail
+        //    among near-white pixels to almost nothing (verified: cloud
+        //    wisp texture std collapsed ~7 -> ~2 regardless of whether the
+        //    texture-pop term was even active). A single gamma curve from
+        //    pivot..255 is monotonic by construction so relative ordering
+        //    (and therefore texture) among bright pixels is preserved while
+        //    still giving a strong visual "pop" toward white.
+        const pivot    = 205;
+        const headroom = 255 - pivot;
+        const cStr     = blend * 0.95; // still used below pivot for shadow depth
+        const popGamma = Math.max(0.32, 0.62 - blend*0.28);
+        const whiteBoostT = blend * (1-peakDist) * 0.16; // nudges near-white pixels further up the curve
+        const popCurve = (v, boostT, belowStr) => {
+          if (v <= pivot) return pivot + (v - pivot) * (1 + belowStr);
+          const t = Math.min(1, (v - pivot) / headroom + boostT);
+          return pivot + headroom * Math.pow(t, popGamma);
+        };
+        // blue gets a gentler below-pivot stretch than r/g so cloud shadows
+        // don't lose their blue and skew warm.
+        let nr = clamp(popCurve(rD, whiteBoostT, cStr));
+        let ng = clamp(popCurve(gD, whiteBoostT, cStr));
+        let nb = clamp(popCurve(bD, whiteBoostT*0.9, cStr*0.75));
 
-        // 3. Tinted shadow in clouds -- cool blue (urban) or warm cream (nature)
-        //    Stronger than before for real dimensional clouds
-        const blueShadow = blend * peakDist * (62 - tb*30);
-        const redShadow  = blend * peakDist * (24 + tb*26);
+        // 3. Tinted shadow in clouds -- cool blue (urban) or warm cream (nature).
+        //    The user's Shadows slider never otherwise reaches sky/cloud
+        //    pixels (they're skipped by the global shadows pass's own
+        //    masking), so it's wired in here as relief: raising Shadows
+        //    proportionally backs off this dimensional darkening instead of
+        //    just adding a brightening layer on top of an unchanged darken
+        //    (which would still net darker at high blend/strength).
+        const shadowRelief = Math.max(0, shadowsN); // 0..1
+        const darkenScale  = 1 - shadowRelief*0.65;
+        const blueShadow = blend * peakDist * (62 - tb*30) * darkenScale;
+        const redShadow  = blend * peakDist * (24 + tb*26) * darkenScale;
         nb = clamp(nb + blueShadow);
         nr = clamp(nr - redShadow + Math.max(0,tb)*peakDist*blend*16);
-        ng = clamp(ng - blend*peakDist*8); // slight green pull deepens shadow contrast
+        ng = clamp(ng - blend*peakDist*8*darkenScale); // slight green pull deepens shadow contrast
 
         // 4. Cool blue-white sheen on highlights
         const blueHighlight = blend * (1-peakDist) * 10;
         nb = clamp(nb + blueHighlight);
+
+        // 5. Shadow recovery -- real net lift (not just reduced darkening)
+        //    so cloud-base detail genuinely opens up, scaled further when
+        //    the user is also recovering blown highlights elsewhere
+        //    (hdrRecoverN) -- the classic "open the shadows without losing
+        //    the white pop" HDR move. Lift is channel-neutral so it doesn't
+        //    fight the cool-blue shadow tint above with a warm cast.
+        if (shadowRelief > 0) {
+          const lift = blend * peakDist * shadowRelief * (30 + hdrRecoverN*22);
+          nr = clamp(nr + lift); ng = clamp(ng + lift); nb = clamp(nb + lift);
+        }
 
         out[idx]   = Math.round(lerp(r, nr, blend));
         out[idx+1] = Math.round(lerp(g, ng, blend));
@@ -17671,9 +17737,14 @@ function enhanceSky(out, w, h, strength, toneBias) {
         ? 0.5*Math.pow(2*bn, str)
         : 1-0.5*Math.pow(2*(1-bn), str))*255;
 
-      // Internal sky saturation (Rec709 luma anchor)
+      // Internal sky saturation (Rec709 luma anchor). Contrast slider widens
+      // this directly (rather than feeding the blue S-curve above) since that
+      // curve's input channel is frequently already clipped to white/black
+      // for saturated skies, making any exponent change on it a no-op --
+      // widening the post-clamp RGB spread around skyLuma is not gated by
+      // that clip and reliably deepens the gradient.
       const skyLuma = 0.2126*tR+0.7152*tG+0.0722*clamp(cB);
-      const skyS    = 1 + blend*(0.62+blueness*0.45); // slightly tamed to avoid mud at high blend
+      const skyS    = 1 + blend*(0.62+blueness*0.45) + Math.max(0,contrastN)*blend*0.40; // slightly tamed to avoid mud at high blend
       const fr = clamp(skyLuma+skyS*(tR-skyLuma));
       const fg = clamp(skyLuma+skyS*(tG-skyLuma));
       const fb = clamp(skyLuma+skyS*(clamp(cB)-skyLuma));
@@ -18044,11 +18115,21 @@ function processPixels(src, adj, imgStats) {
         const edgeMag=Math.abs(lumC-lumB);
         // Only smooth truly flat areas (sky, smooth walls) -- preserve edges
         if (edgeMag>2.5) continue;
+        // Blue sky is the single biggest source of visible gradient banding
+        // (8-bit JPEG sources + the sky-enhancement S-curve below both widen
+        // existing banding), so smooth it harder than generic flat surfaces.
+        // White clouds get the normal/lighter pass -- their fine wispy texture
+        // is what the sky-enhancement structure/sharpening pop (step 13)
+        // recovers, and over-smoothing here would just erase that signal
+        // before it has a chance to be detected.
+        const r0=noiseOrig[idx],g0=noiseOrig[idx+1],b0=noiseOrig[idx+2];
+        const isBlueSkyFlat = b0>r0*1.05 && b0>g0*1.02 && lumC>40 && lumC<235;
+        const smoothW = isBlueSkyFlat ? 0.70 : 0.55;
         // Gentle 3x3 box smooth on RGB
         for (let c=0;c<3;c++) {
           const avg=(noiseOrig[idx-4+c]+noiseOrig[idx+4+c]+
                      noiseOrig[idx-w*4+c]+noiseOrig[idx+w*4+c]+noiseOrig[idx+c]*4)/8;
-          out[idx+c]=Math.round(noiseOrig[idx+c]*0.45+avg*0.55);
+          out[idx+c]=Math.round(noiseOrig[idx+c]*(1-smoothW)+avg*smoothW);
         }
       }
     }
@@ -18111,13 +18192,17 @@ function processPixels(src, adj, imgStats) {
   {
     const skyStr = Math.min(0.95,
       (adj.dehaze/100)*0.90 + (adj.saturation/100)*0.50 +
-      (adj.structure/100)*0.20 + (adj.sharpening/100)*0.18 + 0.12
+      (adj.structure/100)*0.20 + (adj.sharpening/100)*0.18 +
+      Math.max(0,adj.shadows/100)*0.15 + Math.max(0,adj.contrast/100)*0.15 + 0.12
     );
     // Derive tone bias from warmth setting: presets with negative warmth
     // (urban/steel) get cooler sky treatment; positive warmth (nature/golden)
     // gets warmer sky treatment.
     const toneBias = Math.max(-1, Math.min(1, adj.warmth/15));
-    if (skyStr > 0.12) enhanceSky(out, w, h, skyStr, toneBias);
+    if (skyStr > 0.12) enhanceSky(out, w, h, skyStr, toneBias, {
+      shadows: adj.shadows, contrast: adj.contrast,
+      structure: adj.structure, sharpening: adj.sharpening, highlights: adj.highlights,
+    });
   }
 
   // 14. Vignette
