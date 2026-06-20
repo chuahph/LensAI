@@ -17333,6 +17333,8 @@ const HDR_PRESETS = [
     values: { brightness:-6,  contrast:0,   saturation:36, ambiance:2,  highlights:-38, shadows:4,  warmth:0, sharpening:16, structure:8,  dehaze:42, whiteBalance:0, colorTone:0,  vignette:10, fade:0 }},
   { id: "golden",   label: "Golden Hr", color: "#fb923c", skyBoost: false,
     values: { brightness:7,  contrast:0 , saturation:32, ambiance:8, highlights:-6, shadows:10, warmth:20, sharpening:10, structure:12, dehaze:8,  whiteBalance:10, colorTone:28, vignette:14, fade:0 }},
+  { id: "snow",     label: "Snow",      color: "#7dd3fc", skyBoost: false,
+    values: { brightness:-4, contrast:8 , saturation:6,  ambiance:6, highlights:-45,shadows:14, warmth:-12,sharpening:22, structure:18, dehaze:0,  whiteBalance:-8, colorTone:-14,vignette:10, fade:0 }},
 ];
 
 const SEV = {
@@ -18142,7 +18144,7 @@ function autoSelectHDR(stats) {
   const {
     scene, isNight, isHazy, isBlurry, hasSky, skyRatio, isWashedSky,
     skyBlueDepth, lumAvg, contrast, avgSat, pctLowSat, pctBlown, pctBlocked,
-    isUnderexposed, isOverexposed, isHighContrast, sharpness,
+    pctHighlight, isUnderexposed, isOverexposed, isHighContrast, sharpness,
     isWarmCast, isCoolCast, hasFace, tempAxis,
     isStructured, edgeDirectionality,
   } = stats;
@@ -18154,7 +18156,7 @@ function autoSelectHDR(stats) {
   // scenes (the single biggest source of urban/nature confusion before).
   const scores = {
     nature: 0, people: 0, food: 0, urban: 0, night: 0,
-    sports: 0, portrait: 0, macro: 0, golden: 0, smartHDR: 0,
+    sports: 0, portrait: 0, macro: 0, golden: 0, smartHDR: 0, snow: 0,
   };
 
   // --- Night: dominant signal is low overall brightness ---
@@ -18197,6 +18199,13 @@ function autoSelectHDR(stats) {
   // --- Golden hour: strong warm cast, not blown, not night ---
   if (isWarmCast && tempAxis > 22 && !isOverexposed && !isNight) scores.golden += 30;
   if (isWarmCast && lumAvg > 90 && lumAvg < 180) scores.golden += 10;
+
+  // --- Snow: very bright + desaturated + lots of blown highlight detail to
+  // recover -- distinct from smartHDR's "blown sky" rescue case since snow
+  // dominates the whole frame (ground included), not just the sky. ---
+  if (lumAvg > 175 && avgSat < 24 && pctHighlight > 55 && !isNight) scores.snow += 40;
+  if (pctBlown > 15 && avgSat < 20 && !hasFace) scores.snow += 15;
+  if (isCoolCast && lumAvg > 160) scores.snow += 8;
 
   // --- Sports: high contrast + high saturation + sharp (frozen action) ---
   if (contrast > 65 && avgSat > 30 && !hasFace) scores.sports += 25;
