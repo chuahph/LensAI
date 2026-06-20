@@ -17620,10 +17620,19 @@ function enhanceSky(out, w, h, strength, toneBias, extraAdj) {
       const r=out[idx], g=out[idx+1], b=out[idx+2];
       const lum = (r*0.299+g*0.587+b*0.114)/255;
 
-      //  CLOUD pixels: bright near-neutral 
+      //  CLOUD pixels: bright AND near-neutral (white/grey). The b<r*1.045
+      //  ratio test is the key one: real clouds are colour-neutral (b ~= r),
+      //  whereas a pale or hazy blue sky stays blue-dominant (b > r) even
+      //  after upstream brightening pushes it near white. A ratio is used
+      //  instead of an absolute (b-r) difference because brightening a pale
+      //  sky toward white compresses the absolute gap (b-r shrinks to ~10)
+      //  while the ratio holds -- with an absolute test those washed skies
+      //  fell through to the cloud branch and the white-pop curve bleached
+      //  their blue out to near-white, the opposite of a sky boost.
       const isCloud = lum>0.72
         && Math.abs(r-g)<35
         && Math.abs(g-b)<35
+        && b < r*1.045
         && b>120;
 
       if (isCloud) {
@@ -17716,10 +17725,16 @@ function enhanceSky(out, w, h, strength, toneBias, extraAdj) {
       }
 
       //  SKY pixels: blue-dominant mid-bright 
+      // lum ceiling raised 0.93 -> 0.97: a pale/hazy sky that upstream
+      // brightening pushes very bright (lum ~0.94) was overshooting the old
+      // ceiling and falling through BOTH branches (not cloud, not sky),
+      // leaving it washed out. The higher ceiling keeps catching it so its
+      // blue still gets boosted; genuinely near-white cloud pixels are still
+      // peeled off first by the isCloud (b<r*1.045) test above.
       const isSky = b > r*1.02
         && b >= g*0.90
         && lum > 0.18
-        && lum < 0.93
+        && lum < 0.97
         && b > 55;
 
       if (!isSky) continue;
@@ -17737,9 +17752,9 @@ function enhanceSky(out, w, h, strength, toneBias, extraAdj) {
 
       // Colour shifts -- toneBias shifts urban toward cool/cyan-blue,
       // nature toward warmer azure with more green retention
-      const blueGain  = blend * (0.78 + blueness*0.50 - tb*0.12);
-      const redLoss   = blend * (0.42 + blueness*0.26 + Math.max(0,-tb)*0.10);
-      const greenLoss = blend * (0.14 + blueness*0.08 - Math.max(0,tb)*0.06);
+      const blueGain  = blend * (0.92 + blueness*0.62 - tb*0.12);
+      const redLoss   = blend * (0.48 + blueness*0.28 + Math.max(0,-tb)*0.10);
+      const greenLoss = blend * (0.16 + blueness*0.09 - Math.max(0,tb)*0.06);
 
       let tB = clamp(b*(1+blueGain));
       let tR = clamp(r*(1-redLoss));
@@ -17759,7 +17774,7 @@ function enhanceSky(out, w, h, strength, toneBias, extraAdj) {
       // widening the post-clamp RGB spread around skyLuma is not gated by
       // that clip and reliably deepens the gradient.
       const skyLuma = 0.2126*tR+0.7152*tG+0.0722*clamp(cB);
-      const skyS    = 1 + blend*(0.62+blueness*0.45) + Math.max(0,contrastN)*blend*0.40; // slightly tamed to avoid mud at high blend
+      const skyS    = 1 + blend*(0.74+blueness*0.52) + Math.max(0,contrastN)*blend*0.40; // richer blue, still tamed to avoid mud at high blend
       const fr = clamp(skyLuma+skyS*(tR-skyLuma));
       const fg = clamp(skyLuma+skyS*(tG-skyLuma));
       const fb = clamp(skyLuma+skyS*(clamp(cB)-skyLuma));
