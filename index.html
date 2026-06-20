@@ -18814,70 +18814,88 @@ function App() {
   };
   const saveImg=async()=>{
     if(!img) return;
-    // Use original full-resolution data for export
-    const srcData  = fullResRef.current  || img;
-    const srcStats = fullResStats.current || statsRef.current;
-    const offscreen=document.createElement("canvas");
-    offscreen.width=srcData.width;
-    offscreen.height=srcData.height;
-    const octx=offscreen.getContext("2d");
-    const processed=processPixels(srcData, adj, srcStats);
-    const expW=processed.width, expH=processed.height;
-    const expWarped=applyPerspective(imageDataToCanvas(processed), expW, expH, adj.perspective);
-    applyRotation(octx, expWarped, expW, expH, adj.rotation);
+    // Everything below runs inside an async arrow fn passed straight to
+    // onClick, with nothing awaiting or catching its returned promise --
+    // any throw (canvas size limits, getContext returning null on huge
+    // full-res exports, etc.) would otherwise become an unhandled promise
+    // rejection. The app's global unhandledrejection handler treats that
+    // as fatal and covers the whole UI with a reload overlay, destroying
+    // all in-progress edits over what should just be a failed export.
+    try {
+      // Use original full-resolution data for export
+      const srcData  = fullResRef.current  || img;
+      const srcStats = fullResStats.current || statsRef.current;
+      const offscreen=document.createElement("canvas");
+      offscreen.width=srcData.width;
+      offscreen.height=srcData.height;
+      const octx=offscreen.getContext("2d");
+      if (!octx) throw new Error("Could not create export canvas");
+      const processed=processPixels(srcData, adj, srcStats);
+      const expW=processed.width, expH=processed.height;
+      const expWarped=applyPerspective(imageDataToCanvas(processed), expW, expH, adj.perspective);
+      applyRotation(octx, expWarped, expW, expH, adj.rotation);
 
-    // Crop is applied last, as a non-destructive framing step on the fully
-    // processed/rotated/warped result, matching what the on-photo crop
-    // handles show relative to the rest of the pipeline.
-    const hasCrop = crop.x>0 || crop.y>0 || crop.w<1 || crop.h<1;
-    let dataUrl;
-    if (hasCrop) {
-      const cropPx = {
-        x: Math.round(crop.x*expW), y: Math.round(crop.y*expH),
-        w: Math.max(1, Math.round(crop.w*expW)), h: Math.max(1, Math.round(crop.h*expH)),
-      };
-      const cropCv=document.createElement("canvas");
-      cropCv.width=cropPx.w; cropCv.height=cropPx.h;
-      cropCv.getContext("2d").drawImage(offscreen, cropPx.x, cropPx.y, cropPx.w, cropPx.h, 0, 0, cropPx.w, cropPx.h);
-      dataUrl=cropCv.toDataURL("image/jpeg",0.96);
-    } else {
-      dataUrl=offscreen.toDataURL("image/jpeg",0.96);
-    }
-
-    // Name from the original file (so it's recognisable) but always append
-    // "-edited" plus a timestamp: this is a brand-new export at a different
-    // resolution/format than whatever was opened, and must never collide
-    // with -- let alone silently overwrite -- the original file.
-    const stem=(origFileName||"photo").replace(/\.[^/.]+$/,"");
-    const filename=stem+"-edited-"+Date.now()+".jpg";
-
-    // On mobile, a plain anchor download lands in the Files/Downloads app,
-    // not Photos -- the OS share sheet's "Save Image"/"Save to Photos"
-    // action is the only way a web page can get a file into the actual
-    // photo library. Desktop has no such share sheet, so it always falls
-    // through to a direct download.
-    const isMobile=/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    if (isMobile && navigator.share && navigator.canShare) {
-      try {
-        const blob=await (await fetch(dataUrl)).blob();
-        const file=new File([blob], filename, { type: "image/jpeg" });
-        if (navigator.canShare({ files: [file] })) {
-          await navigator.share({ files: [file], title: "LensAI photo" });
-          showToast("Photo shared");
-          return;
-        }
-      } catch(err) {
-        if (err && err.name==="AbortError") return; // user dismissed the share sheet
-        // fall through to direct download below
+      // Crop is applied last, as a non-destructive framing step on the fully
+      // processed/rotated/warped result, matching what the on-photo crop
+      // handles show relative to the rest of the pipeline.
+      const hasCrop = crop.x>0 || crop.y>0 || crop.w<1 || crop.h<1;
+      let exportCv=offscreen;
+      if (hasCrop) {
+        const cropPx = {
+          x: Math.round(crop.x*expW), y: Math.round(crop.y*expH),
+          w: Math.max(1, Math.round(crop.w*expW)), h: Math.max(1, Math.round(crop.h*expH)),
+        };
+        const cropCv=document.createElement("canvas");
+        cropCv.width=cropPx.w; cropCv.height=cropPx.h;
+        cropCv.getContext("2d").drawImage(offscreen, cropPx.x, cropPx.y, cropPx.w, cropPx.h, 0, 0, cropPx.w, cropPx.h);
+        exportCv=cropCv;
       }
+      // toBlob (binary) instead of toDataURL (base64 string, ~33% larger
+      // plus a second copy when later re-decoded via fetch) -- meaningfully
+      // less peak memory on a large full-res export, where this is the
+      // single biggest avoidable allocation in the whole pipeline.
+      const blob = await new Promise(resolve => exportCv.toBlob(resolve, "image/jpeg", 0.96));
+      if (!blob) throw new Error("Could not encode exported image");
+
+      // Name from the original file (so it's recognisable) but always append
+      // "-edited" plus a timestamp: this is a brand-new export at a different
+      // resolution/format than whatever was opened, and must never collide
+      // with -- let alone silently overwrite -- the original file.
+      const stem=(origFileName||"photo").replace(/\.[^/.]+$/,"");
+      const filename=stem+"-edited-"+Date.now()+".jpg";
+
+      // On mobile, a plain anchor download lands in the Files/Downloads app,
+      // not Photos -- the OS share sheet's "Save Image"/"Save to Photos"
+      // action is the only way a web page can get a file into the actual
+      // photo library. Desktop has no such share sheet, so it always falls
+      // through to a direct download.
+      const isMobile=/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      if (isMobile && navigator.share && navigator.canShare) {
+        try {
+          const file=new File([blob], filename, { type: "image/jpeg" });
+          if (navigator.canShare({ files: [file] })) {
+            await navigator.share({ files: [file], title: "LensAI photo" });
+            showToast("Photo shared");
+            return;
+          }
+        } catch(err) {
+          if (err && err.name==="AbortError") return; // user dismissed the share sheet
+          // fall through to direct download below
+        }
+      }
+      const objUrl=URL.createObjectURL(blob);
+      const a=document.createElement("a");
+      a.href=objUrl;
+      a.download=filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objUrl);
+      showToast("Photo downloaded");
+    } catch(err) {
+      console.error("[LensAI] Save failed:", err);
+      showToast("Save failed -- try again");
     }
-    const a=document.createElement("a");
-    a.href=dataUrl;
-    a.download=filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    showToast("Photo downloaded");
   };
 
   const curAdj    = ADJUSTMENTS.find(a=>a.id===activeAdj);
