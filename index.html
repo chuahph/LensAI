@@ -18714,7 +18714,6 @@ function App() {
   const [fixes,     setFixes]     = useState({});
   const [analysis,  setAnalysis]  = useState(null);
   const [busy,      setBusy]      = useState(false);
-  const [comparing] = useState(true); // before/after slider is always on, no toggle needed
   const [compareSlider, setCompareSlider] = useState(50); // before/after divider, 0-100%
   const [activeHDR, setActiveHDR] = useState(null);
   const [autoHDR,   setAutoHDR]   = useState(null);   // auto-detected HDR id
@@ -18722,6 +18721,7 @@ function App() {
   const [toast,     setToast]     = useState(null);
   const [modal,     setModal]     = useState(false);
   const [analyzed,  setAnalyzed]  = useState(false);
+  const comparing = analyzed; // before/after slider only enables once analysis + auto-corrections have run
   const [imgStats,  setImgStats]  = useState(null);
   const [origFileName,setOrigFileName]=useState(null);
   // Normalized crop rect (0..1) -- dragged directly on the preview photo,
