@@ -18022,14 +18022,20 @@ function processPixels(src, adj, imgStats) {
       const cr=clamp(r), cg=clamp(g), cb=clamp(b);
       const luma = (cr+cg+cb)/3; // equal-weight: prevents G dominance in saturation
       // Skip very dark pixels -- saturation on near-black causes colour fringing
-      if (luma > 20 && luma < 215) { // skip dark AND near-white pixels
+      if (luma > 20 && luma < 225) { // skip dark AND near-white pixels
         const maxC=Math.max(cr,cg,cb), minC=Math.min(cr,cg,cb);
         const chroma  = maxC - minC;
         const chromaN = chroma / Math.max(1, maxC); // HSV saturation 0-1
         if (adj.saturation > 0) {
-          // Vibrance: boost less-saturated more, cap sf to avoid bleed
-          const vibF = Math.max(0.08, Math.exp(-chromaN*18)); // steeper decay: protects concrete/steel greys
-          const sf   = Math.min(1.45, 1 + (adj.saturation/100) * 1.15 * vibF * Math.max(0.78, contScale));
+          // Vibrance: boost less-saturated more, cap sf to avoid bleed.
+          // Softened from the previous very-conservative curve (decay 18,
+          // floor 0.08, cap 1.45) which only really lifted near-grey pixels
+          // and left actual colourful subjects almost untouched -- gentler
+          // decay + a higher floor now give mid/high-chroma colours a real
+          // lift too (the "more lively" look), while vibrance weighting
+          // still favours muted areas so saturated colours don't go gaudy.
+          const vibF = Math.max(0.30, Math.exp(-chromaN*9));
+          const sf   = Math.min(1.90, 1 + (adj.saturation/100) * 1.30 * vibF * Math.max(0.78, contScale));
           r=clamp(luma + sf*(cr-luma));
           g=clamp(luma + sf*(cg-luma));
           b=clamp(luma + sf*(cb-luma));
@@ -18468,9 +18474,9 @@ function buildFallback(stats) {
 
   // === SATURATION: based on measured avg saturation ===
   let sR=0;
-  if (s.pctLowSat>50) sR=Math.min(50, Math.round((45-Math.min(s.avgSat,40))*0.9));
-  else if (s.avgSat>60) sR=Math.max(-15, -Math.round((s.avgSat-55)*0.3));
-  else sR=12; // even balanced scenes get a modest vibrance push by default
+  if (s.pctLowSat>50) sR=Math.min(58, Math.round((48-Math.min(s.avgSat,40))*0.95));
+  else if (s.avgSat>65) sR=Math.max(-12, -Math.round((s.avgSat-60)*0.25));
+  else sR=18; // even balanced scenes get a healthy vibrance push by default
 
   // === HIGHLIGHTS: based on actual blown percentage ===
   let hiR=0;
