@@ -18825,21 +18825,33 @@ function App() {
       // Use original full-resolution data for export
       const srcData  = fullResRef.current  || img;
       const srcStats = fullResStats.current || statsRef.current;
-      const offscreen=document.createElement("canvas");
-      offscreen.width=srcData.width;
-      offscreen.height=srcData.height;
-      const octx=offscreen.getContext("2d");
-      if (!octx) throw new Error("Could not create export canvas");
       const processed=processPixels(srcData, adj, srcStats);
       const expW=processed.width, expH=processed.height;
       const expWarped=applyPerspective(imageDataToCanvas(processed), expW, expH, adj.perspective);
-      applyRotation(octx, expWarped, expW, expH, adj.rotation);
+
+      // Rotation needs its own destination canvas (the scale-up to cover
+      // the rotated frame's corners changes the pixel content), but at
+      // rotation=0 -- the common case -- it was previously still allocating
+      // a full second full-resolution canvas just to copy expWarped into it
+      // unchanged. Skipping that when there's nothing to rotate avoids
+      // duplicating the entire full-res buffer, a meaningful chunk of peak
+      // memory on a large photo that can otherwise push a mobile tab over
+      // its memory ceiling and get it killed by the OS mid-export.
+      let exportCv=expWarped;
+      if (adj.rotation) {
+        const offscreen=document.createElement("canvas");
+        offscreen.width=expW;
+        offscreen.height=expH;
+        const octx=offscreen.getContext("2d");
+        if (!octx) throw new Error("Could not create export canvas");
+        applyRotation(octx, expWarped, expW, expH, adj.rotation);
+        exportCv=offscreen;
+      }
 
       // Crop is applied last, as a non-destructive framing step on the fully
       // processed/rotated/warped result, matching what the on-photo crop
       // handles show relative to the rest of the pipeline.
       const hasCrop = crop.x>0 || crop.y>0 || crop.w<1 || crop.h<1;
-      let exportCv=offscreen;
       if (hasCrop) {
         const cropPx = {
           x: Math.round(crop.x*expW), y: Math.round(crop.y*expH),
@@ -18847,7 +18859,7 @@ function App() {
         };
         const cropCv=document.createElement("canvas");
         cropCv.width=cropPx.w; cropCv.height=cropPx.h;
-        cropCv.getContext("2d").drawImage(offscreen, cropPx.x, cropPx.y, cropPx.w, cropPx.h, 0, 0, cropPx.w, cropPx.h);
+        cropCv.getContext("2d").drawImage(exportCv, cropPx.x, cropPx.y, cropPx.w, cropPx.h, 0, 0, cropPx.w, cropPx.h);
         exportCv=cropCv;
       }
       // toBlob (binary) instead of toDataURL (base64 string, ~33% larger
