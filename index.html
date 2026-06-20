@@ -17962,19 +17962,29 @@ function processPixels(src, adj, imgStats) {
       r+=bShift; g+=bShift; b+=bShift;
     }
 
-    // 3. Contrast -- classic full-range pivot around mid-grey. Previously
-    // gated to only the 30%-75% luma band, which meant photos that were
-    // mostly bright, mostly dark, or already high/low-key (most pixels
-    // outside that band) saw almost no change at any slider value. Now
-    // applies across the whole tonal range like a standard contrast
-    // control -- clamp() naturally rolls off/clips at the true black and
-    // white points, which is the expected look of "more contrast".
+    // 3. Contrast -- full-range pivot around mid-grey, applied to every
+    // pixel (not gated to a midtone band -- see history for why). Positive
+    // contrast uses a tanh S-curve rather than a linear pivot with a hard
+    // 0/255 clamp: the old linear formula fully clipped any pixel above
+    // ~90% luma (or below ~10%) into flat white/black even at moderate
+    // slider values, posterizing skies, skin and snow. tanh saturates
+    // toward the same endpoints continuously, so distinct highlight/shadow
+    // tones stay distinguishable instead of collapsing into one flat value.
+    // Negative contrast (de-contrast) never clips, so it stays a simple
+    // linear pull toward grey.
     if (adj.contrast !== 0) {
       const t    = adj.contrast / 100;
       const lumC = 0.299*clamp(r)+0.587*clamp(g)+0.114*clamp(b);
       const n    = lumC / 255;
-      const factor = 1 + t * 0.8; // up to 1.8x (or 0.2x at -100) around mid-grey
-      const lumOut = clamp(((n - 0.5) * factor + 0.5) * 255);
+      const x    = n - 0.5;
+      let nOut;
+      if (t > 0) {
+        const k = t * 4; // curve steepness; k->0 reduces to the identity
+        nOut = 0.5 + (Math.tanh(k*x) / Math.tanh(k*0.5)) * 0.5;
+      } else {
+        nOut = 0.5 + x * (1 + t * 0.8);
+      }
+      const lumOut = clamp(nOut * 255);
       const lumScale = lumC > 2 ? lumOut / lumC : 1;
       r=clamp(r*lumScale); g=clamp(g*lumScale); b=clamp(b*lumScale);
     }
