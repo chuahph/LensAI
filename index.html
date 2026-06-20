@@ -18825,9 +18825,17 @@ function App() {
       // Use original full-resolution data for export
       const srcData  = fullResRef.current  || img;
       const srcStats = fullResStats.current || statsRef.current;
-      const processed=processPixels(srcData, adj, srcStats);
+      let processed=processPixels(srcData, adj, srcStats);
       const expW=processed.width, expH=processed.height;
       const expWarped=applyPerspective(imageDataToCanvas(processed), expW, expH, adj.perspective);
+      // processed's backing buffer (a full extra copy of the full-res pixel
+      // data) is fully consumed by imageDataToCanvas's putImageData above --
+      // drop the reference and yield a tick so the GC has a chance to
+      // actually reclaim it before the next full-res allocation (rotation
+      // canvas, crop canvas, or the JPEG encoder's internal buffer), rather
+      // than all of them being momentarily alive at once.
+      processed=null;
+      await new Promise(r=>setTimeout(r,0));
 
       // Rotation needs its own destination canvas (the scale-up to cover
       // the rotated frame's corners changes the pixel content), but at
