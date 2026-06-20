@@ -17403,6 +17403,16 @@ function analyzeImage(data) {
   const pctBlown     = (hiClip/n)*100;
   const pctBlocked   = (shClip/n)*100;
 
+  // === BLACK / WHITE POINT (for auto de-wash) ===
+  // Luma at the ~0.5th percentile from each end. A washed-out / hazy photo
+  // has an elevated black point (its darkest tones sit at grey, not black),
+  // which is the single biggest contributor to a faded look.
+  const ptThresh = n*0.005;
+  let blackPoint=0, cumB=0;
+  for (let i=0;i<256;i++){ cumB+=lumHist[i]; if(cumB>=ptThresh){ blackPoint=i; break; } }
+  let whitePoint=255, cumW=0;
+  for (let i=255;i>=0;i--){ cumW+=lumHist[i]; if(cumW>=ptThresh){ whitePoint=i; break; } }
+
   // === EXPOSURE assessment ===
   // Good exposure: 60-140 avg lum, <5% blown, <15% blocked
   const isUnderexposed = lumAvg<85 || (pctBlocked>20 && lumAvg<110);
@@ -17556,7 +17566,7 @@ function analyzeImage(data) {
   const awbBc = 1 - Math.max(-20, Math.min(20, tempCorrection)) / 255 * 0.5;
 
   return {
-    lumAvg, rAvg, gAvg, bAvg, contrast, avgSat,
+    lumAvg, rAvg, gAvg, bAvg, contrast, avgSat, blackPoint, whitePoint,
     pctShadow, pctMidtone, pctHighlight, pctBlown, pctBlocked,
     hiPct:pctBlown, shPct:pctBlocked,
     isUnderexposed, isOverexposed, isHighContrast,
@@ -17926,6 +17936,17 @@ function processPixels(src, adj, imgStats) {
   const bShiftBase = adj.brightness * 2.8 * (hiContrast ? 0.78 : 1.0);
   const fadeF  = adj.fade / 100;
 
+  // Auto de-wash: a washed-out / hazy photo has an elevated black point --
+  // its darkest tones sit at grey instead of black, the dominant cause of a
+  // faded look. None of the tone steps below actually LOWER the black point
+  // (brightness/shadows only ever raise it), so this removes the lifted
+  // "fog pedestal" directly: subtract a value that's strongest on the
+  // darkest pixels and tapers to zero by the highlights (so whites/skies are
+  // untouched). Only engages when the black point is genuinely elevated.
+  const dewashBP = (imgStats && imgStats.blackPoint > 18)
+    ? Math.min(imgStats.blackPoint - 6, 38) * 1.15
+    : 0;
+
   // White Balance: separate from warmth
   // whiteBalance slider: negative = cool (reduce R, boost B), positive = warm (boost R, reduce B)
   // warmth slider: separate control, much gentler
@@ -17952,6 +17973,20 @@ function processPixels(src, adj, imgStats) {
     if (imgStats) {
       r = clamp(r * imgStats.awbR);
       b = clamp(b * imgStats.awbB);
+    }
+
+    // 1b. Auto de-wash (black-point pedestal removal). Removes the lifted fog
+    // pedestal from the source BEFORE the tone steps below, so a washed-out /
+    // hazy photo (elevated black point -- darkest tones at grey, not black --
+    // the dominant cause of a faded look) regains true blacks. Subtraction is
+    // strongest on the darkest pixels and tapers to zero by the highlights so
+    // whites/skies are untouched. Runs first (before brightness) so the
+    // brightness step's shadowProtect then keeps the now-low blacks from being
+    // re-lifted back into a grey wash.
+    if (dewashBP > 0) {
+      const lumW = (r*0.299+g*0.587+b*0.114)/255;
+      const sub  = dewashBP * Math.pow(Math.max(0, 1-lumW), 1.3);
+      r=clamp(r-sub); g=clamp(g-sub); b=clamp(b-sub);
     }
 
     // 2. Brightness -- protect shadows/highlights from extreme push
