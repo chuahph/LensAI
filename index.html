@@ -17305,8 +17305,6 @@ const ADJUSTMENTS = [
   { id: "dehaze",       label: "Dehaze",       min: 0,    max: 100, color: "#60a5fa" },
   { id: "whiteBalance", label: "White Bal",    min: -100, max: 100, color: "#e2e8f0" },
   { id: "colorTone",    label: "Color Tone",   min: -100, max: 100, color: "#f9a8d4" },
-  { id: "perspective",  label: "Perspective",  min: -100, max: 100, color: "#94a3b8" },
-  { id: "rotation",     label: "Rotation",     min: -45,  max: 45,  color: "#a5f3fc" },
   { id: "vignette",     label: "Vignette",     min: 0,    max: 100, color: "#c084fc" },
   { id: "fade",         label: "Fade",         min: 0,    max: 100, color: "#cbd5e1" },
 ];
@@ -17343,7 +17341,7 @@ const SEV = {
   low:  { bg:"rgba(34,197,94,0.15)",  color:"#22c55e", label:"LOW"  },
 };
 
-const blankAdj = () => Object.fromEntries(ADJUSTMENTS.map(a => [a.id, 0]));
+const blankAdj = () => ({ ...Object.fromEntries(ADJUSTMENTS.map(a => [a.id, 0])), rotation: 0, perspective: 0 });
 const clamp    = v => v < 0 ? 0 : v > 255 ? 255 : v;
 const lerp     = (a, b, t) => a + (b - a) * t;
 
@@ -18138,12 +18136,52 @@ function processPixels(src, adj, imgStats) {
 
 // Straightens the image by rotationDeg, scaling up just enough that the
 // rotated frame still fully covers the canvas (no empty corners).
-function applyRotation(ctx, imageData, rotationDeg) {
-  const w = imageData.width, h = imageData.height;
-  if (!rotationDeg) { ctx.putImageData(imageData, 0, 0); return; }
-  const scratch = document.createElement("canvas");
-  scratch.width = w; scratch.height = h;
-  scratch.getContext("2d").putImageData(imageData, 0, 0);
+let _scratchA = null, _scratchB = null;
+function _getScratch(which, w, h) {
+  let c = which === "A" ? _scratchA : _scratchB;
+  if (!c) { c = document.createElement("canvas"); if (which === "A") _scratchA = c; else _scratchB = c; }
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  return c;
+}
+
+function imageDataToCanvas(imageData) {
+  const c = _getScratch("A", imageData.width, imageData.height);
+  c.getContext("2d").putImageData(imageData, 0, 0);
+  return c;
+}
+
+// Vertical keystone correction: warps the image into a trapezoid (one edge
+// narrower, the other wider) by drawing it as a stack of independently
+// horizontally-scaled strips, then scales the whole result up just enough
+// that even the narrowest strip still spans the full canvas width (so the
+// sides never show empty space -- excess on wider strips is simply clipped
+// by the canvas bounds).
+function applyPerspective(src, w, h, perspectiveValue) {
+  if (!perspectiveValue) return src;
+  const dst = _getScratch("B", w, h);
+  const dctx = dst.getContext("2d");
+  dctx.clearRect(0, 0, w, h);
+
+  const skew = (perspectiveValue / 100) * 0.5;
+  const overallScale = 1 / (1 - Math.abs(skew) / 2);
+  const STRIPS = Math.min(h, 240);
+  const stripH = h / STRIPS;
+
+  for (let i = 0; i < STRIPS; i++) {
+    const t = (i + 0.5) / STRIPS;
+    const rowScale = (1 + skew * (t - 0.5)) * overallScale;
+    const rowY = i * stripH;
+    const drawW = w * rowScale;
+    const drawX = (w - drawW) / 2;
+    dctx.drawImage(src, 0, rowY, w, stripH, drawX, rowY, drawW, stripH + 1);
+  }
+  return dst;
+}
+
+// Straightens the image by rotationDeg, scaling up just enough that the
+// rotated frame still fully covers the canvas (no empty corners).
+function applyRotation(ctx, src, w, h, rotationDeg) {
+  if (!rotationDeg) { ctx.clearRect(0, 0, w, h); ctx.drawImage(src, 0, 0, w, h); return; }
 
   const rad = rotationDeg * Math.PI / 180;
   const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
@@ -18154,7 +18192,7 @@ function applyRotation(ctx, imageData, rotationDeg) {
   ctx.translate(w / 2, h / 2);
   ctx.rotate(rad);
   ctx.scale(scale, scale);
-  ctx.drawImage(scratch, -w / 2, -h / 2, w, h);
+  ctx.drawImage(src, -w / 2, -h / 2, w, h);
   ctx.restore();
 }
 
@@ -18418,15 +18456,28 @@ function App() {
   const [imgStats,  setImgStats]  = useState(null);
   const [saveModal, setSaveModal] = useState(false);
   const [saveDataUrl,setSaveDataUrl]=useState(null);
+  const [exportDims,setExportDims]=useState(null);
+  // Normalized crop rect (0..1) -- dragged directly on the preview photo,
+  // applied only at export time so it stays non-destructive like the
+  // other adjustments.
+  const [crop,      setCrop]      = useState({ x: 0, y: 0, w: 1, h: 1 });
 
   useEffect(()=>{ hdrRef.current=activeHDR; },[activeHDR]);
 
-  // Render on every adj change
+  // Render on every adj change. Coalesced to one render per animation frame
+  // so rapid-fire slider drag events (which can outpace processPixels'
+  // per-pixel cost) don't queue up a backlog of stale renders.
   useEffect(()=>{
     if (!img||!canvasRef.current) return;
     const ctx=canvasRef.current.getContext("2d");
     if (comparing) { ctx.putImageData(img,0,0); return; }
-    applyRotation(ctx, processPixels(img, adj, statsRef.current), adj.rotation);
+    const raf = requestAnimationFrame(()=>{
+      const processed = processPixels(img, adj, statsRef.current);
+      const w = processed.width, h = processed.height;
+      const warped = applyPerspective(imageDataToCanvas(processed), w, h, adj.perspective);
+      applyRotation(ctx, warped, w, h, adj.rotation);
+    });
+    return ()=>cancelAnimationFrame(raf);
   },[adj,img,comparing]);
 
   const showToast=useCallback((msg)=>{
@@ -18485,6 +18536,7 @@ function App() {
       setAutoHDR(bestHDR);
 
       setImg(prevData); setAdj(blankAdj()); setFixes({}); setAnalysis(null);
+      setCrop({ x: 0, y: 0, w: 1, h: 1 });
       setAnalyzed(false); setHistory([]); setActiveAdj(null);
       setActiveHDR(null); hdrRef.current=null;
 
@@ -18611,6 +18663,7 @@ function App() {
   const reset=()=>{
     saveHist(); setAdj(blankAdj()); setFixes({});
     setActiveHDR(null); hdrRef.current=null; setActiveAdj(null); showToast("Reset");
+    setCrop({ x: 0, y: 0, w: 1, h: 1 });
   };
   const exportImg=()=>{
     if(!img) return;
@@ -18622,8 +18675,29 @@ function App() {
     offscreen.height=srcData.height;
     const octx=offscreen.getContext("2d");
     const processed=processPixels(srcData, adj, srcStats);
-    applyRotation(octx, processed, adj.rotation);
-    const dataUrl=offscreen.toDataURL("image/jpeg",0.96);
+    const expW=processed.width, expH=processed.height;
+    const expWarped=applyPerspective(imageDataToCanvas(processed), expW, expH, adj.perspective);
+    applyRotation(octx, expWarped, expW, expH, adj.rotation);
+
+    // Crop is applied last, as a non-destructive framing step on the fully
+    // processed/rotated/warped result, matching what the on-photo crop
+    // handles show relative to the rest of the pipeline.
+    const hasCrop = crop.x>0 || crop.y>0 || crop.w<1 || crop.h<1;
+    let dataUrl;
+    if (hasCrop) {
+      const cropPx = {
+        x: Math.round(crop.x*expW), y: Math.round(crop.y*expH),
+        w: Math.max(1, Math.round(crop.w*expW)), h: Math.max(1, Math.round(crop.h*expH)),
+      };
+      const cropCv=document.createElement("canvas");
+      cropCv.width=cropPx.w; cropCv.height=cropPx.h;
+      cropCv.getContext("2d").drawImage(offscreen, cropPx.x, cropPx.y, cropPx.w, cropPx.h, 0, 0, cropPx.w, cropPx.h);
+      dataUrl=cropCv.toDataURL("image/jpeg",0.96);
+      setExportDims({ width: cropPx.w, height: cropPx.h });
+    } else {
+      dataUrl=offscreen.toDataURL("image/jpeg",0.96);
+      setExportDims({ width: expW, height: expH });
+    }
     setSaveDataUrl(dataUrl);
     setSaveModal(true);
   };
@@ -18638,7 +18712,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
             React.createElement("span",{style:{fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:8,background:activePre.color+"22",color:activePre.color,border:"1px solid "+activePre.color+"44"}},"HDR",activePre.label)
           )),React.createElement("div",{style:{display:"flex",gap:6,alignItems:"center",overflowX:"auto",overflowY:"hidden",scrollbarWidth:"none",minWidth:0,flexShrink:1}},analyzed&&analysis&&(
             React.createElement("button",{onClick:()=>{clearTimeout(modalAutoCloseRef.current);setModal(true);},title:"Show analyze & correction summary",style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(99,102,241,0.35)",background:"rgba(99,102,241,0.08)",color:"#a5b4fc",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:5}},React.createElement("span",{style:{width:5,height:5,borderRadius:"50%",background:"#a5b4fc",display:"inline-block"}}),"Summary")
-          ),React.createElement(Btn,{onClick:undo,disabled:!history.length},"Undo"),React.createElement(Btn,{onClick:reset,disabled:!img},"Reset"),img&&React.createElement("button",{style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(99,102,241,0.35)",background:comparing?"rgba(99,102,241,0.2)":"rgba(99,102,241,0.08)",color:"#a5b4fc",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",flexShrink:0},onMouseDown:()=>setComparing(true),onMouseUp:()=>setComparing(false),onTouchStart:()=>setComparing(true),onTouchEnd:()=>setComparing(false)},comparing?"Original":"Compare")),React.createElement("div",{style:{flexShrink:0,marginLeft:6}},React.createElement(Btn,{onClick:exportImg,disabled:!img,accent:true},"Save"))),React.createElement("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden",background:"#020408",cursor:!img?"pointer":"default",minHeight:0},onClick:!img?()=>fileRef.current&&fileRef.current.click():undefined},React.createElement("canvas",{ref:canvasRef,style:{maxWidth:"100%",maxHeight:"100%",height:"auto",width:"auto",display:img?"block":"none",borderRadius:3}}),!img&&(
+          ),React.createElement(Btn,{onClick:undo,disabled:!history.length},"Undo"),React.createElement(Btn,{onClick:reset,disabled:!img},"Reset"),img&&React.createElement("button",{style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(99,102,241,0.35)",background:comparing?"rgba(99,102,241,0.2)":"rgba(99,102,241,0.08)",color:"#a5b4fc",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",flexShrink:0},onMouseDown:()=>setComparing(true),onMouseUp:()=>setComparing(false),onTouchStart:()=>setComparing(true),onTouchEnd:()=>setComparing(false)},comparing?"Original":"Compare")),React.createElement("div",{style:{flexShrink:0,marginLeft:6}},React.createElement(Btn,{onClick:exportImg,disabled:!img,accent:true},"Save"))),React.createElement("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden",background:"#020408",cursor:!img?"pointer":"default",minHeight:0},onClick:!img?()=>fileRef.current&&fileRef.current.click():undefined},React.createElement("div",{style:{position:"relative",display:img?"inline-block":"none",maxWidth:"100%",maxHeight:"100%"}},React.createElement("canvas",{ref:canvasRef,style:{maxWidth:"100%",maxHeight:"100%",height:"auto",width:"auto",display:"block",borderRadius:3}}),img&&!comparing&&React.createElement(TransformOverlay,{crop,setCrop,rotation:adj.rotation||0,onRotation:v=>setAdj(p=>({...p,rotation:v})),perspective:adj.perspective||0,onPerspective:v=>setAdj(p=>({...p,perspective:v}))})),!img&&(
           React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",gap:14,animation:"fadeIn 0.4s"}},React.createElement("div",{style:{width:80,height:80,borderRadius:20,border:"2px dashed rgba(99,102,241,0.3)",background:"rgba(99,102,241,0.05)",display:"flex",alignItems:"center",justifyContent:"center"}},React.createElement("div",{style:{width:36,height:28,border:"3px solid rgba(99,102,241,0.5)",borderRadius:5,position:"relative"}},React.createElement("div",{style:{position:"absolute",top:-7,left:"50%",transform:"translateX(-50%)",width:12,height:7,background:"rgba(99,102,241,0.5)",borderRadius:"3px 3px 0 0"}}),React.createElement("div",{style:{position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",width:12,height:12,borderRadius:"50%",border:"2px solid rgba(99,102,241,0.7)"}}))),React.createElement("div",{style:{textAlign:"center"}},React.createElement("p",{style:{fontWeight:700,fontSize:15,color:"#cbd5e1",marginBottom:5}},"Open a photo to begin"),React.createElement("p",{style:{fontSize:12,color:"#475569",lineHeight:1.6}},"Auto HDR detection + AI white balance + sky clarity")),React.createElement("button",{onClick:e=>{e.stopPropagation();fileRef.current&&fileRef.current.click();},style:{padding:"9px 22px",borderRadius:20,border:"1px solid rgba(99,102,241,0.4)",background:"rgba(99,102,241,0.1)",color:"#a5b4fc",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Open Photo"))
         ),img&&(
           React.createElement("div",{style:{position:"absolute",top:10,left:10,display:"flex",flexDirection:"column",gap:5}},autoHDR&&autoPre&&(
@@ -18670,7 +18744,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
                 ):null;
               })(),React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,padding:"8px 12px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.18)",borderRadius:10}},React.createElement("span",{style:{fontSize:13}},"OK"),React.createElement("span",{style:{fontSize:12,color:"#86efac"}},"Corrections and HDR applied -- tap outside or swipe down to dismiss")))))
       ),saveModal && saveDataUrl && (
-        React.createElement("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.96)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",zIndex:80,padding:16,paddingTop:"calc(16px + env(safe-area-inset-top))",paddingBottom:"calc(16px + env(safe-area-inset-bottom))",gap:12,boxSizing:"border-box"}},React.createElement("div",{style:{width:"100%",maxWidth:480,display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}},React.createElement("div",null,React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:800,fontSize:17,color:"#f1f5f9"}},"Full Resolution Export"),React.createElement("div",{style:{fontSize:11,color:"#475569",marginTop:2}},fullResRef.current ? fullResRef.current.width + " x " + fullResRef.current.height + " px  (" + ((fullResRef.current.width*fullResRef.current.height)/1000000).toFixed(1) + "MP)" : "","-- JPEG 96%")),React.createElement("button",{onClick:()=>setSaveModal(false),style:{padding:"6px 14px",borderRadius:10,border:"1px solid rgba(255,255,255,0.1)",background:"rgba(255,255,255,0.05)",color:"#94a3b8",cursor:"pointer",fontSize:12,fontWeight:600,fontFamily:"inherit"}},"Close")),React.createElement("div",{style:{width:"100%",maxWidth:480,flex:1,minHeight:0,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:12,overflow:"hidden",border:"1px solid rgba(255,255,255,0.1)",background:"#020408",boxShadow:"0 16px 64px rgba(0,0,0,0.8)"}},React.createElement("img",{src:saveDataUrl,alt:"Right-click or long-press to Save Image",style:{maxWidth:"100%",maxHeight:"58vh",objectFit:"contain",display:"block",cursor:"context-menu"}})),React.createElement("div",{style:{width:"100%",maxWidth:480,background:"rgba(99,102,241,0.08)",border:"1px solid rgba(99,102,241,0.2)",borderRadius:12,padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}},React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:700,fontSize:12,color:"#a5b4fc",marginBottom:2}},"How to save:"),React.createElement("div",{style:{display:"flex",alignItems:"flex-start",gap:10}},React.createElement("div",{style:{width:22,height:22,borderRadius:6,background:"rgba(99,102,241,0.2)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,color:"#818cf8",flexShrink:0}},"D"),React.createElement("div",{style:{fontSize:12,color:"#94a3b8",lineHeight:1.5}},"Desktop -- Right-click the photo above and choose Save Image As")),React.createElement("div",{style:{display:"flex",alignItems:"flex-start",gap:10}},React.createElement("div",{style:{width:22,height:22,borderRadius:6,background:"rgba(99,102,241,0.2)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,color:"#818cf8",flexShrink:0}},"M"),React.createElement("div",{style:{fontSize:12,color:"#94a3b8",lineHeight:1.5}},"Mobile -- Long-press the photo above then tap Add to Photos or Save Image")),React.createElement("div",{style:{display:"flex",alignItems:"flex-start",gap:10}},React.createElement("div",{style:{width:22,height:22,borderRadius:6,background:"rgba(34,197,94,0.15)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,color:"#22c55e",flexShrink:0}},"i"),React.createElement("div",{style:{fontSize:12,color:"#64748b",lineHeight:1.5}},"Full resolution:",fullResRef.current ? fullResRef.current.width + "x" + fullResRef.current.height + " px -- JPEG 96%" : ""))))
+        React.createElement("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.96)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",zIndex:80,padding:16,paddingTop:"calc(16px + env(safe-area-inset-top))",paddingBottom:"calc(16px + env(safe-area-inset-bottom))",gap:12,boxSizing:"border-box"}},React.createElement("div",{style:{width:"100%",maxWidth:480,display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}},React.createElement("div",null,React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:800,fontSize:17,color:"#f1f5f9"}},"Full Resolution Export"),React.createElement("div",{style:{fontSize:11,color:"#475569",marginTop:2}},exportDims ? exportDims.width + " x " + exportDims.height + " px  (" + ((exportDims.width*exportDims.height)/1000000).toFixed(1) + "MP)" : "","-- JPEG 96%")),React.createElement("button",{onClick:()=>setSaveModal(false),style:{padding:"6px 14px",borderRadius:10,border:"1px solid rgba(255,255,255,0.1)",background:"rgba(255,255,255,0.05)",color:"#94a3b8",cursor:"pointer",fontSize:12,fontWeight:600,fontFamily:"inherit"}},"Close")),React.createElement("div",{style:{width:"100%",maxWidth:480,flex:1,minHeight:0,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:12,overflow:"hidden",border:"1px solid rgba(255,255,255,0.1)",background:"#020408",boxShadow:"0 16px 64px rgba(0,0,0,0.8)"}},React.createElement("img",{src:saveDataUrl,alt:"Right-click or long-press to Save Image",style:{maxWidth:"100%",maxHeight:"58vh",objectFit:"contain",display:"block",cursor:"context-menu"}})),React.createElement("div",{style:{width:"100%",maxWidth:480,background:"rgba(99,102,241,0.08)",border:"1px solid rgba(99,102,241,0.2)",borderRadius:12,padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}},React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:700,fontSize:12,color:"#a5b4fc",marginBottom:2}},"How to save:"),React.createElement("div",{style:{display:"flex",alignItems:"flex-start",gap:10}},React.createElement("div",{style:{width:22,height:22,borderRadius:6,background:"rgba(99,102,241,0.2)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,color:"#818cf8",flexShrink:0}},"D"),React.createElement("div",{style:{fontSize:12,color:"#94a3b8",lineHeight:1.5}},"Desktop -- Right-click the photo above and choose Save Image As")),React.createElement("div",{style:{display:"flex",alignItems:"flex-start",gap:10}},React.createElement("div",{style:{width:22,height:22,borderRadius:6,background:"rgba(99,102,241,0.2)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,color:"#818cf8",flexShrink:0}},"M"),React.createElement("div",{style:{fontSize:12,color:"#94a3b8",lineHeight:1.5}},"Mobile -- Long-press the photo above then tap Add to Photos or Save Image")),React.createElement("div",{style:{display:"flex",alignItems:"flex-start",gap:10}},React.createElement("div",{style:{width:22,height:22,borderRadius:6,background:"rgba(34,197,94,0.15)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,color:"#22c55e",flexShrink:0}},"i"),React.createElement("div",{style:{fontSize:12,color:"#64748b",lineHeight:1.5}},"Full resolution:",exportDims ? exportDims.width + "x" + exportDims.height + " px -- JPEG 96%" : ""))))
       ),toast&&React.createElement("div",{style:{position:"fixed",bottom:68,left:"50%",transform:"translateX(-50%)",background:"rgba(13,18,32,0.97)",backdropFilter:"blur(12px)",border:"1px solid "+BORD,borderRadius:20,padding:"8px 18px",fontSize:12,fontWeight:600,whiteSpace:"nowrap",zIndex:100,boxShadow:"0 6px 20px rgba(0,0,0,0.4)",animation:"slideUp 0.25s ease-out"}},toast)));
 }
 
@@ -18682,6 +18756,104 @@ function Btn({children,onClick,disabled,accent}){
 }
 function Spin(){
   return React.createElement("span",{style:{width:10,height:10,borderRadius:"50%",border:"2px solid rgba(255,255,255,0.2)",borderTopColor:"#fff",display:"inline-block",animation:"spin 0.5s linear infinite"}});
+}
+
+// Direct-manipulation overlay drawn on top of the preview canvas: drag the
+// crop box/handles to frame the shot, the pill below it to straighten, and
+// the pill above it for perspective -- replaces the old Rotation/Perspective
+// slider chips so these are edited on the photo itself, not a separate control.
+function TransformOverlay({crop,setCrop,rotation,onRotation,perspective,onPerspective}){
+  const wrapRef = useRef(null);
+  const dragRef = useRef(null);
+
+  const onMove = useCallback((e)=>{
+    const d = dragRef.current;
+    if (!d) return;
+    if (d.type === "rotate") {
+      const deg = Math.max(-45, Math.min(45, Math.round(d.startVal + (e.clientX - d.startClientX) / 4)));
+      onRotation(deg);
+      return;
+    }
+    if (d.type === "perspective") {
+      const val = Math.max(-100, Math.min(100, Math.round(d.startVal + (e.clientX - d.startClientX) / 2)));
+      onPerspective(val);
+      return;
+    }
+    const rect = d.rect;
+    const nx = (e.clientX - rect.left) / rect.width;
+    const ny = (e.clientY - rect.top) / rect.height;
+    const dx = nx - d.startNX, dy = ny - d.startNY;
+    const MIN = 0.1;
+    const sc = d.startCrop;
+    let {x,y,w,h} = sc;
+    if (d.type === "move") {
+      x = Math.max(0, Math.min(1 - sc.w, sc.x + dx));
+      y = Math.max(0, Math.min(1 - sc.h, sc.y + dy));
+    } else {
+      if (d.type.includes("l")) { x = Math.max(0, Math.min(sc.x + sc.w - MIN, sc.x + dx)); w = sc.x + sc.w - x; }
+      if (d.type.includes("r")) { w = Math.max(MIN, Math.min(1 - sc.x, sc.w + dx)); }
+      if (d.type.includes("t")) { y = Math.max(0, Math.min(sc.y + sc.h - MIN, sc.y + dy)); h = sc.y + sc.h - y; }
+      if (d.type.includes("b")) { h = Math.max(MIN, Math.min(1 - sc.y, sc.h + dy)); }
+    }
+    setCrop({x,y,w,h});
+  },[onRotation,onPerspective,setCrop]);
+
+  const onUp = useCallback(()=>{ dragRef.current = null; },[]);
+
+  useEffect(()=>{
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return ()=>{ window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); };
+  },[onMove,onUp]);
+
+  const startDrag = (type) => (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const rect = wrapRef.current.getBoundingClientRect();
+    dragRef.current = {
+      type, rect,
+      startClientX: e.clientX, startClientY: e.clientY,
+      startNX: (e.clientX-rect.left)/rect.width, startNY: (e.clientY-rect.top)/rect.height,
+      startCrop: crop, startVal: type==="rotate" ? rotation : perspective,
+    };
+  };
+
+  const handle = (leftPct,topPct,cursor,type) => React.createElement("div",{
+    onPointerDown:startDrag(type),
+    style:{position:"absolute",left:leftPct+"%",top:topPct+"%",width:18,height:18,marginLeft:-9,marginTop:-9,
+      borderRadius:"50%",background:"#fff",border:"2px solid #6366f1",cursor,touchAction:"none",zIndex:5,pointerEvents:"auto"}
+  });
+
+  const cx = (crop.x + crop.w/2)*100, cy = (crop.y + crop.h/2)*100;
+  const left=crop.x*100, top=crop.y*100, right=(crop.x+crop.w)*100, bottom=(crop.y+crop.h)*100;
+  const mask = "rgba(0,0,0,0.55)";
+
+  return React.createElement("div",{ref:wrapRef,style:{position:"absolute",inset:0,pointerEvents:"none"}},
+    React.createElement("div",{style:{position:"absolute",left:0,top:0,right:0,height:top+"%",background:mask}}),
+    React.createElement("div",{style:{position:"absolute",left:0,top:bottom+"%",right:0,bottom:0,background:mask}}),
+    React.createElement("div",{style:{position:"absolute",left:0,top:top+"%",width:left+"%",height:crop.h*100+"%",background:mask}}),
+    React.createElement("div",{style:{position:"absolute",left:right+"%",top:top+"%",right:0,height:crop.h*100+"%",background:mask}}),
+    React.createElement("div",{
+      onPointerDown:startDrag("move"),
+      style:{position:"absolute",left:left+"%",top:top+"%",width:crop.w*100+"%",height:crop.h*100+"%",
+        border:"1.5px solid rgba(255,255,255,0.9)",cursor:"move",pointerEvents:"auto",touchAction:"none"}
+    }),
+    handle(left,top,"nwse-resize","tl"), handle(right,top,"nesw-resize","tr"),
+    handle(left,bottom,"nesw-resize","bl"), handle(right,bottom,"nwse-resize","br"),
+    handle(cx,top,"ns-resize","t"), handle(cx,bottom,"ns-resize","b"),
+    handle(left,cy,"ew-resize","l"), handle(right,cy,"ew-resize","r"),
+    React.createElement("div",{
+      onPointerDown:startDrag("rotate"),
+      style:{position:"absolute",left:cx+"%",top:bottom+"%",transform:"translate(-50%,-130%)",
+        padding:"4px 10px",borderRadius:12,background:"rgba(165,243,252,0.92)",color:"#0c4a6e",fontSize:10,
+        fontWeight:800,cursor:"ew-resize",pointerEvents:"auto",touchAction:"none",whiteSpace:"nowrap",userSelect:"none"}
+    },"⟲ "+(rotation>0?"+":"")+rotation+"°"),
+    React.createElement("div",{
+      onPointerDown:startDrag("perspective"),
+      style:{position:"absolute",left:cx+"%",top:top+"%",transform:"translate(-50%,30%)",
+        padding:"4px 10px",borderRadius:12,background:"rgba(148,163,184,0.92)",color:"#0f172a",fontSize:10,
+        fontWeight:800,cursor:"ew-resize",pointerEvents:"auto",touchAction:"none",whiteSpace:"nowrap",userSelect:"none"}
+    },"▱ "+(perspective>0?"+":"")+perspective)
+  );
 }
 
 </script>
