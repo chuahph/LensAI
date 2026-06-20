@@ -18016,7 +18016,12 @@ function processPixels(src, adj, imgStats) {
       const sv = adj.shadows / 100;
       // Tier 1: near-black (0-20%) - strong lift to reveal blocked detail
       const nearBlack = Math.max(0, (0.20-lumN)/0.20);
-      const tier1 = sv * Math.pow(nearBlack, 0.85) * 55;
+      // Taper to zero at true black (blackAnchor) so lifting shadow *detail*
+      // doesn't drag the black point itself up off zero -- a lifted black
+      // point reads as a milky/whitish veil. Also reduced from *55 to *40 so
+      // the overall shadow lift is gentler.
+      const blackAnchor = Math.min(1, lumN/0.05); // 0 at pure black -> 1 by ~luma 13
+      const tier1 = sv * Math.pow(nearBlack, 0.85) * 40 * blackAnchor;
       // Tier 2: mid-dark (20-60%) - moderate lift for shadow detail
       const midDark = Math.max(0, (0.60-lumN)/0.60);
       const tier2 = sv * Math.pow(midDark, 1.20) * 30;
@@ -18164,7 +18169,13 @@ function processPixels(src, adj, imgStats) {
           const blur2=(orig[idx-o2+c]+orig[idx+o2+c]+orig[idx-w*o2+c]+orig[idx+w*o2+c]+
                        orig[idx-w*o2-o2+c]+orig[idx-w*o2+o2+c]+orig[idx+w*o2-o2+c]+orig[idx+w*o2+o2+c]+orig[idx+c]*2)/10;
           const blur1=(orig[idx-o1+c]+orig[idx+o1+c]+orig[idx-w*o1+c]+orig[idx+w*o1+c]+orig[idx+c]*4)/8;
-          const edge=(orig[idx+c]-blur2)*sf*0.55+(orig[idx+c]-blur1)*sf*0.45;
+          let edge=(orig[idx+c]-blur2)*sf*0.55+(orig[idx+c]-blur1)*sf*0.45;
+          // Damp the bright-side overshoot harder than the dark side and cap
+          // the absolute edge: the positive overshoot on the light side of an
+          // edge is what blooms into a whitish halo/glow. The darkening side
+          // adds depth without whitishness, so it keeps more of its range.
+          if (edge>0) edge*=0.6;
+          edge = edge<-22 ? -22 : (edge>14 ? 14 : edge);
           out[idx+c]=clamp(orig[idx+c]+edge);
         }
       }
