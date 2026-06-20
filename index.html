@@ -18549,6 +18549,16 @@ function App() {
 
   useEffect(()=>{ hdrRef.current=activeHDR; },[activeHDR]);
 
+  // Caches the last processPixels() result keyed on every adj field except
+  // rotation/perspective, which are pure post-processing geometric warps
+  // (applyPerspective/applyRotation below) that never feed back into
+  // processPixels itself. Without this, dragging the on-photo rotate or
+  // perspective pill re-ran the entire per-pixel pipeline (dehaze, noise
+  // reduction, sky enhancement, ...) on every pointermove tick, which is
+  // far too slow to keep up with a live drag and made the gesture feel
+  // stuttery instead of smooth.
+  const processedCacheRef = useRef({ img: null, key: "", data: null });
+
   // Render on every adj change. Coalesced to one render per animation frame
   // so rapid-fire slider drag events (which can outpace processPixels'
   // per-pixel cost) don't queue up a backlog of stale renders.
@@ -18557,10 +18567,19 @@ function App() {
     const ctx=canvasRef.current.getContext("2d");
     if (comparing) { ctx.putImageData(img,0,0); return; }
     const raf = requestAnimationFrame(()=>{
-      const processed = processPixels(img, adj, statsRef.current);
+      const { rotation, perspective, ...restAdj } = adj;
+      const key = JSON.stringify(restAdj);
+      const cache = processedCacheRef.current;
+      let processed;
+      if (cache.img === img && cache.key === key) {
+        processed = cache.data;
+      } else {
+        processed = processPixels(img, adj, statsRef.current);
+        processedCacheRef.current = { img, key, data: processed };
+      }
       const w = processed.width, h = processed.height;
-      const warped = applyPerspective(imageDataToCanvas(processed), w, h, adj.perspective);
-      applyRotation(ctx, warped, w, h, adj.rotation);
+      const warped = applyPerspective(imageDataToCanvas(processed), w, h, perspective);
+      applyRotation(ctx, warped, w, h, rotation);
     });
     return ()=>cancelAnimationFrame(raf);
   },[adj,img,comparing]);
