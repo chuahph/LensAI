@@ -18136,6 +18136,28 @@ function processPixels(src, adj, imgStats) {
   return new ImageData(out, w, h);
 }
 
+// Straightens the image by rotationDeg, scaling up just enough that the
+// rotated frame still fully covers the canvas (no empty corners).
+function applyRotation(ctx, imageData, rotationDeg) {
+  const w = imageData.width, h = imageData.height;
+  if (!rotationDeg) { ctx.putImageData(imageData, 0, 0); return; }
+  const scratch = document.createElement("canvas");
+  scratch.width = w; scratch.height = h;
+  scratch.getContext("2d").putImageData(imageData, 0, 0);
+
+  const rad = rotationDeg * Math.PI / 180;
+  const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
+  const scale = Math.max((w*cos + h*sin) / w, (w*sin + h*cos) / h);
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate(rad);
+  ctx.scale(scale, scale);
+  ctx.drawImage(scratch, -w / 2, -h / 2, w, h);
+  ctx.restore();
+}
+
 // ============================================================
 // AUTO HDR SELECTION based on image analysis
 // ============================================================
@@ -18404,7 +18426,7 @@ function App() {
     if (!img||!canvasRef.current) return;
     const ctx=canvasRef.current.getContext("2d");
     if (comparing) { ctx.putImageData(img,0,0); return; }
-    ctx.putImageData(processPixels(img, adj, statsRef.current), 0, 0);
+    applyRotation(ctx, processPixels(img, adj, statsRef.current), adj.rotation);
   },[adj,img,comparing]);
 
   const showToast=useCallback((msg)=>{
@@ -18600,7 +18622,7 @@ function App() {
     offscreen.height=srcData.height;
     const octx=offscreen.getContext("2d");
     const processed=processPixels(srcData, adj, srcStats);
-    octx.putImageData(processed,0,0);
+    applyRotation(octx, processed, adj.rotation);
     const dataUrl=offscreen.toDataURL("image/jpeg",0.96);
     setSaveDataUrl(dataUrl);
     setSaveModal(true);
