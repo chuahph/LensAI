@@ -18864,13 +18864,16 @@ function App() {
       const stem=(origFileName||"photo").replace(/\.[^/.]+$/,"");
       const filename=stem+"-edited-"+Date.now()+".jpg";
 
-      // On mobile, a plain anchor download lands in the Files/Downloads app,
-      // not Photos -- the OS share sheet's "Save Image"/"Save to Photos"
-      // action is the only way a web page can get a file into the actual
-      // photo library. Desktop has no such share sheet, so it always falls
-      // through to a direct download.
-      const isMobile=/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-      if (isMobile && navigator.share && navigator.canShare) {
+      // On iOS, a plain anchor download lands in the Files app, not Photos --
+      // the OS share sheet's "Save Image" action is the only way a web page
+      // can get a file into the actual photo library. Android's share sheet
+      // has no equivalent reliable "save to gallery" target (it varies by
+      // OEM/launcher and often just re-offers the same file picker), so
+      // Android keeps the plain download, which already lands in a
+      // user-visible Downloads folder. Desktop has no share sheet either,
+      // so both always fall through to a direct download.
+      const isIOS=/iPhone|iPad|iPod/i.test(navigator.userAgent);
+      if (isIOS && navigator.share && navigator.canShare) {
         try {
           const file=new File([blob], filename, { type: "image/jpeg" });
           if (navigator.canShare({ files: [file] })) {
