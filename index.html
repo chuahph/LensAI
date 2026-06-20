@@ -17831,9 +17831,23 @@ function dehazePass(out, w, h, strength) {
     const rrC=clamp(Math.min(rr, r*1.05+5)); // max 5% brighter
     const rgC=clamp(Math.min(rg, g*1.05+5));
     const rbC=clamp(Math.min(rb, b*1.05+5));
-    out[i]  =Math.round(r*(1-blendF)+rrC*blendF);
-    out[i+1]=Math.round(g*(1-blendF)+rgC*blendF);
-    out[i+2]=Math.round(b*(1-blendF)+rbC*blendF);
+    // Recovery divides each channel's delta-from-atmosphere by the SAME
+    // transmission t, which amplifies any tiny pre-existing R/G/B imbalance
+    // by 1/t (up to ~8x at strong dehaze). Correct physics for real haze,
+    // but on a near-neutral subject (clouds, concrete, paper) this
+    // manufactures a colour cast that wasn't there. Pull the recovered
+    // channels back toward their mean in proportion to how little chroma
+    // the original pixel actually had, preserving genuine colour casts
+    // (real haze, warm/cool subjects) while keeping neutral subjects neutral.
+    const origChroma=Math.max(r,g,b)-Math.min(r,g,b);
+    const chromaGate=Math.min(1, origChroma/30);
+    const meanC=(rrC+rgC+rbC)/3;
+    const rrG=meanC+(rrC-meanC)*chromaGate;
+    const rgG=meanC+(rgC-meanC)*chromaGate;
+    const rbG=meanC+(rbC-meanC)*chromaGate;
+    out[i]  =Math.round(r*(1-blendF)+rrG*blendF);
+    out[i+1]=Math.round(g*(1-blendF)+rgG*blendF);
+    out[i+2]=Math.round(b*(1-blendF)+rbG*blendF);
   }
 
   // Step 3: Clarity boost on mid-bright pixels (saturation + micro-contrast)
@@ -17850,9 +17864,17 @@ function dehazePass(out, w, h, strength) {
     const isSkyLike = b0 > r0*1.02 && b0 >= g0*0.90;
     if (isSkyLike) continue;
     const gray=0.2126*r0+0.7152*g0+0.0722*b0;
-    out[i]  =clamp(gray+satF*(r0-gray));
-    out[i+1]=clamp(gray+satF*(g0-gray));
-    out[i+2]=clamp(gray+satF*(b0-gray));
+    // Near-neutral pixels (clouds, concrete, paper) carry only tiny R/G/B
+    // imbalances from noise or anti-aliasing. Boosting saturation
+    // proportionally on them amplifies that imbalance into a visible colour
+    // cast instead of adding real "pop" -- ramp the boost in by how much
+    // chroma the pixel actually has so neutral pixels stay neutral while
+    // genuinely colourful midtones still get the full clarity boost.
+    const chroma = Math.max(r0,g0,b0) - Math.min(r0,g0,b0);
+    const satFEff = 1 + (satF-1)*Math.min(1, chroma/40);
+    out[i]  =clamp(gray+satFEff*(r0-gray));
+    out[i+1]=clamp(gray+satFEff*(g0-gray));
+    out[i+2]=clamp(gray+satFEff*(b0-gray));
   }
 }
 
@@ -18067,16 +18089,27 @@ function processPixels(src, adj, imgStats) {
     dehazePass(out, w, h, adj.dehaze*dehazeScale);
   }
 
-  // 11. Structure - edge-gated texture enhancement, damped on
-  // high-contrast scenes (was compounding with scene's own contrast)
+  // 11. Structure - broad-radius local-contrast ("clarity") pop, damped on
+  // high-contrast scenes (was compounding with scene's own contrast).
+  // Uses a much wider sampling radius than Sharpening's 1-2px unsharp mask
+  // (below) -- at the old 1-2px radius Structure was nearly a duplicate of
+  // Sharpening's fine pass. A real clarity effect reads as midtone
+  // punch/depth across broader shapes, not edge crispness, so the local
+  // average it subtracts against needs to span enough pixels to capture
+  // that (radius ~4px / ~9px) instead of just neighbouring pixels.
   if (adj.structure>0) {
     const structScale = (imgStats && imgStats.contrast>65) ? 0.55 : 1.0;
     const sfBase = (adj.structure/100)*2.0*structScale;
     const orig=new Uint8ClampedArray(out);
-    for (let y=2;y<h-2;y++) {
-      for (let x=2;x<w-2;x++) {
+    const R1=4, R2=9; // local-contrast radii in pixels
+    const o1=R1*4, o2=R2*4;
+    const margin=R2+1;
+    for (let y=margin;y<h-margin;y++) {
+      for (let x=margin;x<w-margin;x++) {
         const idx=(y*w+x)*4;
-        // Compute luma edge to gate the effect
+        // Compute luma edge (small radius) to gate the effect -- this just
+        // detects "is there any local detail here", not the broad blur used
+        // for the actual clarity boost below.
         const lumC=orig[idx]*0.299+orig[idx+1]*0.587+orig[idx+2]*0.114;
         const lumB=(orig[idx-4]*0.299+orig[idx-3]*0.587+orig[idx-2]*0.114+
                     orig[idx+4]*0.299+orig[idx+5]*0.587+orig[idx+6]*0.114+
@@ -18084,14 +18117,14 @@ function processPixels(src, adj, imgStats) {
                     orig[idx+w*4]*0.299+orig[idx+w*4+1]*0.587+orig[idx+w*4+2]*0.114+lumC*2)/6;
         const lumaEdge=Math.abs(lumC-lumB);
         // Skip flat areas (noise) and very dark pixels
-        if (lumaEdge<1.8||lumC<10) continue;
+        if (lumaEdge<1.2||lumC<10) continue;
         // Edge strength gates the sf: stronger on strong edges
         const edgeMask=Math.min(1.0, lumaEdge/12.0);
         const sf=sfBase*(0.5+edgeMask*0.5); // 0.5x on weak edges, 1.0x on strong
         for (let c=0;c<3;c++) {
-          const blur2=(orig[idx-8+c]+orig[idx+8+c]+orig[idx-w*8+c]+orig[idx+w*8+c]+
-                       orig[idx-w*8-8+c]+orig[idx-w*8+8+c]+orig[idx+w*8-8+c]+orig[idx+w*8+8+c]+orig[idx+c]*2)/10;
-          const blur1=(orig[idx-4+c]+orig[idx+4+c]+orig[idx-w*4+c]+orig[idx+w*4+c]+orig[idx+c]*4)/8;
+          const blur2=(orig[idx-o2+c]+orig[idx+o2+c]+orig[idx-w*o2+c]+orig[idx+w*o2+c]+
+                       orig[idx-w*o2-o2+c]+orig[idx-w*o2+o2+c]+orig[idx+w*o2-o2+c]+orig[idx+w*o2+o2+c]+orig[idx+c]*2)/10;
+          const blur1=(orig[idx-o1+c]+orig[idx+o1+c]+orig[idx-w*o1+c]+orig[idx+w*o1+c]+orig[idx+c]*4)/8;
           const edge=(orig[idx+c]-blur2)*sf*0.55+(orig[idx+c]-blur1)*sf*0.45;
           out[idx+c]=clamp(orig[idx+c]+edge);
         }
@@ -18177,7 +18210,18 @@ function processPixels(src, adj, imgStats) {
         if (Math.abs(edgeCoarse) >= thrCoarse)  gain += edgeCoarse * sfCoarse;
         if (Math.abs(gain) < 0.5) continue;
 
-        const newLum = clamp(lumC+gain);
+        // Halo guard: don't push a pixel's luma past what its immediate
+        // neighbours already span (+ a little headroom for real pop). Unsharp
+        // masking without this clamp blows past the local range on strong
+        // edges, producing the bright/dark fringing ("halos") classic to
+        // over-sharpened photos, especially at high slider values.
+        const n1=orig[idx-4]*0.299+orig[idx-3]*0.587+orig[idx-2]*0.114;
+        const n2=orig[idx+4]*0.299+orig[idx+5]*0.587+orig[idx+6]*0.114;
+        const n3=orig[idx-w*4]*0.299+orig[idx-w*4+1]*0.587+orig[idx-w*4+2]*0.114;
+        const n4=orig[idx+w*4]*0.299+orig[idx+w*4+1]*0.587+orig[idx+w*4+2]*0.114;
+        const localMin=Math.min(lumC,n1,n2,n3,n4), localMax=Math.max(lumC,n1,n2,n3,n4);
+        const headroom=10;
+        const newLum = clamp(Math.max(localMin-headroom, Math.min(localMax+headroom, lumC+gain)));
         if (lumC > 1) {
           const sc = newLum/lumC;
           out[idx]  =clamp(orig[idx]  *sc);
