@@ -18520,12 +18520,16 @@ function autoSelectHDR(stats) {
 
   // Smart HDR wins only when it actually outscores every other preset on
   // its own signals -- no artificial bonus tipping close contests in its
-  // favor against scene presets like nature/urban.
+  // favor against scene presets like nature/urban. It only gets priority
+  // on an exact tie for the top score, since "scene" presets all default
+  // to first-key-wins ordering otherwise.
 
-  // Find highest-scoring preset
+  // Find highest-scoring preset (smartHDR breaks exact ties in its favor)
   let best = "people", bestScore = -1;
   for (const key in scores) {
-    if (scores[key] > bestScore) { bestScore = scores[key]; best = key; }
+    if (scores[key] > bestScore || (scores[key] === bestScore && key === "smartHDR")) {
+      bestScore = scores[key]; best = key;
+    }
   }
   // Require minimum confidence -- otherwise fall back to safe default
   if (bestScore < 15) {
@@ -18767,10 +18771,11 @@ function App() {
   useEffect(()=>{
     if (!img||!comparing||!origCanvasRef.current) return;
     const cv=origCanvasRef.current;
-    const w=img.width, h=img.height;
+    const src=fullResRef.current||img;
+    const w=src.width, h=src.height;
     if (cv.width!==w||cv.height!==h){ cv.width=w; cv.height=h; }
     const ctx=cv.getContext("2d");
-    const warped=applyPerspective(imageDataToCanvas(img), w, h, adj.perspective||0);
+    const warped=applyPerspective(imageDataToCanvas(src), w, h, adj.perspective||0);
     applyRotation(ctx, warped, w, h, adj.rotation||0);
   },[img,comparing,adj.rotation,adj.perspective]);
 
