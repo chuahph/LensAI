@@ -19770,7 +19770,7 @@ function BatchAgent({onClose}){
   const STAGE_LABELS={decode:"Reading photo",analyze:"Analyzing scene",cull:"Checking quality",goal:"Selecting goal",correct:"Computing corrections",enhance:"Applying HDR",render:"Rendering output",qa:"Reviewing result"};
 
   const GOALS=[
-    {id:"fullAuto",label:"Default",desc:"Runs corrections, then checks for a dominant face: if one is found it hands off to Auto-Detect per Photo's full scoring to pick the best-fitting HDR preset; otherwise it goes straight to Smart HDR."},
+    {id:"fullAuto",label:"Auto Select",desc:"Runs corrections, then checks Auto-Detect per Photo's scoring: uses Smart HDR if it scores highest, falls back to Corrections only if a big face is detected and a different preset scored higher, otherwise uses that higher-scoring preset."},
     {id:"auto",label:"Auto-Detect per Photo",desc:"Scores every HDR preset against this specific photo's scene, lighting, and color signals, then applies whichever preset scores highest."},
     {id:"none",label:"Corrections only",desc:"Applies the baseline Correction Agent (exposure, white balance, dehaze, etc.) without layering on any HDR preset."},
     ...HDR_PRESETS.map(h=>({id:h.id,label:h.label,desc:{
