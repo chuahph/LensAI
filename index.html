@@ -19744,8 +19744,8 @@ function BatchAgent({onClose}){
   const STAGE_LABELS={decode:"Reading photo",analyze:"Analyzing scene",cull:"Checking quality",goal:"Selecting goal",correct:"Computing corrections",enhance:"Applying HDR",render:"Rendering output",qa:"Reviewing result"};
 
   const GOALS=[
-    {id:"auto",label:"Auto-detect per photo"},
     {id:"fullAuto",label:"Full Auto-Detect"},
+    {id:"auto",label:"Auto-detect per photo"},
     {id:"none",label:"Corrections only"},
     ...HDR_PRESETS.map(h=>({id:h.id,label:h.label})),
   ];
