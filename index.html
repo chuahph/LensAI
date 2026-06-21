@@ -18872,7 +18872,7 @@ function qaAgent(postStats) {
 }
 
 async function batchProcessFile(file, goalId, onStage, opts) {
-  const { skipFlagged } = opts || {};
+  const { skipFlagged, applyCorrections = true } = opts || {};
   const note = s => onStage && onStage(s);
   note("decode");
   const image = await decodeAgent(file);
@@ -18889,7 +18889,7 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   const hdrId = goalDetectionAgent(goalId, stats);
   note("correct");
   const fallback = buildFallback(stats);
-  const baseAdj = correctionAgent(fallback);
+  const baseAdj = applyCorrections ? correctionAgent(fallback) : blankAdj();
   note("enhance");
   const finalAdj = enhancementAgent(baseAdj, hdrId, stats);
   note("render");
@@ -18902,6 +18902,7 @@ async function batchProcessFile(file, goalId, onStage, opts) {
     name: file.name,
     goalId,
     hdrId,
+    applyCorrections,
     group,
     origFolder,
     blob,
@@ -19879,7 +19880,9 @@ function BatchAgent({onClose}){
   const [showLegend,setShowLegend]=useState(false);
   const [editIdx,setEditIdx]=useState(null);
   const [editPreset,setEditPreset]=useState(null);
+  const [editCorrections,setEditCorrections]=useState(true);
   const [editPreview,setEditPreview]=useState(null);
+  const [editPreviewFor,setEditPreviewFor]=useState(null);
   const [editBusy,setEditBusy]=useState(false);
   const [editFullUrl,setEditFullUrl]=useState(null);
 
@@ -19986,28 +19989,42 @@ function BatchAgent({onClose}){
   const openEdit=(idx)=>{
     const r=results[idx];
     if(!r||r.error||r.culled) return;
-    setEditIdx(idx); setEditPreset(r.hdrId||"none"); setEditPreview(null);
+    setEditIdx(idx); setEditPreset(r.hdrId||"none");
+    setEditCorrections(r.applyCorrections!==false);
+    setEditPreview(null); setEditPreviewFor(null);
   };
-  const closeEdit=()=>{ if(editBusy) return; setEditIdx(null); setEditPreset(null); setEditPreview(null); };
-  const reanalyzeEdit=async(presetId)=>{
+  const closeEdit=()=>{ if(editBusy) return; setEditIdx(null); setEditPreset(null); setEditPreview(null); setEditPreviewFor(null); };
+  // Corrections (exposure/white balance/dehaze baseline) and HDR
+  // enhancement are independent layers in the render pipeline -- this
+  // re-renders with whichever combination of the two is currently picked,
+  // so toggling either one is reflected together rather than one
+  // replacing the other.
+  const reanalyzeEdit=async(presetId,applyCorrections)=>{
     if(editIdx==null) return;
     const r=results[editIdx];
     const file=files[r.fileIndex];
     if(!file) return;
     setEditBusy(true);
     try {
-      const updated=await batchProcessFile(file, presetId, null, {skipFlagged:false});
+      const updated=await batchProcessFile(file, presetId, null, {skipFlagged:false, applyCorrections});
       setEditPreview({...updated, fileIndex:r.fileIndex});
+      setEditPreviewFor({preset:presetId, corrections:applyCorrections});
     } catch(err){
       console.error("[LensAI] Reanalyze failed:", file.name, presetId, err);
     } finally { setEditBusy(false); }
   };
-  // Picking a different HDR type re-renders and swaps the preview
-  // immediately, rather than requiring a separate "Reanalyze" click --
-  // the selected preset should always be what's actually shown.
+  // Picking a different HDR type or toggling corrections re-renders and
+  // swaps the preview immediately, rather than requiring a separate
+  // "Reanalyze" click -- the selected combination should always be what's
+  // actually shown.
   const selectPreset=(presetId)=>{
     setEditPreset(presetId);
-    reanalyzeEdit(presetId);
+    reanalyzeEdit(presetId, editCorrections);
+  };
+  const toggleCorrections=()=>{
+    const next=!editCorrections;
+    setEditCorrections(next);
+    reanalyzeEdit(editPreset, next);
   };
   const saveEdit=()=>{
     if(editIdx==null||!editPreview) return;
@@ -20120,12 +20137,18 @@ function BatchAgent({onClose}){
           React.createElement("img",{src:editFullUrl||(editPreview||results[editIdx]).thumb,style:{width:"100%",maxHeight:"50vh",objectFit:"contain",borderRadius:10,display:"block",background:"#000",opacity:editBusy?0.5:1}}),
           editBusy&&React.createElement("div",{style:{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:6,color:"#fff",fontSize:12,fontWeight:700}},React.createElement(Spin,null),"Reanalyzing...")
         ),
-        React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"HDR type"),
+        React.createElement("label",{style:{display:"flex",alignItems:"center",gap:8,cursor:editBusy?"not-allowed":"pointer",fontSize:12,fontWeight:600,color:"#cbd5e1"}},
+          React.createElement("input",{type:"checkbox",checked:editCorrections,disabled:editBusy,onChange:toggleCorrections}),
+          "Apply auto corrections (exposure, white balance, dehaze)"
+        ),
+        React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"HDR enhancement"),
         React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.filter(g=>g.id!=="auto"&&g.id!=="fullAuto").map(g=>{
           const active=editPreset===g.id;
-          return React.createElement("button",{key:g.id,title:g.desc,onClick:()=>selectPreset(g.id),disabled:editBusy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit"}},g.label);
+          const label=g.id==="none"?"None":g.label;
+          return React.createElement("button",{key:g.id,title:g.desc,onClick:()=>selectPreset(g.id),disabled:editBusy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit"}},label);
         })),
-        React.createElement("button",{onClick:saveEdit,disabled:editBusy||!editPreview||editPreview.goalId!==editPreset,style:{padding:"10px 14px",borderRadius:10,border:"none",background:(editBusy||!editPreview||editPreview.goalId!==editPreset)?"rgba(34,197,94,0.2)":"linear-gradient(135deg,#22c55e,#16a34a)",color:"#fff",fontSize:12,fontWeight:700,cursor:(editBusy||!editPreview||editPreview.goalId!==editPreset)?"not-allowed":"pointer",fontFamily:"inherit"}},"Save")
+        (()=>{const ready=editPreviewFor&&editPreviewFor.preset===editPreset&&editPreviewFor.corrections===editCorrections;
+        return React.createElement("button",{onClick:saveEdit,disabled:editBusy||!ready,style:{padding:"10px 14px",borderRadius:10,border:"none",background:(editBusy||!ready)?"rgba(34,197,94,0.2)":"linear-gradient(135deg,#22c55e,#16a34a)",color:"#fff",fontSize:12,fontWeight:700,cursor:(editBusy||!ready)?"not-allowed":"pointer",fontFamily:"inherit"}},"Save");})()
       )
     )
   );
