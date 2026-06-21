@@ -18410,28 +18410,45 @@ function computeHDRAdj(baseAdj, presetId, stats) {
   return m;
 }
 
-// === Batch Agent =====================================================
-// Goal-based, unattended multi-photo pipeline: given a goal (an HDR
-// preset id, "auto" to auto-detect per photo, or "none" for corrections
-// only) it runs the same analyze -> correct -> (optional) HDR steps as
-// the interactive editor on each photo in turn, with zero per-photo
-// input. Deliberately decoupled from the App component's state -- it
-// never touches the photo currently open in the main editor, so running
-// a batch can't disturb in-progress interactive edits.
-async function batchProcessFile(file, goalId) {
+// === Batch Agent ecosystem ============================================
+// Goal-based, unattended multi-photo pipeline, split into small single-
+// purpose agents that batchProcessFile hands a photo through in turn:
+//   decodeAgent        -- file bytes -> decoded Image
+//   analysisAgent       -- decoded Image -> resized ImageData + scene stats
+//   cullAgent           -- scene stats -> quality flags (blur/exposure)
+//   sceneSorterAgent    -- scene stats -> a display group ("nature","food",...)
+//   goalDetectionAgent  -- goal id ("auto"/"none"/preset id) + stats -> hdrId
+//   correctionAgent     -- scene stats -> baseline correction adjustments
+//   enhancementAgent    -- baseline adj + hdrId -> final adj (HDR merged in)
+//   renderAgent         -- ImageData + final adj -> output blob + thumbnail
+//   qaAgent             -- stats of the *rendered* output -> review flags
+//   exportOrganizeAgent -- finished results -> a single downloadable zip
+// Each is a pure/standalone function (no React state), so they're reused
+// as-is by the interactive editor where applicable (applyHDR shares
+// enhancementAgent's logic via computeHDRAdj) and can be tested or
+// recombined independently of the batch UI. batchProcessFile is just the
+// orchestrator that runs them in sequence and reports which stage is
+// active via the optional onStage callback. Deliberately decoupled from
+// the App component's state -- it never touches the photo currently open
+// in the main editor, so running a batch can't disturb in-progress
+// interactive edits.
+
+async function decodeAgent(file) {
   const dataUrl = await new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = e => resolve(e.target.result);
     r.onerror = () => reject(new Error("Could not read file"));
     r.readAsDataURL(file);
   });
-  const image = await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const im = new Image();
     im.onload = () => resolve(im);
     im.onerror = () => reject(new Error("Could not decode image"));
     im.src = dataUrl;
   });
+}
 
+function analysisAgent(image) {
   // Unattended over potentially many photos -- capped well below the
   // interactive editor's 12000px full-res export ceiling so a large
   // batch stays fast and doesn't risk exhausting tab memory processing
@@ -18445,17 +18462,45 @@ async function batchProcessFile(file, goalId) {
   const ctx = cv.getContext("2d");
   ctx.drawImage(image, 0, 0, w, h);
   const data = ctx.getImageData(0, 0, w, h);
+  return { data, stats: analyzeImage(data) };
+}
 
-  const stats = analyzeImage(data);
-  const fallback = buildFallback(stats);
-  let adj = blankAdj();
+// Flags photos bad enough that no amount of correction will save them --
+// distinct from analyzeImage's isBlurry/isUnderexposed/isOverexposed,
+// which trip on shots that just *need* correction (the normal case this
+// whole pipeline exists to fix). Thresholds here are deliberately past
+// that, catching only the genuinely unusable.
+function cullAgent(stats) {
+  const reasons = [];
+  if (stats.isBlurry && stats.sharpness < 10) reasons.push("Very blurry");
+  if (stats.lumAvg < 20) reasons.push("Severely underexposed");
+  if (stats.pctBlown > 50) reasons.push("Severely overexposed");
+  return { flagged: reasons.length > 0, reasons };
+}
+
+// Display grouping only -- reuses the scene classification analyzeImage
+// already computed, so sorting a batch into sections costs nothing extra.
+function sceneSorterAgent(stats) {
+  return stats.scene;
+}
+
+function goalDetectionAgent(goalId, stats) {
+  return goalId === "auto" ? autoSelectHDR(stats) : goalId === "none" ? null : goalId;
+}
+
+function correctionAgent(fallback) {
+  const adj = blankAdj();
   Object.entries(fallback.adjustments || {}).forEach(([k, v]) => {
     if (v.rec !== 0 && k !== "saturation" && k !== "contrast" && k !== "fade") adj[k] = v.rec;
   });
+  return adj;
+}
 
-  const hdrId = goalId === "auto" ? autoSelectHDR(stats) : goalId === "none" ? null : goalId;
-  if (hdrId) adj = computeHDRAdj(adj, hdrId, stats);
+function enhancementAgent(baseAdj, hdrId, stats) {
+  return hdrId ? computeHDRAdj(baseAdj, hdrId, stats) : baseAdj;
+}
 
+async function renderAgent(data, adj, stats) {
   const processed = processPixels(data, adj, stats);
   const outCv = imageDataToCanvas(processed);
   const blob = await new Promise(resolve => outCv.toBlob(resolve, "image/jpeg", 0.92));
@@ -18469,16 +18514,158 @@ async function batchProcessFile(file, goalId) {
   const thumbCv = document.createElement("canvas");
   thumbCv.width = TW; thumbCv.height = th;
   thumbCv.getContext("2d").drawImage(outCv, 0, 0, TW, th);
+  return { blob, thumb: thumbCv.toDataURL("image/jpeg", 0.7), processed };
+}
+
+// Re-checks the *rendered* output, not the original -- catches over/under-
+// correction the pipeline itself introduced (e.g. a highlight-recovery
+// push that wasn't enough, or a saturation boost that clipped), which the
+// pre-processing stats can't see since they're measured before any
+// adjustment is applied.
+function qaAgent(postStats) {
+  const reasons = [];
+  if (postStats.pctBlown > 10) reasons.push("Highlights still clipped");
+  if (postStats.pctBlocked > 25) reasons.push("Shadows still blocked");
+  if (postStats.isOverexposed) reasons.push("Still overexposed");
+  if (postStats.isUnderexposed) reasons.push("Still underexposed");
+  return { flagged: reasons.length > 0, reasons };
+}
+
+async function batchProcessFile(file, goalId, onStage, opts) {
+  const { skipFlagged } = opts || {};
+  const note = s => onStage && onStage(s);
+  note("decode");
+  const image = await decodeAgent(file);
+  note("analyze");
+  const { data, stats } = analysisAgent(image);
+  const group = sceneSorterAgent(stats);
+  note("cull");
+  const cull = cullAgent(stats);
+  if (cull.flagged && skipFlagged) {
+    return { name: file.name, goalId, group, culled: true, cullReasons: cull.reasons };
+  }
+  note("goal");
+  const hdrId = goalDetectionAgent(goalId, stats);
+  note("correct");
+  const fallback = buildFallback(stats);
+  const baseAdj = correctionAgent(fallback);
+  note("enhance");
+  const finalAdj = enhancementAgent(baseAdj, hdrId, stats);
+  note("render");
+  const { blob, thumb, processed } = await renderAgent(data, finalAdj, stats);
+  note("qa");
+  const qa = qaAgent(analyzeImage(processed));
 
   const preset = HDR_PRESETS.find(h => h.id === hdrId);
   return {
     name: file.name,
     goalId,
+    group,
     blob,
-    thumb: thumbCv.toDataURL("image/jpeg", 0.7),
+    thumb,
     hdrLabel: preset ? preset.label : null,
     score: fallback.overallScore,
+    cullFlags: cull.flagged ? cull.reasons : null,
+    qaFlags: qa.flagged ? qa.reasons : null,
   };
+}
+
+// --- Export/Organize Agent: bundles finished results into one zip ------
+// Store-only (no compression) since the JPEGs inside are already
+// compressed -- keeps this to plain CRC32 + the ZIP local/central-
+// directory structure, no deflate library needed.
+const ZIP_CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = ZIP_CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function buildZipBlob(entries) {
+  const localParts = [], centralParts = [];
+  let offset = 0;
+  const dosTime = 0, dosDate = 0x21; // fixed 1980-01-01 -- fine for a throwaway export bundle
+  entries.forEach(({ path, bytes }) => {
+    const nameBytes = new TextEncoder().encode(path);
+    const crc = crc32(bytes);
+    const size = bytes.length;
+
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true);
+    local.setUint16(6, 0, true);
+    local.setUint16(8, 0, true);
+    local.setUint16(10, dosTime, true);
+    local.setUint16(12, dosDate, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, size, true);
+    local.setUint32(22, size, true);
+    local.setUint16(26, nameBytes.length, true);
+    local.setUint16(28, 0, true);
+    localParts.push(new Uint8Array(local.buffer), nameBytes, bytes);
+
+    const central = new DataView(new ArrayBuffer(46));
+    central.setUint32(0, 0x02014b50, true);
+    central.setUint16(4, 20, true);
+    central.setUint16(6, 20, true);
+    central.setUint16(8, 0, true);
+    central.setUint16(10, 0, true);
+    central.setUint16(12, dosTime, true);
+    central.setUint16(14, dosDate, true);
+    central.setUint32(16, crc, true);
+    central.setUint32(20, size, true);
+    central.setUint32(24, size, true);
+    central.setUint16(28, nameBytes.length, true);
+    central.setUint16(30, 0, true);
+    central.setUint16(32, 0, true);
+    central.setUint16(34, 0, true);
+    central.setUint16(36, 0, true);
+    central.setUint32(38, 0, true);
+    central.setUint32(42, offset, true);
+    centralParts.push(new Uint8Array(central.buffer), nameBytes);
+
+    offset += 30 + nameBytes.length + size;
+  });
+
+  const centralStart = offset;
+  let centralSize = 0;
+  centralParts.forEach(p => centralSize += p.length);
+
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true);
+  end.setUint16(4, 0, true);
+  end.setUint16(6, 0, true);
+  end.setUint16(8, entries.length, true);
+  end.setUint16(10, entries.length, true);
+  end.setUint32(12, centralSize, true);
+  end.setUint32(16, centralStart, true);
+  end.setUint16(20, 0, true);
+
+  return new Blob([...localParts, ...centralParts, new Uint8Array(end.buffer)], { type: "application/zip" });
+}
+
+// Groups results by scene (sceneSorterAgent's output) into folder-like
+// zip paths and gives every entry a collision-free name -- the single
+// entry point the batch UI calls for "Download all as zip".
+async function exportOrganizeAgent(results) {
+  const usable = results.filter(r => !r.error && !r.culled && r.blob);
+  const entries = [];
+  for (const r of usable) {
+    const stem = (r.name || "photo").replace(/\.[^/.]+$/, "");
+    const folder = r.group || "misc";
+    const path = folder + "/" + stem + "-" + (r.goalId || "batch") + ".jpg";
+    const bytes = new Uint8Array(await r.blob.arrayBuffer());
+    entries.push({ path, bytes });
+  }
+  return buildZipBlob(entries);
 }
 
 // Vertical keystone correction: warps the image into a trapezoid (one edge
@@ -19339,6 +19526,14 @@ function BatchAgent({onClose}){
   const [progress,setProgress]=useState(0);
   const [progressTotal,setProgressTotal]=useState(0);
   const [results,setResults]=useState([]);
+  const [stage,setStage]=useState(null);
+  const [skipFlagged,setSkipFlagged]=useState(false);
+  const [zipping,setZipping]=useState(false);
+
+  // Mirrors the agent names in batchProcessFile's pipeline (decodeAgent,
+  // analysisAgent, ...) so the busy indicator reflects which agent is
+  // actually running on the current photo, not just a generic spinner.
+  const STAGE_LABELS={decode:"Reading photo",analyze:"Analyzing scene",cull:"Checking quality",goal:"Selecting goal",correct:"Computing corrections",enhance:"Applying HDR",render:"Rendering output",qa:"Reviewing result"};
 
   const GOALS=[
     {id:"auto",label:"Auto-detect per photo"},
@@ -19358,14 +19553,14 @@ function BatchAgent({onClose}){
 
   const run=async()=>{
     if(!files.length||!goals.length||busy) return;
-    setBusy(true); setProgress(0); setResults([]);
+    setBusy(true); setProgress(0); setResults([]); setStage(null);
     const total=files.length*goals.length;
     setProgressTotal(total);
     const out=[];
     let done=0;
     for(let i=0;i<files.length;i++){
       for(let j=0;j<goals.length;j++){
-        try { out.push(await batchProcessFile(files[i], goals[j])); }
+        try { out.push(await batchProcessFile(files[i], goals[j], setStage, {skipFlagged})); }
         catch(err){
           console.error("[LensAI] Batch item failed:", files[i].name, goals[j], err);
           out.push({ name: files[i].name, goalId: goals[j], error: true });
@@ -19378,11 +19573,12 @@ function BatchAgent({onClose}){
         await new Promise(r=>setTimeout(r,0));
       }
     }
+    setStage(null);
     setBusy(false);
   };
 
   const goalLabel=(r)=>{
-    if(r.error) return null;
+    if(r.error||r.culled) return null;
     if(r.goalId==="auto") return "Auto: "+(r.hdrLabel||"--");
     if(r.goalId==="none") return "Corrections only";
     return r.hdrLabel;
@@ -19412,7 +19608,29 @@ function BatchAgent({onClose}){
     }
   };
 
-  const doneCount=results.filter(r=>!r.error).length;
+  const downloadZip=async()=>{
+    setZipping(true);
+    try {
+      const blob=await exportOrganizeAgent(results);
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement("a");
+      a.href=url; a.download="lensai-batch-"+Date.now()+".zip";
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } finally { setZipping(false); }
+  };
+
+  const doneCount=results.filter(r=>!r.error&&!r.culled).length;
+  const culledCount=results.filter(r=>r.culled).length;
+  // Scene Sorter Agent's grouping, applied here purely for display order --
+  // each group keeps its own results in the order they finished.
+  const groups=[];
+  results.forEach(r=>{
+    const key=r.group||"other";
+    let g=groups.find(g=>g.key===key);
+    if(!g){ g={key,items:[]}; groups.push(g); }
+    g.items.push(r);
+  });
   const BORD="rgba(255,255,255,0.07)";
 
   return React.createElement("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",backdropFilter:"blur(12px)",display:"flex",alignItems:"flex-end",zIndex:60,animation:"fadeIn 0.2s",paddingBottom:"env(safe-area-inset-bottom)"},onClick:e=>{if(e.target===e.currentTarget&&!busy) onClose();}},
@@ -19432,18 +19650,31 @@ function BatchAgent({onClose}){
             return React.createElement("button",{key:g.id,onClick:()=>toggleGoal(g.id),disabled:busy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:5}},active&&React.createElement("span",{style:{fontSize:10}},"✓"),g.label);
           }))
         ),
-        React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+"..."):"Run batch agent"),
-        results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},
-          React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"),
-          !busy&&doneCount>0&&React.createElement("button",{onClick:downloadAll,style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Download all")
+        React.createElement("label",{style:{display:"flex",alignItems:"center",gap:7,fontSize:11,color:"#94a3b8",cursor:busy?"default":"pointer"}},
+          React.createElement("input",{type:"checkbox",checked:skipFlagged,disabled:busy,onChange:e=>setSkipFlagged(e.target.checked)}),
+          "Skip photos that are too blurry/dark/blown to fix (Culling Agent)"
         ),
-        results.length>0&&React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(96px,1fr))",gap:8}},results.map((r,i)=>React.createElement("div",{key:i,style:{position:"relative",borderRadius:10,overflow:"hidden",background:"#131b2c",border:"1px solid "+BORD}},
-          r.error
-            ? React.createElement("div",{style:{height:96,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#f87171",padding:6,textAlign:"center"}},"Failed")
-            : React.createElement("img",{src:r.thumb,style:{width:"100%",height:96,objectFit:"cover",display:"block"}}),
-          !r.error&&React.createElement("button",{onClick:()=>downloadOne(r),title:"Download",style:{position:"absolute",bottom:4,right:4,width:22,height:22,borderRadius:"50%",border:"none",background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}},"↓"),
-          !r.error&&goalLabel(r)&&React.createElement("div",{style:{position:"absolute",top:4,left:4,background:"rgba(0,0,0,0.6)",color:"#a5b4fc",fontSize:8,fontWeight:700,padding:"2px 5px",borderRadius:5}},goalLabel(r))
-        )))
+        React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+(stage?" • "+STAGE_LABELS[stage]:"")+"..."):"Run batch agent"),
+        results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
+          React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"+(culledCount?", "+culledCount+" skipped":"")),
+          !busy&&doneCount>0&&React.createElement("div",{style:{display:"flex",gap:6}},
+            React.createElement("button",{onClick:downloadAll,style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Download all"),
+            React.createElement("button",{onClick:downloadZip,disabled:zipping,title:"Bundle every result into one zip, organized into folders by scene (Export/Organize Agent)",style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(99,102,241,0.3)",background:"rgba(99,102,241,0.1)",color:"#a5b4fc",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping...":"Download all as zip")
+          )
+        ),
+        groups.map(g=>React.createElement("div",{key:g.key,style:{display:"flex",flexDirection:"column",gap:6}},
+          groups.length>1&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},g.key+" ("+g.items.length+")"),
+          React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(96px,1fr))",gap:8}},g.items.map((r,i)=>React.createElement("div",{key:i,style:{position:"relative",borderRadius:10,overflow:"hidden",background:"#131b2c",border:"1px solid "+(r.qaFlags?"rgba(251,191,36,0.4)":BORD)}},
+            r.error
+              ? React.createElement("div",{style:{height:96,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#f87171",padding:6,textAlign:"center"}},"Failed")
+              : r.culled
+              ? React.createElement("div",{title:(r.cullReasons||[]).join(", "),style:{height:96,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#fbbf24",padding:6,textAlign:"center"}},"Skipped: "+(r.cullReasons||[]).join(", "))
+              : React.createElement("img",{src:r.thumb,style:{width:"100%",height:96,objectFit:"cover",display:"block"}}),
+            !r.error&&!r.culled&&React.createElement("button",{onClick:()=>downloadOne(r),title:"Download",style:{position:"absolute",bottom:4,right:4,width:22,height:22,borderRadius:"50%",border:"none",background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}},"↓"),
+            !r.error&&!r.culled&&goalLabel(r)&&React.createElement("div",{style:{position:"absolute",top:4,left:4,background:"rgba(0,0,0,0.6)",color:"#a5b4fc",fontSize:8,fontWeight:700,padding:"2px 5px",borderRadius:5}},goalLabel(r)),
+            !r.error&&!r.culled&&r.qaFlags&&React.createElement("div",{title:"QA Agent: "+r.qaFlags.join(", "),style:{position:"absolute",top:4,right:4,width:16,height:16,borderRadius:"50%",background:"rgba(251,191,36,0.85)",color:"#1c1917",fontSize:10,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}},"!")
+          )))
+        ))
       )
     )
   );
