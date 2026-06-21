@@ -19031,12 +19031,17 @@ function App() {
     // as fatal and covers the whole UI with a reload overlay, destroying
     // all in-progress edits over what should just be a failed export.
     try {
-      // Use original full-resolution data for export
+      // Use original full-resolution data for export. Export whichever
+      // adj the user is currently looking at (live edit, or a frozen
+      // Original/Correction/HDR preview via the view-mode buttons) --
+      // Save should match what's on screen, not silently fall back to
+      // the live edit if the user is previewing a different snapshot.
+      const exportAdj = displayAdj;
       const srcData  = fullResRef.current  || img;
       const srcStats = fullResStats.current || statsRef.current;
-      let processed=processPixels(srcData, adj, srcStats);
+      let processed=processPixels(srcData, exportAdj, srcStats);
       const expW=processed.width, expH=processed.height;
-      const expWarped=applyPerspective(imageDataToCanvas(processed), expW, expH, adj.perspective);
+      const expWarped=applyPerspective(imageDataToCanvas(processed), expW, expH, exportAdj.perspective);
       // processed's backing buffer (a full extra copy of the full-res pixel
       // data) is fully consumed by imageDataToCanvas's putImageData above --
       // drop the reference and yield a tick so the GC has a chance to
@@ -19055,13 +19060,13 @@ function App() {
       // memory on a large photo that can otherwise push a mobile tab over
       // its memory ceiling and get it killed by the OS mid-export.
       let exportCv=expWarped;
-      if (adj.rotation) {
+      if (exportAdj.rotation) {
         const offscreen=document.createElement("canvas");
         offscreen.width=expW;
         offscreen.height=expH;
         const octx=offscreen.getContext("2d");
         if (!octx) throw new Error("Could not create export canvas");
-        applyRotation(octx, expWarped, expW, expH, adj.rotation);
+        applyRotation(octx, expWarped, expW, expH, exportAdj.rotation);
         exportCv=offscreen;
       }
 
@@ -19193,7 +19198,7 @@ function Flag({children,color}){
   return React.createElement("div",{style:{background:color+"18",border:"1px solid "+color+"44",borderRadius:12,padding:"3px 8px",fontSize:10,fontWeight:600,color:color,whiteSpace:"nowrap"}},children);
 }
 function Btn({children,onClick,disabled,accent}){
-  return React.createElement("button",{onClick:onClick,disabled:disabled,style:{padding:"0 11px",height:31,minWidth:44,borderRadius:9,border:"1px solid rgba(255,255,255,0.08)",background:accent?"linear-gradient(135deg,#6366f1,#8b5cf6)":"rgba(255,255,255,0.04)",color:"#fff",cursor:disabled?"not-allowed":"pointer",fontSize:11,fontWeight:700,opacity:disabled?0.3:1,transition:"opacity 0.15s",fontFamily:"inherit",flexShrink:0}},children);
+  return React.createElement("button",{onClick:onClick,disabled:disabled,style:{padding:"0 11px",height:31,minWidth:44,borderRadius:9,border:"1px solid rgba(255,255,255,0.08)",background:disabled?"rgba(255,255,255,0.04)":accent?"linear-gradient(135deg,#6366f1,#8b5cf6)":"rgba(255,255,255,0.04)",color:disabled?"#475569":"#fff",cursor:disabled?"not-allowed":"pointer",fontSize:11,fontWeight:700,opacity:disabled?0.4:1,transition:"opacity 0.15s, background 0.15s, color 0.15s",fontFamily:"inherit",flexShrink:0}},children);
 }
 function Spin(){
   return React.createElement("span",{style:{width:10,height:10,borderRadius:"50%",border:"2px solid rgba(255,255,255,0.2)",borderTopColor:"#fff",display:"inline-block",animation:"spin 0.5s linear infinite"}});
