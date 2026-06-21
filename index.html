@@ -18473,6 +18473,7 @@ async function batchProcessFile(file, goalId) {
   const preset = HDR_PRESETS.find(h => h.id === hdrId);
   return {
     name: file.name,
+    goalId,
     blob,
     thumb: thumbCv.toDataURL("image/jpeg", 0.7),
     hdrLabel: preset ? preset.label : null,
@@ -19330,9 +19331,13 @@ function Spin(){
 function BatchAgent({onClose}){
   const fileInputRef=useRef(null);
   const [files,setFiles]=useState([]);
-  const [goal,setGoal]=useState("auto");
+  // Multiple goals can be selected at once: each selected goal produces
+  // its own exported variant per photo, so e.g. picking both "Smart HDR"
+  // and "Nature" yields 2 variants per photo to compare and pick from.
+  const [goals,setGoals]=useState(["auto"]);
   const [busy,setBusy]=useState(false);
   const [progress,setProgress]=useState(0);
+  const [progressTotal,setProgressTotal]=useState(0);
   const [results,setResults]=useState([]);
 
   const GOALS=[
@@ -19341,6 +19346,10 @@ function BatchAgent({onClose}){
     ...HDR_PRESETS.map(h=>({id:h.id,label:h.label})),
   ];
 
+  const toggleGoal=(id)=>{
+    setGoals(g => g.includes(id) ? g.filter(x=>x!==id) : [...g, id]);
+  };
+
   const onPick=(e)=>{
     const list=Array.from(e.target.files||[]);
     setFiles(list); setResults([]);
@@ -19348,22 +19357,35 @@ function BatchAgent({onClose}){
   };
 
   const run=async()=>{
-    if(!files.length||busy) return;
+    if(!files.length||!goals.length||busy) return;
     setBusy(true); setProgress(0); setResults([]);
+    const total=files.length*goals.length;
+    setProgressTotal(total);
     const out=[];
+    let done=0;
     for(let i=0;i<files.length;i++){
-      try { out.push(await batchProcessFile(files[i], goal)); }
-      catch(err){
-        console.error("[LensAI] Batch item failed:", files[i].name, err);
-        out.push({ name: files[i].name, error: true });
+      for(let j=0;j<goals.length;j++){
+        try { out.push(await batchProcessFile(files[i], goals[j])); }
+        catch(err){
+          console.error("[LensAI] Batch item failed:", files[i].name, goals[j], err);
+          out.push({ name: files[i].name, goalId: goals[j], error: true });
+        }
+        done++;
+        setProgress(done);
+        setResults([...out]);
+        // Yield a tick between photos so the progress UI actually paints
+        // instead of the whole batch running inside one blocked frame.
+        await new Promise(r=>setTimeout(r,0));
       }
-      setProgress(i+1);
-      setResults([...out]);
-      // Yield a tick between photos so the progress UI actually paints
-      // instead of the whole batch running inside one blocked frame.
-      await new Promise(r=>setTimeout(r,0));
     }
     setBusy(false);
+  };
+
+  const goalLabel=(r)=>{
+    if(r.error) return null;
+    if(r.goalId==="auto") return "Auto: "+(r.hdrLabel||"--");
+    if(r.goalId==="none") return "Corrections only";
+    return r.hdrLabel;
   };
 
   const downloadOne=(r)=>{
@@ -19372,7 +19394,9 @@ function BatchAgent({onClose}){
     const a=document.createElement("a");
     a.href=url;
     const stem=(r.name||"photo").replace(/\.[^/.]+$/,"");
-    a.download=stem+"-batch-"+Date.now()+".jpg";
+    // goalId is included so multiple variants of the same original photo
+    // (one per selected goal) never collide/overwrite each other.
+    a.download=stem+"-"+(r.goalId||"batch")+"-"+Date.now()+".jpg";
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   };
@@ -19398,14 +19422,17 @@ function BatchAgent({onClose}){
         React.createElement("button",{onClick:()=>{if(!busy)onClose();},disabled:busy,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",opacity:busy?0.4:1}},"×")
       ),
       React.createElement("div",{style:{padding:"14px 16px 24px",display:"flex",flexDirection:"column",gap:12}},
-        React.createElement("div",{style:{fontSize:12,color:"#64748b",lineHeight:1.5}},"Pick a batch of photos and a goal -- the agent analyzes and corrects each photo on its own, no per-photo input needed."),
+        React.createElement("div",{style:{fontSize:12,color:"#64748b",lineHeight:1.5}},"Pick a batch of photos and one or more goals -- the agent analyzes and corrects each photo on its own, producing one exported variant per selected goal, no per-photo input needed."),
         React.createElement("input",{ref:fileInputRef,type:"file",accept:"image/*",multiple:true,style:{display:"none"},onChange:onPick}),
         React.createElement("button",{onClick:()=>fileInputRef.current&&fileInputRef.current.click(),disabled:busy,style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"left"}},files.length?files.length+" photo"+(files.length>1?"s":"")+" selected -- tap to change":"Choose photos"),
         React.createElement("div",null,
-          React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Goal"),
-          React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.map(g=>React.createElement("button",{key:g.id,onClick:()=>setGoal(g.id),disabled:busy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(goal===g.id?"#6366f1":BORD),background:goal===g.id?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:goal===g.id?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit"}},g.label)))
+          React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Goals (tap to select multiple)"),
+          React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.map(g=>{
+            const active=goals.includes(g.id);
+            return React.createElement("button",{key:g.id,onClick:()=>toggleGoal(g.id),disabled:busy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:5}},active&&React.createElement("span",{style:{fontSize:10}},"✓"),g.label);
+          }))
         ),
-        React.createElement("button",{onClick:run,disabled:!files.length||busy,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||busy)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+files.length+"..."):"Run batch agent"),
+        React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+"..."):"Run batch agent"),
         results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},
           React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"),
           !busy&&doneCount>0&&React.createElement("button",{onClick:downloadAll,style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Download all")
@@ -19415,7 +19442,7 @@ function BatchAgent({onClose}){
             ? React.createElement("div",{style:{height:96,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#f87171",padding:6,textAlign:"center"}},"Failed")
             : React.createElement("img",{src:r.thumb,style:{width:"100%",height:96,objectFit:"cover",display:"block"}}),
           !r.error&&React.createElement("button",{onClick:()=>downloadOne(r),title:"Download",style:{position:"absolute",bottom:4,right:4,width:22,height:22,borderRadius:"50%",border:"none",background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}},"↓"),
-          !r.error&&r.hdrLabel&&React.createElement("div",{style:{position:"absolute",top:4,left:4,background:"rgba(0,0,0,0.6)",color:"#a5b4fc",fontSize:8,fontWeight:700,padding:"2px 5px",borderRadius:5}},r.hdrLabel)
+          !r.error&&goalLabel(r)&&React.createElement("div",{style:{position:"absolute",top:4,left:4,background:"rgba(0,0,0,0.6)",color:"#a5b4fc",fontSize:8,fontWeight:700,padding:"2px 5px",borderRadius:5}},goalLabel(r))
         )))
       )
     )
