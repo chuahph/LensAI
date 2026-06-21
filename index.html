@@ -19763,6 +19763,7 @@ function BatchAgent({onClose}){
   const [editPreset,setEditPreset]=useState(null);
   const [editPreview,setEditPreview]=useState(null);
   const [editBusy,setEditBusy]=useState(false);
+  const [editFullUrl,setEditFullUrl]=useState(null);
 
   // Mirrors the agent names in batchProcessFile's pipeline (decodeAgent,
   // analysisAgent, ...) so the busy indicator reflects which agent is
@@ -19851,6 +19852,19 @@ function BatchAgent({onClose}){
   // different HDR preset, reanalyze just that photo against it, preview the
   // outcome, then explicitly save it back into results before exporting --
   // without having to re-run (or hand-tune) the whole batch.
+  // The grid thumbnail is a small (220px-wide) dataURL meant for the
+  // results grid -- blown up to the modal's larger preview width it looks
+  // pixelated/distorted. Swap in an object URL of the actual full-
+  // resolution rendered blob instead, so the preview (and any difference
+  // between presets) is shown at real quality.
+  useEffect(()=>{
+    const shown = editIdx!=null ? (editPreview||results[editIdx]) : null;
+    if(!shown||!shown.blob){ setEditFullUrl(null); return; }
+    const url=URL.createObjectURL(shown.blob);
+    setEditFullUrl(url);
+    return ()=>URL.revokeObjectURL(url);
+  },[editIdx,editPreview]);
+
   const openEdit=(idx)=>{
     const r=results[idx];
     if(!r||r.error||r.culled) return;
@@ -19977,7 +19991,7 @@ function BatchAgent({onClose}){
           React.createElement("div",{style:{fontSize:13,fontWeight:800,color:"#fff"}},"Reanalyze: "+(results[editIdx].name||"photo")),
           React.createElement("button",{onClick:closeEdit,disabled:editBusy,style:{background:"none",border:"none",color:"#94a3b8",fontSize:16,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit"}},"×")
         ),
-        React.createElement("img",{src:(editPreview||results[editIdx]).thumb,style:{width:"100%",borderRadius:10,display:"block",opacity:editBusy?0.5:1}}),
+        React.createElement("img",{src:editFullUrl||(editPreview||results[editIdx]).thumb,style:{width:"100%",maxHeight:"50vh",objectFit:"contain",borderRadius:10,display:"block",background:"#000",opacity:editBusy?0.5:1}}),
         React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"HDR type"),
         React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.filter(g=>g.id!=="auto"&&g.id!=="fullAuto").map(g=>{
           const active=editPreset===g.id;
