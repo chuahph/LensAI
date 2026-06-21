@@ -18609,28 +18609,36 @@ async function reverseGeocodeAgent(gps) {
     const wait = 1000 - (Date.now() - _lastGeocodeAt);
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
     _lastGeocodeAt = Date.now();
-    // zoom=16 (street level) plus addressdetails=1 resolves the exact
-    // building/street first, so Nominatim returns the full administrative
-    // hierarchy above it (city, town or village all included) -- a low
-    // zoom would resolve straight to a city/county boundary and skip the
-    // finer town/village tag a point inside it actually belongs to.
-    const url = "https://nominatim.openstreetmap.org/reverse?format=json&zoom=16&addressdetails=1&lat=" +
+    // zoom=18 (POI/building level) plus addressdetails=1+namedetails=1
+    // resolves the exact point of interest first (a named shop, cafe,
+    // landmark, etc.), so Nominatim still returns the full administrative
+    // hierarchy above it (neighbourhood, city, town or village all
+    // included) -- a lower zoom would skip straight past any named place
+    // and resolve to its containing street/city instead.
+    const url = "https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&addressdetails=1&namedetails=1&lat=" +
       encodeURIComponent(gps.lat) + "&lon=" + encodeURIComponent(gps.lon);
     const res = await fetch(url, { headers: { Accept: "application/json" } });
     if (!res.ok) throw new Error("geocode http " + res.status);
     const json = await res.json();
     const a = json.address || {};
-    // City/town alone is too coarse for grouping -- "San Francisco" covers
-    // the whole city. Prefer the finer neighbourhood/suburb/district the
-    // point actually sits in, paired with its city for context, and only
-    // drop down to city/county/state when no finer area tag exists.
+    // A named shop/venue is the most specific grouping a photo can have --
+    // prefer it (from address tags or the top-level POI name) over the
+    // neighbourhood it sits in. City/town alone is too coarse for grouping
+    // -- "San Francisco" covers the whole city -- so fall back through
+    // neighbourhood/suburb/district, then city/county/state, in order of
+    // specificity.
+    const poi = a.shop || a.amenity || a.tourism || a.leisure || a.office ||
+      a.building || (json.namedetails && json.namedetails.name) ||
+      (a.name !== a.neighbourhood && a.name !== a.suburb ? a.name : null);
     const area = a.neighbourhood || a.quarter || a.suburb || a.city_district ||
       a.hamlet || a.village;
     const city = a.city || a.town || a.municipality || a.county;
     const region = a.state || a.country;
     let place;
-    if (area && city && area !== city) place = area + ", " + city;
-    else place = area || city || region;
+    if (poi && area && poi !== area) place = poi + ", " + area;
+    else if (poi && city && poi !== city) place = poi + ", " + city;
+    else if (area && city && area !== city) place = area + ", " + city;
+    else place = poi || area || city || region;
     let name = place && region && place !== region && !place.endsWith(", " + region)
       ? place + ", " + region : (place || json.display_name);
     if (!name) throw new Error("no place name");
