@@ -19644,7 +19644,7 @@ function BatchAgent({onClose}){
         React.createElement("button",{onClick:()=>{if(!busy)onClose();},disabled:busy,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",opacity:busy?0.4:1}},"×")
       ),
       React.createElement("div",{style:{padding:"14px 16px 24px",display:"flex",flexDirection:"column",gap:12}},
-        React.createElement("div",{style:{fontSize:12,color:"#64748b",lineHeight:1.5}},"Pick a batch of photos and one or more goals -- the agent analyzes and corrects each photo on its own, producing one exported variant per selected goal, no per-photo input needed."),
+        React.createElement("div",{style:{fontSize:12,color:"#64748b",lineHeight:1.5}},"Pick a batch of photos and one or more goals -- the agent analyzes and corrects each photo on its own, producing one exported variant per selected goal, no per-photo input needed. On iPhone/Android, \"Choose photos\" opens your Photos app picker -- open an album there and select all to load the whole thing in one go."),
         React.createElement("input",{ref:fileInputRef,type:"file",accept:"image/*",multiple:true,style:{display:"none"},onChange:onPick}),
         React.createElement("input",{ref:folderInputRef,type:"file",webkitdirectory:"",directory:"",multiple:true,style:{display:"none"},onChange:onPick}),
         React.createElement("div",{style:{display:"flex",gap:6}},
