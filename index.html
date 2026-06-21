@@ -18418,7 +18418,7 @@ function computeHDRAdj(baseAdj, presetId, stats) {
 //   cullAgent           -- scene stats -> quality flags (blur/exposure)
 //   sceneSorterAgent    -- scene stats -> a display group ("nature","food",...)
 //   locationGroupAgent  -- original file -> EXIF GPS place name/date, or its source folder
-//   autoGoalsAgent      -- scene stats -> autoSelectHDR's full per-scene scoring if a big face is in frame, else "smartHDR"
+//   autoGoalsAgent      -- scene stats -> "smartHDR" if it scores highest, else corrections-only if a big face is in frame, else autoSelectHDR's pick
 //   goalDetectionAgent  -- goal id ("auto"/"fullAuto"/"none"/preset id) + stats -> hdrId
 //   correctionAgent     -- scene stats -> baseline correction adjustments
 //   enhancementAgent    -- baseline adj + hdrId -> final adj (HDR merged in)
@@ -18689,15 +18689,19 @@ async function locationGroupAgent(file) {
   return null;
 }
 
-// One branch point ahead of autoSelectHDR's full weighted scoring: a big,
-// dominant face means a person is the subject, so it's worth the full
-// per-scene reasoning (autoSelectHDR) to pick the best-fitting preset for
-// that specific shot. With no dominant face, skip the scoring entirely
-// and go straight to Smart HDR's general-purpose dynamic-range rescue --
-// the sane default for everything that isn't people-first.
+// Runs autoSelectHDR's full per-scene scoring first to see what it would
+// pick. If Smart HDR is genuinely the best-scoring preset for this scene,
+// that general-purpose dynamic-range rescue is the safe choice. Otherwise
+// a more specific preset scored higher -- but if a big, dominant face is
+// in frame, a scene-specific preset risks the wrong look on skin tones, so
+// fall back to plain corrections instead of applying it. With no
+// dominant face, the higher-scoring preset is trusted and used as-is.
 function autoGoalsAgent(stats) {
   if (!stats) return "smartHDR";
-  return stats.hasFace ? autoSelectHDR(stats) : "smartHDR";
+  const best = autoSelectHDR(stats);
+  if (best === "smartHDR") return "smartHDR";
+  if (stats.hasFace) return null;
+  return best;
 }
 
 function goalDetectionAgent(goalId, stats) {
