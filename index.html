@@ -18418,7 +18418,8 @@ function computeHDRAdj(baseAdj, presetId, stats) {
 //   cullAgent           -- scene stats -> quality flags (blur/exposure)
 //   sceneSorterAgent    -- scene stats -> a display group ("nature","food",...)
 //   locationGroupAgent  -- original file -> EXIF GPS place name/date, or its source folder
-//   goalDetectionAgent  -- goal id ("auto"/"none"/preset id) + stats -> hdrId
+//   autoGoalsAgent      -- scene stats -> "people" if a big face is in frame, else "smartHDR"
+//   goalDetectionAgent  -- goal id ("auto"/"fullAuto"/"none"/preset id) + stats -> hdrId
 //   correctionAgent     -- scene stats -> baseline correction adjustments
 //   enhancementAgent    -- baseline adj + hdrId -> final adj (HDR merged in)
 //   renderAgent         -- ImageData + final adj -> output blob + thumbnail
@@ -18673,8 +18674,20 @@ async function locationGroupAgent(file) {
   return null;
 }
 
+// Deliberately simpler than autoSelectHDR's full weighted scoring -- a
+// one-rule "full auto" mode for users who just want a sane default with
+// no per-scene tuning: a big, dominant face means a person is the subject
+// so the gentle People grade applies, anything else gets Smart HDR's
+// general-purpose dynamic-range rescue.
+function autoGoalsAgent(stats) {
+  if (!stats) return "smartHDR";
+  return stats.hasFace ? "people" : "smartHDR";
+}
+
 function goalDetectionAgent(goalId, stats) {
-  return goalId === "auto" ? autoSelectHDR(stats) : goalId === "none" ? null : goalId;
+  if (goalId === "auto") return autoSelectHDR(stats);
+  if (goalId === "fullAuto") return autoGoalsAgent(stats);
+  return goalId === "none" ? null : goalId;
 }
 
 function correctionAgent(fallback) {
@@ -19732,6 +19745,7 @@ function BatchAgent({onClose}){
 
   const GOALS=[
     {id:"auto",label:"Auto-detect per photo"},
+    {id:"fullAuto",label:"Full Auto-Detect"},
     {id:"none",label:"Corrections only"},
     ...HDR_PRESETS.map(h=>({id:h.id,label:h.label})),
   ];
