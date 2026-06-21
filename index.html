@@ -18417,7 +18417,7 @@ function computeHDRAdj(baseAdj, presetId, stats) {
 //   analysisAgent       -- decoded Image -> resized ImageData + scene stats
 //   cullAgent           -- scene stats -> quality flags (blur/exposure)
 //   sceneSorterAgent    -- scene stats -> a display group ("nature","food",...)
-//   locationGroupAgent  -- original file -> EXIF GPS/date, or its source folder
+//   locationGroupAgent  -- original file -> EXIF GPS place name/date, or its source folder
 //   goalDetectionAgent  -- goal id ("auto"/"none"/preset id) + stats -> hdrId
 //   correctionAgent     -- scene stats -> baseline correction adjustments
 //   enhancementAgent    -- baseline adj + hdrId -> final adj (HDR merged in)
@@ -18572,10 +18572,60 @@ async function readExifGpsAndDate(file) {
 
 // Buckets nearby shots together at roughly city-block precision (~1.1km)
 // rather than one folder per exact coordinate, which would scatter a
-// single walk/event across dozens of near-duplicate folders.
-function gpsFolderName(gps) {
+// single walk/event across dozens of near-duplicate folders. Used as the
+// reverse-geocoding cache key and as a last-resort folder name if lookup
+// fails (offline, rate-limited, etc).
+function gpsCoordKey(gps) {
   const lat = Math.abs(gps.lat).toFixed(2), lon = Math.abs(gps.lon).toFixed(2);
-  return "gps_" + lat + (gps.lat >= 0 ? "N" : "S") + "_" + lon + (gps.lon >= 0 ? "E" : "W");
+  return lat + (gps.lat >= 0 ? "N" : "S") + "_" + lon + (gps.lon >= 0 ? "E" : "W");
+}
+
+function gpsFolderName(gps) {
+  return "gps_" + gpsCoordKey(gps);
+}
+
+// Folder names can't contain "/" and look bad with most other punctuation
+// place names carry (commas, periods, quotes).
+function sanitizeFolderName(name) {
+  return name.replace(/[\/\\?%*:|"<>]/g, "").replace(/\s+/g, " ").trim();
+}
+
+const _geocodeCache = new Map();
+let _lastGeocodeAt = 0;
+
+// Reverse-geocodes GPS coordinates into a human place name (e.g. "San
+// Francisco, CA") via OpenStreetMap's free Nominatim API, so batch export
+// folders read like real places instead of raw lat/lon. Caches by rounded
+// coordinate (shots from the same outing share one lookup) and throttles
+// to Nominatim's documented 1 req/sec usage policy. Falls back to the
+// coordinate-based name on any network failure, since this agent must
+// never block export on a third-party service being unreachable.
+async function reverseGeocodeAgent(gps) {
+  const key = gpsCoordKey(gps);
+  if (_geocodeCache.has(key)) return _geocodeCache.get(key);
+  const fallback = gpsFolderName(gps);
+  try {
+    const wait = 1000 - (Date.now() - _lastGeocodeAt);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    _lastGeocodeAt = Date.now();
+    const url = "https://nominatim.openstreetmap.org/reverse?format=json&zoom=12&lat=" +
+      encodeURIComponent(gps.lat) + "&lon=" + encodeURIComponent(gps.lon);
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) throw new Error("geocode http " + res.status);
+    const json = await res.json();
+    const a = json.address || {};
+    const place = a.city || a.town || a.village || a.suburb || a.county || a.state;
+    const region = a.state || a.country;
+    let name = place && region && place !== region ? place + ", " + region : (place || region || json.display_name);
+    if (!name) throw new Error("no place name");
+    name = sanitizeFolderName(name);
+    const result = name || fallback;
+    _geocodeCache.set(key, result);
+    return result;
+  } catch (e) {
+    _geocodeCache.set(key, fallback);
+    return fallback;
+  }
 }
 
 function dateFolderName(dateTaken) {
@@ -18585,17 +18635,18 @@ function dateFolderName(dateTaken) {
 
 // Recovers where/when a photo was actually taken, for grouping batch
 // exports by the photo's own original snapshot info rather than by the
-// scene the agent happens to detect. Priority: embedded GPS coordinates,
-// then capture date (both from EXIF, present on most camera/phone
-// photos), then the folder it was loaded from (only known when picked via
-// "Choose folder" -- webkitRelativePath is empty otherwise). Returns null
-// only when none of that is available (e.g. a screenshot with no EXIF,
-// picked individually via the iOS Photos picker), the one case scene
-// grouping should still apply.
+// scene the agent happens to detect. Priority: embedded GPS coordinates
+// (reverse-geocoded to a place name, falling back to coordinates if that
+// lookup fails), then capture date (both from EXIF, present on most
+// camera/phone photos), then the folder it was loaded from (only known
+// when picked via "Choose folder" -- webkitRelativePath is empty
+// otherwise). Returns null only when none of that is available (e.g. a
+// screenshot with no EXIF, picked individually via the iOS Photos
+// picker), the one case scene grouping should still apply.
 async function locationGroupAgent(file) {
   const exif = await readExifGpsAndDate(file);
   if (exif) {
-    if (exif.gps) return gpsFolderName(exif.gps);
+    if (exif.gps) return await reverseGeocodeAgent(exif.gps);
     const d = dateFolderName(exif.dateTaken);
     if (d) return d;
   }
@@ -18778,8 +18829,8 @@ function buildZipBlob(entries) {
 }
 
 // Groups results into folder-like zip paths -- locationGroupAgent's
-// original snapshot info (EXIF GPS, then capture date, then source
-// folder) wins when any of it is available, falling back to
+// original snapshot info (EXIF GPS reverse-geocoded to a place name, then
+// capture date, then source folder) wins when any of it is available, falling back to
 // sceneSorterAgent's classification only when a photo has none of that
 // -- and gives every entry a collision-free name. The single entry point
 // the batch UI calls for "Download all".
@@ -19750,8 +19801,8 @@ function BatchAgent({onClose}){
 
   const doneCount=results.filter(r=>!r.error&&!r.culled).length;
   const culledCount=results.filter(r=>r.culled).length;
-  // Location Group Agent's result (EXIF GPS, then capture date, then
-  // source folder) takes priority over the Scene Sorter Agent's
+  // Location Group Agent's result (EXIF GPS reverse-geocoded to a place
+  // name, then capture date, then source folder) takes priority over the Scene Sorter Agent's
   // classification -- grouping by where/when a photo was actually taken
   // beats re-sorting by scene. Falls back to scene only when a photo has
   // none of that info at all (e.g. a screenshot picked individually).
