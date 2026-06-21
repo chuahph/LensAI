@@ -18772,6 +18772,7 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   return {
     name: file.name,
     goalId,
+    hdrId,
     group,
     origFolder,
     blob,
@@ -19747,6 +19748,10 @@ function BatchAgent({onClose}){
   const [skipFlagged,setSkipFlagged]=useState(false);
   const [zipping,setZipping]=useState(false);
   const [showLegend,setShowLegend]=useState(false);
+  const [editIdx,setEditIdx]=useState(null);
+  const [editPreset,setEditPreset]=useState(null);
+  const [editPreview,setEditPreview]=useState(null);
+  const [editBusy,setEditBusy]=useState(false);
 
   // Mirrors the agent names in batchProcessFile's pipeline (decodeAgent,
   // analysisAgent, ...) so the busy indicator reflects which agent is
@@ -19794,10 +19799,10 @@ function BatchAgent({onClose}){
     let done=0;
     for(let i=0;i<files.length;i++){
       for(let j=0;j<goals.length;j++){
-        try { out.push(await batchProcessFile(files[i], goals[j], setStage, {skipFlagged})); }
+        try { out.push({...await batchProcessFile(files[i], goals[j], setStage, {skipFlagged}), fileIndex:i}); }
         catch(err){
           console.error("[LensAI] Batch item failed:", files[i].name, goals[j], err);
-          out.push({ name: files[i].name, goalId: goals[j], error: true });
+          out.push({ name: files[i].name, goalId: goals[j], fileIndex:i, error: true });
         }
         done++;
         setProgress(done);
@@ -19829,6 +19834,35 @@ function BatchAgent({onClose}){
     a.download=stem+"-"+(r.goalId||"batch")+"-"+Date.now()+".jpg";
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
+  };
+
+  // Lets a finished batch result be revisited one photo at a time: pick a
+  // different HDR preset, reanalyze just that photo against it, preview the
+  // outcome, then explicitly save it back into results before exporting --
+  // without having to re-run (or hand-tune) the whole batch.
+  const openEdit=(idx)=>{
+    const r=results[idx];
+    if(!r||r.error||r.culled) return;
+    setEditIdx(idx); setEditPreset(r.hdrId||"none"); setEditPreview(null);
+  };
+  const closeEdit=()=>{ if(editBusy) return; setEditIdx(null); setEditPreset(null); setEditPreview(null); };
+  const reanalyzeEdit=async()=>{
+    if(editIdx==null) return;
+    const r=results[editIdx];
+    const file=files[r.fileIndex];
+    if(!file) return;
+    setEditBusy(true);
+    try {
+      const updated=await batchProcessFile(file, editPreset, null, {skipFlagged:false});
+      setEditPreview({...updated, fileIndex:r.fileIndex});
+    } catch(err){
+      console.error("[LensAI] Reanalyze failed:", file.name, editPreset, err);
+    } finally { setEditBusy(false); }
+  };
+  const saveEdit=()=>{
+    if(editIdx==null||!editPreview) return;
+    setResults(rs=>rs.map((r,i)=>i===editIdx?editPreview:r));
+    closeEdit();
   };
 
   // A "download every file individually" loop used to live here, firing
@@ -19918,12 +19952,30 @@ function BatchAgent({onClose}){
               ? React.createElement("div",{style:{height:96,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#f87171",padding:6,textAlign:"center"}},"Failed")
               : r.culled
               ? React.createElement("div",{title:(r.cullReasons||[]).join(", "),style:{height:96,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#fbbf24",padding:6,textAlign:"center"}},"Skipped: "+(r.cullReasons||[]).join(", "))
-              : React.createElement("img",{src:r.thumb,style:{width:"100%",height:96,objectFit:"cover",display:"block"}}),
+              : React.createElement("img",{src:r.thumb,onClick:()=>openEdit(results.indexOf(r)),title:"Tap to reanalyze with a different HDR type",style:{width:"100%",height:96,objectFit:"cover",display:"block",cursor:"pointer"}}),
             !r.error&&!r.culled&&React.createElement("button",{onClick:()=>downloadOne(r),title:"Download",style:{position:"absolute",bottom:4,right:4,width:22,height:22,borderRadius:"50%",border:"none",background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}},"↓"),
             !r.error&&!r.culled&&goalLabel(r)&&React.createElement("div",{style:{position:"absolute",top:4,left:4,background:"rgba(0,0,0,0.6)",color:"#a5b4fc",fontSize:8,fontWeight:700,padding:"2px 5px",borderRadius:5}},goalLabel(r)),
             !r.error&&!r.culled&&r.qaFlags&&React.createElement("div",{title:"QA Agent: "+r.qaFlags.join(", "),style:{position:"absolute",top:4,right:4,width:16,height:16,borderRadius:"50%",background:"rgba(251,191,36,0.85)",color:"#1c1917",fontSize:10,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}},"!")
           )))
         ))
+      )
+    ),
+    editIdx!=null&&results[editIdx]&&React.createElement("div",{onClick:closeEdit,style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:20}},
+      React.createElement("div",{onClick:e=>e.stopPropagation(),style:{background:"#0f172a",border:"1px solid "+BORD,borderRadius:14,padding:16,maxWidth:380,width:"100%",maxHeight:"85vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:12}},
+        React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},
+          React.createElement("div",{style:{fontSize:13,fontWeight:800,color:"#fff"}},"Reanalyze: "+(results[editIdx].name||"photo")),
+          React.createElement("button",{onClick:closeEdit,disabled:editBusy,style:{background:"none",border:"none",color:"#94a3b8",fontSize:16,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit"}},"×")
+        ),
+        React.createElement("img",{src:(editPreview||results[editIdx]).thumb,style:{width:"100%",borderRadius:10,display:"block",opacity:editBusy?0.5:1}}),
+        React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"HDR type"),
+        React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.filter(g=>g.id!=="auto"&&g.id!=="fullAuto").map(g=>{
+          const active=editPreset===g.id;
+          return React.createElement("button",{key:g.id,title:g.desc,onClick:()=>setEditPreset(g.id),disabled:editBusy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit"}},g.label);
+        })),
+        React.createElement("div",{style:{display:"flex",gap:8}},
+          React.createElement("button",{onClick:reanalyzeEdit,disabled:editBusy,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:6}},editBusy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Reanalyzing..."):"Reanalyze"),
+          React.createElement("button",{onClick:saveEdit,disabled:editBusy||!editPreview||editPreview.goalId!==editPreset,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"none",background:(editBusy||!editPreview||editPreview.goalId!==editPreset)?"rgba(34,197,94,0.2)":"linear-gradient(135deg,#22c55e,#16a34a)",color:"#fff",fontSize:12,fontWeight:700,cursor:(editBusy||!editPreview||editPreview.goalId!==editPreset)?"not-allowed":"pointer",fontFamily:"inherit"}},"Save")
+        )
       )
     )
   );
