@@ -19989,18 +19989,25 @@ function BatchAgent({onClose}){
     setEditIdx(idx); setEditPreset(r.hdrId||"none"); setEditPreview(null);
   };
   const closeEdit=()=>{ if(editBusy) return; setEditIdx(null); setEditPreset(null); setEditPreview(null); };
-  const reanalyzeEdit=async()=>{
+  const reanalyzeEdit=async(presetId)=>{
     if(editIdx==null) return;
     const r=results[editIdx];
     const file=files[r.fileIndex];
     if(!file) return;
     setEditBusy(true);
     try {
-      const updated=await batchProcessFile(file, editPreset, null, {skipFlagged:false});
+      const updated=await batchProcessFile(file, presetId, null, {skipFlagged:false});
       setEditPreview({...updated, fileIndex:r.fileIndex});
     } catch(err){
-      console.error("[LensAI] Reanalyze failed:", file.name, editPreset, err);
+      console.error("[LensAI] Reanalyze failed:", file.name, presetId, err);
     } finally { setEditBusy(false); }
+  };
+  // Picking a different HDR type re-renders and swaps the preview
+  // immediately, rather than requiring a separate "Reanalyze" click --
+  // the selected preset should always be what's actually shown.
+  const selectPreset=(presetId)=>{
+    setEditPreset(presetId);
+    reanalyzeEdit(presetId);
   };
   const saveEdit=()=>{
     if(editIdx==null||!editPreview) return;
@@ -20109,16 +20116,16 @@ function BatchAgent({onClose}){
           React.createElement("div",{style:{fontSize:13,fontWeight:800,color:"#fff"}},"Reanalyze: "+(results[editIdx].name||"photo")),
           React.createElement("button",{onClick:closeEdit,disabled:editBusy,style:{background:"none",border:"none",color:"#94a3b8",fontSize:16,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit"}},"×")
         ),
-        React.createElement("img",{src:editFullUrl||(editPreview||results[editIdx]).thumb,style:{width:"100%",maxHeight:"50vh",objectFit:"contain",borderRadius:10,display:"block",background:"#000",opacity:editBusy?0.5:1}}),
+        React.createElement("div",{style:{position:"relative"}},
+          React.createElement("img",{src:editFullUrl||(editPreview||results[editIdx]).thumb,style:{width:"100%",maxHeight:"50vh",objectFit:"contain",borderRadius:10,display:"block",background:"#000",opacity:editBusy?0.5:1}}),
+          editBusy&&React.createElement("div",{style:{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:6,color:"#fff",fontSize:12,fontWeight:700}},React.createElement(Spin,null),"Reanalyzing...")
+        ),
         React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"HDR type"),
         React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.filter(g=>g.id!=="auto"&&g.id!=="fullAuto").map(g=>{
           const active=editPreset===g.id;
-          return React.createElement("button",{key:g.id,title:g.desc,onClick:()=>setEditPreset(g.id),disabled:editBusy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit"}},g.label);
+          return React.createElement("button",{key:g.id,title:g.desc,onClick:()=>selectPreset(g.id),disabled:editBusy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit"}},g.label);
         })),
-        React.createElement("div",{style:{display:"flex",gap:8}},
-          React.createElement("button",{onClick:reanalyzeEdit,disabled:editBusy,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:6}},editBusy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Reanalyzing..."):"Reanalyze"),
-          React.createElement("button",{onClick:saveEdit,disabled:editBusy||!editPreview||editPreview.goalId!==editPreset,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"none",background:(editBusy||!editPreview||editPreview.goalId!==editPreset)?"rgba(34,197,94,0.2)":"linear-gradient(135deg,#22c55e,#16a34a)",color:"#fff",fontSize:12,fontWeight:700,cursor:(editBusy||!editPreview||editPreview.goalId!==editPreset)?"not-allowed":"pointer",fontFamily:"inherit"}},"Save")
-        )
+        React.createElement("button",{onClick:saveEdit,disabled:editBusy||!editPreview||editPreview.goalId!==editPreset,style:{padding:"10px 14px",borderRadius:10,border:"none",background:(editBusy||!editPreview||editPreview.goalId!==editPreset)?"rgba(34,197,94,0.2)":"linear-gradient(135deg,#22c55e,#16a34a)",color:"#fff",fontSize:12,fontWeight:700,cursor:(editBusy||!editPreview||editPreview.goalId!==editPreset)?"not-allowed":"pointer",fontFamily:"inherit"}},"Save")
       )
     )
   );
