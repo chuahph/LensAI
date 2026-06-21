@@ -18934,10 +18934,13 @@ function App() {
         if (currentAnalysis) {
           saveHist();
           setAdj(prevAdj => {
-            const na = { ...blankAdj(), rotation: prevAdj.rotation, perspective: prevAdj.perspective };
-            // saturation/contrast/fade are excluded: saturation and contrast/fade
-            // are left for the user's own slider control or the Enhance step's
-            // preset tuning, not buildFallback's generic per-photo guess.
+            const na = { ...blankAdj(), rotation: prevAdj.rotation, perspective: prevAdj.perspective,
+              saturation: prevAdj.saturation, contrast: prevAdj.contrast, fade: prevAdj.fade };
+            // saturation/contrast/fade are excluded from buildFallback's
+            // recommendations (left for the user's own slider control or the
+            // Enhance step's preset tuning) -- carried over from prevAdj above
+            // so a value the user already dragged in survives Re-Analyze
+            // instead of being wiped back to 0 by blankAdj().
             Object.entries(currentFixes).forEach(([k,v]) => { if (k!=="saturation"&&k!=="contrast"&&k!=="fade") na[k]=v; });
             analyzedAdjRef.current = na;
             return na;
