@@ -18934,10 +18934,13 @@ function App() {
         if (currentAnalysis) {
           saveHist();
           setAdj(prevAdj => {
-            const na = { ...blankAdj(), rotation: prevAdj.rotation, perspective: prevAdj.perspective };
-            // saturation/contrast/fade are excluded: saturation and contrast/fade
-            // are left for the user's own slider control or the Enhance step's
-            // preset tuning, not buildFallback's generic per-photo guess.
+            const na = { ...blankAdj(), rotation: prevAdj.rotation, perspective: prevAdj.perspective,
+              saturation: prevAdj.saturation, contrast: prevAdj.contrast, fade: prevAdj.fade };
+            // saturation/contrast/fade are excluded from buildFallback's
+            // recommendations (left for the user's own slider control or the
+            // Enhance step's preset tuning) -- carried over from prevAdj above
+            // so a value the user already dragged in survives Re-Analyze
+            // instead of being wiped back to 0 by blankAdj().
             Object.entries(currentFixes).forEach(([k,v]) => { if (k!=="saturation"&&k!=="contrast"&&k!=="fade") na[k]=v; });
             analyzedAdjRef.current = na;
             return na;
@@ -18989,6 +18992,15 @@ function App() {
       // preset's own saturation (42) and near-zero dehaze.
       m.saturation = Math.min(m.saturation, 30);
       m.dehaze = Math.min(m.dehaze, 10);
+      // Smart HDR's -46 highlight recovery is also tuned for blown skies --
+      // at that strength it flattens/greys skin tone, so it's softened here
+      // too. With saturation/dehaze pulled back, Smart HDR's colorTone/
+      // warmth (both 0 by default) leave skin reading flat and slightly
+      // cool -- nudge them toward Portrait's own gentle warm push (warmth:6,
+      // colorTone:10) so faces don't look sickly under the reduced dehaze.
+      m.highlights = Math.max(m.highlights, -25);
+      m.warmth = Math.max(m.warmth, 5);
+      m.colorTone = Math.max(m.colorTone, 8);
     }
     hdrRef.current=id; setActiveHDR(id); setAdj(m);
     enhancedAdjRef.current = m; setHasEnhanced(true); setViewMode(null);
