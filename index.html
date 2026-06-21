@@ -17947,6 +17947,23 @@ function processPixels(src, adj, imgStats) {
     ? Math.min(imgStats.blackPoint - 6, 38) * 1.15
     : 0;
 
+  // Auto white-point recovery: the highlight-side complement to dewashBP. A
+  // flat / hazy / washed-out photo also has a DEPRESSED white point -- its
+  // brightest tones sit at light grey rather than reaching white, which (with
+  // the lifted black point above) is the other half of a faded, low-punch
+  // look. None of the tone steps below lift the very top end specifically
+  // (brightness tapers OFF in the highlights to protect skies; shadows only
+  // touch darks), so true whites are never restored once missing. This adds a
+  // gentle stretch that's strongest on the brightest pixels and tapers to zero
+  // by the midtones, so shadows/midtones (and their exposure) are untouched.
+  // Gated tightly: only a genuinely dull white point (well below 255 but not
+  // so low the image is intentionally dark), on a scene bright enough that the
+  // missing whites are a defect rather than a deliberate low-key/night look.
+  const dewashWP = (imgStats && imgStats.whitePoint < 240 && imgStats.whitePoint > 150 &&
+                    imgStats.lumAvg > 55 && !imgStats.isNight)
+    ? Math.min(240 - imgStats.whitePoint, 40)
+    : 0;
+
   // White Balance: separate from warmth
   // whiteBalance slider: negative = cool (reduce R, boost B), positive = warm (boost R, reduce B)
   // warmth slider: separate control, much gentler
@@ -17987,6 +18004,18 @@ function processPixels(src, adj, imgStats) {
       const lumW = (r*0.299+g*0.587+b*0.114)/255;
       const sub  = dewashBP * Math.pow(Math.max(0, 1-lumW), 1.3);
       r=clamp(r-sub); g=clamp(g-sub); b=clamp(b-sub);
+    }
+
+    // 1c. Auto white-point recovery (highlight-side dewash). Mirrors 1b but
+    // on the bright end: adds a lift that's strongest near white and tapers
+    // to zero by the midtones (exponent 2.2 keeps midtones/shadows nearly
+    // untouched), so a dull image's brightest tones reach white again without
+    // brightening the overall exposure. Runs before brightness so brightness'
+    // highlightProtect then keeps the recovered whites from blowing further.
+    if (dewashWP > 0) {
+      const lumW = (r*0.299+g*0.587+b*0.114)/255;
+      const add  = dewashWP * Math.pow(Math.max(0, lumW), 2.2);
+      r=clamp(r+add); g=clamp(g+add); b=clamp(b+add);
     }
 
     // 2. Brightness -- protect shadows/highlights from extreme push
@@ -18103,7 +18132,23 @@ function processPixels(src, adj, imgStats) {
           // decay + a higher floor now give mid/high-chroma colours a real
           // lift too (the "more lively" look), while vibrance weighting
           // still favours muted areas so saturated colours don't go gaudy.
-          const vibF = Math.max(0.30, Math.exp(-chromaN*9));
+          let vibF = Math.max(0.30, Math.exp(-chromaN*9));
+          // Skin-tone protection: a global vibrance push drives skin orange
+          // and waxy ("oompa-loompa" skin) -- the classic artefact of
+          // saturating a portrait. Detect skin via the same normalized-
+          // chromaticity test analyzeImage uses for face detection and damp
+          // the boost on those pixels so faces keep a natural tone while the
+          // rest of the frame still gets the full lift. (Warm-toned objects
+          // that share skin chromaticity -- wood, bread, terracotta -- are
+          // also ones you don't want pushed garish-orange, so damping them
+          // too is, if anything, a second win rather than a false positive.)
+          const total = cr+cg+cb;
+          if (total > 30) {
+            const nr=cr/total, ng=cg/total, nb=cb/total;
+            if (nr>0.36&&nr<0.47&&ng>0.27&&ng<0.37&&nb>0.18&&nb<0.33&&cr>cg&&cg>=cb&&(cr-cg)>8&&(cr-cg)<45) {
+              vibF *= 0.45;
+            }
+          }
           const sf   = Math.min(1.90, 1 + (adj.saturation/100) * 1.30 * vibF * Math.max(0.78, contScale));
           r=clamp(luma + sf*(cr-luma));
           g=clamp(luma + sf*(cg-luma));
