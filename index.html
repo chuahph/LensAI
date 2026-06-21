@@ -18485,17 +18485,21 @@ function sceneSorterAgent(stats) {
   return stats.scene;
 }
 
-// Recovers the subfolder a photo originally lived in when it was picked
-// via "Choose folder" (webkitRelativePath is only populated by that
-// picker, e.g. "MyAlbum/Vacation/IMG001.jpg") -- the top-level picked
-// folder itself is dropped since every photo shares it and it's not
-// meaningful structure to preserve. Returns null for anything picked
-// individually (e.g. from the iOS Photos picker), or for files sitting
-// directly in the picked folder's root with no subfolder to keep.
+// Recovers the folder a photo originally lived in when it was picked via
+// "Choose folder" (webkitRelativePath is only populated by that picker,
+// e.g. "MyAlbum/Vacation/IMG001.jpg" or "MyAlbum/IMG002.jpg"). Keeps the
+// full original path including the top-level picked folder -- dropping it
+// for root-level files used to make those fall back to scene grouping
+// while their sibling subfolder photos kept their real location, an
+// inconsistent mix that looked like (and was mistaken for) HDR/scene
+// grouping. Now any photo with folder info keeps its real location;
+// returns null only when there's none at all (e.g. picked individually
+// from the iOS Photos picker), which is the one case scene grouping
+// should still apply.
 function locationGroupAgent(file) {
   const rel = file.webkitRelativePath || "";
   if (!rel) return null;
-  const parts = rel.split("/").slice(1, -1);
+  const parts = rel.split("/").slice(0, -1);
   return parts.length ? parts.join("/") : null;
 }
 
