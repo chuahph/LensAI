@@ -19002,6 +19002,15 @@ function App() {
       m.highlights = Math.max(m.highlights, -25);
       m.warmth = Math.max(m.warmth, 5);
       m.colorTone = Math.max(m.colorTone, 8);
+      // Smart HDR's base brightness (7) is tuned for landscape, where the
+      // sky carries the exposure; on a face-forward shot the subject is
+      // often the darker element and reads underexposed once the highlight
+      // recovery pulls the background down. Nudge brightness up toward
+      // Portrait's level (15) -- not all the way, just enough to lift the
+      // face -- and lift shadows a touch (Portrait uses 9 vs Smart HDR's 4)
+      // so the subject emerges instead of sitting in the recovered shadows.
+      m.brightness = Math.max(m.brightness, 12);
+      m.shadows = Math.max(m.shadows, 8);
     }
     hdrRef.current=id; setActiveHDR(id); setAdj(m);
     enhancedAdjRef.current = m; setHasEnhanced(true); setViewMode(null);
