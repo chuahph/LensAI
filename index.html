@@ -18386,6 +18386,100 @@ function imageDataToCanvas(imageData) {
   return c;
 }
 
+// Pure merge of an HDR preset onto a base adj object (no React state) --
+// shared by the interactive Enhance button (applyHDR, inside App) and the
+// unattended Batch Agent below, so the two never drift out of sync.
+// contrast/fade stay excluded from presets, same reasoning as elsewhere:
+// they're left for the user's own slider control.
+function computeHDRAdj(baseAdj, presetId, stats) {
+  const p = HDR_PRESETS.find(h => h.id === presetId);
+  if (!p) return baseAdj;
+  const m = { ...baseAdj };
+  Object.entries(p.values).forEach(([k, v]) => { if (k !== "contrast" && k !== "fade") m[k] = v; });
+  if (presetId === "smartHDR" && stats && stats.hasFace) {
+    // See the matching comment block in applyHDR for why these specific
+    // faces-vs-landscape caps/nudges exist.
+    m.saturation = Math.min(m.saturation, 30);
+    m.dehaze = Math.min(m.dehaze, 10);
+    m.highlights = Math.max(m.highlights, -25);
+    m.warmth = Math.max(m.warmth, 5);
+    m.colorTone = Math.max(m.colorTone, 8);
+    m.brightness = Math.max(m.brightness, 12);
+    m.shadows = Math.max(m.shadows, 8);
+  }
+  return m;
+}
+
+// === Batch Agent =====================================================
+// Goal-based, unattended multi-photo pipeline: given a goal (an HDR
+// preset id, "auto" to auto-detect per photo, or "none" for corrections
+// only) it runs the same analyze -> correct -> (optional) HDR steps as
+// the interactive editor on each photo in turn, with zero per-photo
+// input. Deliberately decoupled from the App component's state -- it
+// never touches the photo currently open in the main editor, so running
+// a batch can't disturb in-progress interactive edits.
+async function batchProcessFile(file, goalId) {
+  const dataUrl = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = e => resolve(e.target.result);
+    r.onerror = () => reject(new Error("Could not read file"));
+    r.readAsDataURL(file);
+  });
+  const image = await new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => reject(new Error("Could not decode image"));
+    im.src = dataUrl;
+  });
+
+  // Unattended over potentially many photos -- capped well below the
+  // interactive editor's 12000px full-res export ceiling so a large
+  // batch stays fast and doesn't risk exhausting tab memory processing
+  // several full-res images back to back with no user able to intervene.
+  const MAX = 2400;
+  let w = image.width, h = image.height;
+  if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
+  if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; }
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d");
+  ctx.drawImage(image, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h);
+
+  const stats = analyzeImage(data);
+  const fallback = buildFallback(stats);
+  let adj = blankAdj();
+  Object.entries(fallback.adjustments || {}).forEach(([k, v]) => {
+    if (v.rec !== 0 && k !== "saturation" && k !== "contrast" && k !== "fade") adj[k] = v.rec;
+  });
+
+  const hdrId = goalId === "auto" ? autoSelectHDR(stats) : goalId === "none" ? null : goalId;
+  if (hdrId) adj = computeHDRAdj(adj, hdrId, stats);
+
+  const processed = processPixels(data, adj, stats);
+  const outCv = imageDataToCanvas(processed);
+  const blob = await new Promise(resolve => outCv.toBlob(resolve, "image/jpeg", 0.92));
+
+  // Thumbnail drawn (and the source blob produced above) before this
+  // function returns -- imageDataToCanvas hands back a shared scratch
+  // canvas that the next sequential batch item will redraw into, so
+  // nothing from outCv can be read lazily after this call returns.
+  const TW = 220;
+  const th = Math.max(1, Math.round(TW * outCv.height / outCv.width));
+  const thumbCv = document.createElement("canvas");
+  thumbCv.width = TW; thumbCv.height = th;
+  thumbCv.getContext("2d").drawImage(outCv, 0, 0, TW, th);
+
+  const preset = HDR_PRESETS.find(h => h.id === hdrId);
+  return {
+    name: file.name,
+    blob,
+    thumb: thumbCv.toDataURL("image/jpeg", 0.7),
+    hdrLabel: preset ? preset.label : null,
+    score: fallback.overallScore,
+  };
+}
+
 // Vertical keystone correction: warps the image into a trapezoid (one edge
 // narrower, the other wider) by drawing it as a stack of independently
 // horizontally-scaled strips, then scales the whole result up just enough
@@ -18745,6 +18839,7 @@ function App() {
   const [toast,     setToast]     = useState(null);
   const [modal,     setModal]     = useState(false);
   const [appClosed, setAppClosed] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
   const [analyzed,  setAnalyzed]  = useState(false);
   const [imgStats,  setImgStats]  = useState(null);
   const [origFileName,setOrigFileName]=useState(null);
@@ -18981,37 +19076,10 @@ function App() {
   const applyHDR=(id)=>{
     const p=HDR_PRESETS.find(h=>h.id===id); if(!p) return;
     saveHist();
-    // contrast/fade stay under the user's own slider control -- see the
-    // matching note in autoApplyAfterAnalysis for why presets shouldn't
-    // touch them.
-    const m={...adj}; Object.entries(p.values).forEach(([k,v])=>{ if(k!=="contrast"&&k!=="fade") m[k]=v; });
-    if (id === "smartHDR" && imgStats && imgStats.hasFace) {
-      // Smart HDR's saturation/dehaze are tuned for sky/landscape rescue --
-      // at full strength on skin they read as oversaturated and waxy. The
-      // previous caps (46/20) were still visibly too vivid on faces, so
-      // they're pulled down further, closer to the dedicated Portrait
-      // preset's own saturation (42) and near-zero dehaze.
-      m.saturation = Math.min(m.saturation, 30);
-      m.dehaze = Math.min(m.dehaze, 10);
-      // Smart HDR's -46 highlight recovery is also tuned for blown skies --
-      // at that strength it flattens/greys skin tone, so it's softened here
-      // too. With saturation/dehaze pulled back, Smart HDR's colorTone/
-      // warmth (both 0 by default) leave skin reading flat and slightly
-      // cool -- nudge them toward Portrait's own gentle warm push (warmth:6,
-      // colorTone:10) so faces don't look sickly under the reduced dehaze.
-      m.highlights = Math.max(m.highlights, -25);
-      m.warmth = Math.max(m.warmth, 5);
-      m.colorTone = Math.max(m.colorTone, 8);
-      // Smart HDR's base brightness (7) is tuned for landscape, where the
-      // sky carries the exposure; on a face-forward shot the subject is
-      // often the darker element and reads underexposed once the highlight
-      // recovery pulls the background down. Nudge brightness up toward
-      // Portrait's level (15) -- not all the way, just enough to lift the
-      // face -- and lift shadows a touch (Portrait uses 9 vs Smart HDR's 4)
-      // so the subject emerges instead of sitting in the recovered shadows.
-      m.brightness = Math.max(m.brightness, 12);
-      m.shadows = Math.max(m.shadows, 8);
-    }
+    // contrast/fade stay under the user's own slider control, and the
+    // smartHDR-on-faces tuning below -- see computeHDRAdj (shared with the
+    // Batch Agent so the two never drift out of sync) for both.
+    const m=computeHDRAdj(adj, id, imgStats);
     hdrRef.current=id; setActiveHDR(id); setAdj(m);
     enhancedAdjRef.current = m; setHasEnhanced(true); setViewMode(null);
     showToast("HDR "+p.label+" applied");
@@ -19195,7 +19263,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
             React.createElement("span",{style:{fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:8,background:activePre.color+"22",color:activePre.color,border:"1px solid "+activePre.color+"44"}},"HDR",activePre.label)
           )),React.createElement("div",{style:{display:"flex",gap:6,alignItems:"center",overflowX:"auto",overflowY:"hidden",scrollbarWidth:"none",minWidth:0,flexShrink:1}},analyzed&&analysis&&(
             React.createElement("button",{onClick:()=>{clearTimeout(modalAutoCloseRef.current);setModal(true);},title:"Show analyze & correction summary",style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(99,102,241,0.35)",background:"rgba(99,102,241,0.08)",color:"#a5b4fc",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:5}},React.createElement("span",{style:{width:5,height:5,borderRadius:"50%",background:"#a5b4fc",display:"inline-block"}}),"Summary")
-          ),React.createElement(Btn,{onClick:undo,disabled:!history.length},"Undo"),React.createElement(Btn,{onClick:reset,disabled:!img},"Reset"),false),React.createElement("div",{style:{flexShrink:0,marginLeft:6,display:"flex",alignItems:"center",gap:8}},React.createElement(Btn,{onClick:saveImg,disabled:!img||!(analyzed||hasEnhanced),accent:true},"Save"),React.createElement("button",{onClick:closeApp,title:"Close LensAI","aria-label":"Close LensAI",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×"))),React.createElement("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden",background:"#020408",cursor:!img?"pointer":"default",minHeight:0},onClick:!img?()=>fileRef.current&&fileRef.current.click():undefined},React.createElement("div",{ref:compareWrapRef,style:{position:"relative",display:img?"inline-block":"none",maxWidth:"100%",maxHeight:"100%"}},React.createElement("canvas",{ref:canvasRef,style:{maxWidth:"100%",maxHeight:"100%",height:"auto",width:"auto",display:"block",borderRadius:3}}),img&&viewMode&&React.createElement("div",{style:{position:"absolute",top:8,left:8,background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:9,fontWeight:800,letterSpacing:"0.1em",padding:"3px 8px",borderRadius:6,pointerEvents:"none"}},viewMode==="original"?"ORIGINAL":viewMode==="analyzed"?"CORRECTION":"HDR"),img&&React.createElement(TransformOverlay,{crop,setCrop,rotation:adj.rotation||0,onRotation:v=>setAdj(p=>({...p,rotation:v})),perspective:adj.perspective||0,onPerspective:v=>setAdj(p=>({...p,perspective:v})),hidden:!!viewMode}),img&&analyzed&&React.createElement("div",{style:{position:"absolute",bottom:10,left:"50%",transform:"translateX(-50%)",display:"flex",gap:6,zIndex:3}},
+          ),React.createElement(Btn,{onClick:undo,disabled:!history.length},"Undo"),React.createElement(Btn,{onClick:reset,disabled:!img},"Reset"),false),React.createElement("div",{style:{flexShrink:0,marginLeft:6,display:"flex",alignItems:"center",gap:8}},React.createElement(Btn,{onClick:()=>setBatchOpen(true)},"Batch"),React.createElement(Btn,{onClick:saveImg,disabled:!img||!(analyzed||hasEnhanced),accent:true},"Save"),React.createElement("button",{onClick:closeApp,title:"Close LensAI","aria-label":"Close LensAI",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×"))),React.createElement("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden",background:"#020408",cursor:!img?"pointer":"default",minHeight:0},onClick:!img?()=>fileRef.current&&fileRef.current.click():undefined},React.createElement("div",{ref:compareWrapRef,style:{position:"relative",display:img?"inline-block":"none",maxWidth:"100%",maxHeight:"100%"}},React.createElement("canvas",{ref:canvasRef,style:{maxWidth:"100%",maxHeight:"100%",height:"auto",width:"auto",display:"block",borderRadius:3}}),img&&viewMode&&React.createElement("div",{style:{position:"absolute",top:8,left:8,background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:9,fontWeight:800,letterSpacing:"0.1em",padding:"3px 8px",borderRadius:6,pointerEvents:"none"}},viewMode==="original"?"ORIGINAL":viewMode==="analyzed"?"CORRECTION":"HDR"),img&&React.createElement(TransformOverlay,{crop,setCrop,rotation:adj.rotation||0,onRotation:v=>setAdj(p=>({...p,rotation:v})),perspective:adj.perspective||0,onPerspective:v=>setAdj(p=>({...p,perspective:v})),hidden:!!viewMode}),img&&analyzed&&React.createElement("div",{style:{position:"absolute",bottom:10,left:"50%",transform:"translateX(-50%)",display:"flex",gap:6,zIndex:3}},
             React.createElement("button",{onClick:()=>setViewMode(v=>v==="original"?null:"original"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="original"?"#a5b4fc":BORD),background:viewMode==="original"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="original"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"Original"),
             React.createElement("button",{onClick:()=>setViewMode(v=>v==="analyzed"?null:"analyzed"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="analyzed"?"#a5b4fc":BORD),background:viewMode==="analyzed"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="analyzed"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"Correction"),
             hasEnhanced&&React.createElement("button",{onClick:()=>setViewMode(v=>v==="enhanced"?null:"enhanced"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="enhanced"?"#a5b4fc":BORD),background:viewMode==="enhanced"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="enhanced"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"HDR")
@@ -19241,7 +19309,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
                   React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(99,102,241,0.07)",borderRadius:10,padding:"9px 12px",border:"1px solid rgba(99,102,241,0.14)"}},React.createElement("span",{style:{fontSize:12,color:"#64748b"}},"HDR detected -- tap Enhance to apply"),React.createElement("span",{style:{fontSize:12,color:hp.color,fontWeight:700}},hp.label,hp.skyBoost?" + Sky boost":""))
                 ):null;
               })(),React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,padding:"8px 12px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.18)",borderRadius:10}},React.createElement("span",{style:{fontSize:13}},"OK"),React.createElement("span",{style:{fontSize:12,color:"#86efac"}},"Corrections applied -- tap outside or swipe down to dismiss")))))
-      ),toast&&React.createElement("div",{style:{position:"fixed",bottom:68,left:"50%",transform:"translateX(-50%)",background:"rgba(13,18,32,0.97)",backdropFilter:"blur(12px)",border:"1px solid "+BORD,borderRadius:20,padding:"8px 18px",fontSize:12,fontWeight:600,whiteSpace:"nowrap",zIndex:100,boxShadow:"0 6px 20px rgba(0,0,0,0.4)",animation:"slideUp 0.25s ease-out"}},toast)));
+      ),batchOpen&&React.createElement(BatchAgent,{onClose:()=>setBatchOpen(false)}),toast&&React.createElement("div",{style:{position:"fixed",bottom:68,left:"50%",transform:"translateX(-50%)",background:"rgba(13,18,32,0.97)",backdropFilter:"blur(12px)",border:"1px solid "+BORD,borderRadius:20,padding:"8px 18px",fontSize:12,fontWeight:600,whiteSpace:"nowrap",zIndex:100,boxShadow:"0 6px 20px rgba(0,0,0,0.4)",animation:"slideUp 0.25s ease-out"}},toast)));
 }
 
 function Flag({children,color}){
@@ -19252,6 +19320,106 @@ function Btn({children,onClick,disabled,accent}){
 }
 function Spin(){
   return React.createElement("span",{style:{width:10,height:10,borderRadius:"50%",border:"2px solid rgba(255,255,255,0.2)",borderTopColor:"#fff",display:"inline-block",animation:"spin 0.5s linear infinite"}});
+}
+
+// Goal-based batch agent UI: pick a goal + a pile of photos, tap Run, and
+// every photo gets analyzed/corrected (and optionally HDR-enhanced) on its
+// own via batchProcessFile -- no per-photo interaction. Fully self-contained
+// (its own state, own file input) so it can sit on top of the main editor
+// without touching whatever photo is currently open there.
+function BatchAgent({onClose}){
+  const fileInputRef=useRef(null);
+  const [files,setFiles]=useState([]);
+  const [goal,setGoal]=useState("auto");
+  const [busy,setBusy]=useState(false);
+  const [progress,setProgress]=useState(0);
+  const [results,setResults]=useState([]);
+
+  const GOALS=[
+    {id:"auto",label:"Auto-detect per photo"},
+    {id:"none",label:"Corrections only"},
+    ...HDR_PRESETS.map(h=>({id:h.id,label:h.label})),
+  ];
+
+  const onPick=(e)=>{
+    const list=Array.from(e.target.files||[]);
+    setFiles(list); setResults([]);
+    e.target.value="";
+  };
+
+  const run=async()=>{
+    if(!files.length||busy) return;
+    setBusy(true); setProgress(0); setResults([]);
+    const out=[];
+    for(let i=0;i<files.length;i++){
+      try { out.push(await batchProcessFile(files[i], goal)); }
+      catch(err){
+        console.error("[LensAI] Batch item failed:", files[i].name, err);
+        out.push({ name: files[i].name, error: true });
+      }
+      setProgress(i+1);
+      setResults([...out]);
+      // Yield a tick between photos so the progress UI actually paints
+      // instead of the whole batch running inside one blocked frame.
+      await new Promise(r=>setTimeout(r,0));
+    }
+    setBusy(false);
+  };
+
+  const downloadOne=(r)=>{
+    if(!r.blob) return;
+    const url=URL.createObjectURL(r.blob);
+    const a=document.createElement("a");
+    a.href=url;
+    const stem=(r.name||"photo").replace(/\.[^/.]+$/,"");
+    a.download=stem+"-batch-"+Date.now()+".jpg";
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadAll=async()=>{
+    // Stagger sequential downloads -- triggering many a.click() downloads
+    // within the same tick makes browsers treat it as a download flood
+    // and silently block all but the first one.
+    for(const r of results){
+      if(!r.blob) continue;
+      downloadOne(r);
+      await new Promise(res=>setTimeout(res,350));
+    }
+  };
+
+  const doneCount=results.filter(r=>!r.error).length;
+  const BORD="rgba(255,255,255,0.07)";
+
+  return React.createElement("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",backdropFilter:"blur(12px)",display:"flex",alignItems:"flex-end",zIndex:60,animation:"fadeIn 0.2s",paddingBottom:"env(safe-area-inset-bottom)"},onClick:e=>{if(e.target===e.currentTarget&&!busy) onClose();}},
+    React.createElement("div",{style:{background:"#0d1220",borderRadius:"22px 22px 0 0",borderTop:"1px solid "+BORD,width:"100%",maxHeight:"88vh",overflowY:"auto",animation:"slideUp 0.3s ease-out"}},
+      React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 16px 12px",borderBottom:"1px solid "+BORD}},
+        React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:800,fontSize:18}},"Batch Agent"),
+        React.createElement("button",{onClick:()=>{if(!busy)onClose();},disabled:busy,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",opacity:busy?0.4:1}},"×")
+      ),
+      React.createElement("div",{style:{padding:"14px 16px 24px",display:"flex",flexDirection:"column",gap:12}},
+        React.createElement("div",{style:{fontSize:12,color:"#64748b",lineHeight:1.5}},"Pick a batch of photos and a goal -- the agent analyzes and corrects each photo on its own, no per-photo input needed."),
+        React.createElement("input",{ref:fileInputRef,type:"file",accept:"image/*",multiple:true,style:{display:"none"},onChange:onPick}),
+        React.createElement("button",{onClick:()=>fileInputRef.current&&fileInputRef.current.click(),disabled:busy,style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"left"}},files.length?files.length+" photo"+(files.length>1?"s":"")+" selected -- tap to change":"Choose photos"),
+        React.createElement("div",null,
+          React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Goal"),
+          React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.map(g=>React.createElement("button",{key:g.id,onClick:()=>setGoal(g.id),disabled:busy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(goal===g.id?"#6366f1":BORD),background:goal===g.id?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:goal===g.id?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit"}},g.label)))
+        ),
+        React.createElement("button",{onClick:run,disabled:!files.length||busy,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||busy)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+files.length+"..."):"Run batch agent"),
+        results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},
+          React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"),
+          !busy&&doneCount>0&&React.createElement("button",{onClick:downloadAll,style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Download all")
+        ),
+        results.length>0&&React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(96px,1fr))",gap:8}},results.map((r,i)=>React.createElement("div",{key:i,style:{position:"relative",borderRadius:10,overflow:"hidden",background:"#131b2c",border:"1px solid "+BORD}},
+          r.error
+            ? React.createElement("div",{style:{height:96,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#f87171",padding:6,textAlign:"center"}},"Failed")
+            : React.createElement("img",{src:r.thumb,style:{width:"100%",height:96,objectFit:"cover",display:"block"}}),
+          !r.error&&React.createElement("button",{onClick:()=>downloadOne(r),title:"Download",style:{position:"absolute",bottom:4,right:4,width:22,height:22,borderRadius:"50%",border:"none",background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}},"↓"),
+          !r.error&&r.hdrLabel&&React.createElement("div",{style:{position:"absolute",top:4,left:4,background:"rgba(0,0,0,0.6)",color:"#a5b4fc",fontSize:8,fontWeight:700,padding:"2px 5px",borderRadius:5}},r.hdrLabel)
+        )))
+      )
+    )
+  );
 }
 
 // Direct-manipulation overlay drawn on top of the preview canvas: drag the
