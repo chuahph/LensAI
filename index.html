@@ -19033,23 +19033,36 @@ function App() {
   };
   const closeApp=()=>{
     if(!window.confirm("Close LensAI?")) return;
-    // Goal: actually close the browser tab/window. window.close() only
-    // works on a window/tab that script itself opened (e.g. via
-    // window.open) -- on a normal user-navigated tab, browsers silently
-    // ignore it for security reasons. We try the strongest options in
-    // order:
-    //   1. window.close() directly (works in PWA/standalone & script-
-    //      opened tabs).
-    //   2. The window.open('','_self') trick: re-claims the current
-    //      window as script-opened in some engines so the following
-    //      close() is permitted.
-    // If the tab is genuinely a normal browser tab, both are blocked and
-    // the page is still here a tick later -- only THEN do we swap in the
-    // "you can close this tab now" screen, so when closing actually
-    // succeeds the user never sees a flash of fallback UI first.
-    try { window.close(); } catch(e) {}
-    try { window.open("", "_self"); window.close(); } catch(e) {}
-    setTimeout(() => { setAppClosed(true); }, 150);
+    // Goal: actually close the browser tab/window (or, if running inside
+    // a native wrapper, quit that too) -- not just unmount the React app.
+    // window.close() only works on a window/tab that script itself opened;
+    // a normal user-navigated tab blocks it for security reasons with no
+    // override, by design, so there is no JS trick that reliably closes
+    // an arbitrary tab. We make a best effort across every environment
+    // that *does* allow it, then keep retrying for a few seconds in case
+    // the attempt that succeeds takes a moment (e.g. a native bridge call
+    // that quits asynchronously) -- only falling back to the in-app
+    // "you can close this tab now" screen once we give up, so a
+    // successful close never shows a flash of fallback UI first.
+    const attemptClose=()=>{
+      try { window.close(); } catch(e) {}
+      // Re-claiming the window as script-opened lets close() succeed in
+      // some engines even on a user-navigated tab.
+      try { window.open("", "_self"); window.close(); } catch(e) {}
+      // Native wrapper shells, feature-detected so this is a no-op in a
+      // plain browser tab: Cordova/PhoneGap, Capacitor, and Electron's
+      // renderer-side window handle, if any of them happen to be present.
+      try { if (window.navigator && navigator.app && navigator.app.exitApp) navigator.app.exitApp(); } catch(e) {}
+      try { if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App) window.Capacitor.Plugins.App.exitApp(); } catch(e) {}
+      try { if (window.require) window.require("electron").remote.getCurrentWindow().close(); } catch(e) {}
+    };
+    attemptClose();
+    let tries=0;
+    const retry=setInterval(()=>{
+      tries++;
+      attemptClose();
+      if (tries>=8) { clearInterval(retry); setAppClosed(true); }
+    }, 400);
   };
   const saveImg=async()=>{
     if(!img) return;
