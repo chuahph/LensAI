@@ -19730,7 +19730,7 @@ function BatchAgent({onClose}){
   // Multiple goals can be selected at once: each selected goal produces
   // its own exported variant per photo, so e.g. picking both "Smart HDR"
   // and "Nature" yields 2 variants per photo to compare and pick from.
-  const [goals,setGoals]=useState(["auto"]);
+  const [goals,setGoals]=useState(["fullAuto"]);
   const [busy,setBusy]=useState(false);
   const [progress,setProgress]=useState(0);
   const [progressTotal,setProgressTotal]=useState(0);
