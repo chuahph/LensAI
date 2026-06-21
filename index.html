@@ -18410,28 +18410,41 @@ function computeHDRAdj(baseAdj, presetId, stats) {
   return m;
 }
 
-// === Batch Agent =====================================================
-// Goal-based, unattended multi-photo pipeline: given a goal (an HDR
-// preset id, "auto" to auto-detect per photo, or "none" for corrections
-// only) it runs the same analyze -> correct -> (optional) HDR steps as
-// the interactive editor on each photo in turn, with zero per-photo
-// input. Deliberately decoupled from the App component's state -- it
-// never touches the photo currently open in the main editor, so running
-// a batch can't disturb in-progress interactive edits.
-async function batchProcessFile(file, goalId) {
+// === Batch Agent ecosystem ============================================
+// Goal-based, unattended multi-photo pipeline, split into small single-
+// purpose agents that batchProcessFile hands a photo through in turn:
+//   decodeAgent       -- file bytes -> decoded Image
+//   analysisAgent     -- decoded Image -> resized ImageData + scene stats
+//   goalDetectionAgent-- goal id ("auto"/"none"/preset id) + stats -> hdrId
+//   correctionAgent   -- scene stats -> baseline correction adjustments
+//   enhancementAgent  -- baseline adj + hdrId -> final adj (HDR merged in)
+//   renderAgent       -- ImageData + final adj -> output blob + thumbnail
+// Each is a pure/standalone function (no React state), so they're reused
+// as-is by the interactive editor where applicable (applyHDR shares
+// enhancementAgent's logic via computeHDRAdj) and can be tested or
+// recombined independently of the batch UI. batchProcessFile is just the
+// orchestrator that runs them in sequence and reports which stage is
+// active via the optional onStage callback. Deliberately decoupled from
+// the App component's state -- it never touches the photo currently open
+// in the main editor, so running a batch can't disturb in-progress
+// interactive edits.
+
+async function decodeAgent(file) {
   const dataUrl = await new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = e => resolve(e.target.result);
     r.onerror = () => reject(new Error("Could not read file"));
     r.readAsDataURL(file);
   });
-  const image = await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const im = new Image();
     im.onload = () => resolve(im);
     im.onerror = () => reject(new Error("Could not decode image"));
     im.src = dataUrl;
   });
+}
 
+function analysisAgent(image) {
   // Unattended over potentially many photos -- capped well below the
   // interactive editor's 12000px full-res export ceiling so a large
   // batch stays fast and doesn't risk exhausting tab memory processing
@@ -18445,17 +18458,26 @@ async function batchProcessFile(file, goalId) {
   const ctx = cv.getContext("2d");
   ctx.drawImage(image, 0, 0, w, h);
   const data = ctx.getImageData(0, 0, w, h);
+  return { data, stats: analyzeImage(data) };
+}
 
-  const stats = analyzeImage(data);
-  const fallback = buildFallback(stats);
-  let adj = blankAdj();
+function goalDetectionAgent(goalId, stats) {
+  return goalId === "auto" ? autoSelectHDR(stats) : goalId === "none" ? null : goalId;
+}
+
+function correctionAgent(fallback) {
+  const adj = blankAdj();
   Object.entries(fallback.adjustments || {}).forEach(([k, v]) => {
     if (v.rec !== 0 && k !== "saturation" && k !== "contrast" && k !== "fade") adj[k] = v.rec;
   });
+  return adj;
+}
 
-  const hdrId = goalId === "auto" ? autoSelectHDR(stats) : goalId === "none" ? null : goalId;
-  if (hdrId) adj = computeHDRAdj(adj, hdrId, stats);
+function enhancementAgent(baseAdj, hdrId, stats) {
+  return hdrId ? computeHDRAdj(baseAdj, hdrId, stats) : baseAdj;
+}
 
+async function renderAgent(data, adj, stats) {
   const processed = processPixels(data, adj, stats);
   const outCv = imageDataToCanvas(processed);
   const blob = await new Promise(resolve => outCv.toBlob(resolve, "image/jpeg", 0.92));
@@ -18469,13 +18491,31 @@ async function batchProcessFile(file, goalId) {
   const thumbCv = document.createElement("canvas");
   thumbCv.width = TW; thumbCv.height = th;
   thumbCv.getContext("2d").drawImage(outCv, 0, 0, TW, th);
+  return { blob, thumb: thumbCv.toDataURL("image/jpeg", 0.7) };
+}
+
+async function batchProcessFile(file, goalId, onStage) {
+  const note = s => onStage && onStage(s);
+  note("decode");
+  const image = await decodeAgent(file);
+  note("analyze");
+  const { data, stats } = analysisAgent(image);
+  note("goal");
+  const hdrId = goalDetectionAgent(goalId, stats);
+  note("correct");
+  const fallback = buildFallback(stats);
+  const baseAdj = correctionAgent(fallback);
+  note("enhance");
+  const finalAdj = enhancementAgent(baseAdj, hdrId, stats);
+  note("render");
+  const { blob, thumb } = await renderAgent(data, finalAdj, stats);
 
   const preset = HDR_PRESETS.find(h => h.id === hdrId);
   return {
     name: file.name,
     goalId,
     blob,
-    thumb: thumbCv.toDataURL("image/jpeg", 0.7),
+    thumb,
     hdrLabel: preset ? preset.label : null,
     score: fallback.overallScore,
   };
@@ -19339,6 +19379,12 @@ function BatchAgent({onClose}){
   const [progress,setProgress]=useState(0);
   const [progressTotal,setProgressTotal]=useState(0);
   const [results,setResults]=useState([]);
+  const [stage,setStage]=useState(null);
+
+  // Mirrors the agent names in batchProcessFile's pipeline (decodeAgent,
+  // analysisAgent, ...) so the busy indicator reflects which agent is
+  // actually running on the current photo, not just a generic spinner.
+  const STAGE_LABELS={decode:"Reading photo",analyze:"Analyzing scene",goal:"Selecting goal",correct:"Computing corrections",enhance:"Applying HDR",render:"Rendering output"};
 
   const GOALS=[
     {id:"auto",label:"Auto-detect per photo"},
@@ -19358,14 +19404,14 @@ function BatchAgent({onClose}){
 
   const run=async()=>{
     if(!files.length||!goals.length||busy) return;
-    setBusy(true); setProgress(0); setResults([]);
+    setBusy(true); setProgress(0); setResults([]); setStage(null);
     const total=files.length*goals.length;
     setProgressTotal(total);
     const out=[];
     let done=0;
     for(let i=0;i<files.length;i++){
       for(let j=0;j<goals.length;j++){
-        try { out.push(await batchProcessFile(files[i], goals[j])); }
+        try { out.push(await batchProcessFile(files[i], goals[j], setStage)); }
         catch(err){
           console.error("[LensAI] Batch item failed:", files[i].name, goals[j], err);
           out.push({ name: files[i].name, goalId: goals[j], error: true });
@@ -19378,6 +19424,7 @@ function BatchAgent({onClose}){
         await new Promise(r=>setTimeout(r,0));
       }
     }
+    setStage(null);
     setBusy(false);
   };
 
@@ -19432,7 +19479,7 @@ function BatchAgent({onClose}){
             return React.createElement("button",{key:g.id,onClick:()=>toggleGoal(g.id),disabled:busy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:5}},active&&React.createElement("span",{style:{fontSize:10}},"✓"),g.label);
           }))
         ),
-        React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+"..."):"Run batch agent"),
+        React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+(stage?" • "+STAGE_LABELS[stage]:"")+"..."):"Run batch agent"),
         results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},
           React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"),
           !busy&&doneCount>0&&React.createElement("button",{onClick:downloadAll,style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Download all")
