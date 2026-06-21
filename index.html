@@ -18711,7 +18711,6 @@ if (!document.getElementById("lensai-css")) {
 // ============================================================
 function App() {
   const canvasRef    = useRef(null);
-  const origCanvasRef= useRef(null);
   const compareWrapRef = useRef(null);
   const fileRef      = useRef(null);
   const toastRef     = useRef(null);
@@ -18720,6 +18719,8 @@ function App() {
   const statsRef     = useRef(null);
   const fullResRef   = useRef(null);   // original image at true file resolution
   const fullResStats = useRef(null);   // stats computed from full-res data
+  const analyzedAdjRef = useRef(null); // adj snapshot right after Analyze (corrections only, no HDR)
+  const enhancedAdjRef = useRef(null); // adj snapshot right after Enhance (corrections + HDR look)
 
   const [img,       setImg]       = useState(null);
   const [adj,       setAdj]       = useState(blankAdj());
@@ -18727,14 +18728,14 @@ function App() {
   const [fixes,     setFixes]     = useState({});
   const [analysis,  setAnalysis]  = useState(null);
   const [busy,      setBusy]      = useState(false);
-  const [compareSlider, setCompareSlider] = useState(50); // before/after divider, 0-100%
+  const [viewMode,  setViewMode]  = useState(null); // null|"original"|"analyzed"|"enhanced" -- bottom compare buttons
+  const [hasEnhanced,setHasEnhanced]=useState(false); // an HDR look has been applied via Enhance/a manual preset
   const [activeHDR, setActiveHDR] = useState(null);
   const [autoHDR,   setAutoHDR]   = useState(null);   // auto-detected HDR id
   const [history,   setHistory]   = useState([]);
   const [toast,     setToast]     = useState(null);
   const [modal,     setModal]     = useState(false);
   const [analyzed,  setAnalyzed]  = useState(false);
-  const comparing = analyzed; // before/after slider only enables once analysis + auto-corrections have run
   const [imgStats,  setImgStats]  = useState(null);
   const [origFileName,setOrigFileName]=useState(null);
   // Normalized crop rect (0..1) -- dragged directly on the preview photo,
@@ -18754,21 +18755,28 @@ function App() {
   // stuttery instead of smooth.
   const processedCacheRef = useRef({ img: null, key: "", data: null });
 
-  // Render on every adj change. Coalesced to one render per animation frame
-  // so rapid-fire slider drag events (which can outpace processPixels'
-  // per-pixel cost) don't queue up a backlog of stale renders.
+  // Render on every adj (or view-mode) change. Coalesced to one render per
+  // animation frame so rapid-fire slider drag events (which can outpace
+  // processPixels' per-pixel cost) don't queue up a backlog of stale renders.
+  // viewMode swaps which adj gets rendered (live edit vs. a frozen snapshot
+  // from Original/Analyzed/Enhanced) without touching the live `adj` state
+  // underneath, so switching views and switching back never loses an edit.
+  const displayAdj = viewMode==="original" ? blankAdj()
+    : viewMode==="analyzed" && analyzedAdjRef.current ? analyzedAdjRef.current
+    : viewMode==="enhanced" && enhancedAdjRef.current ? enhancedAdjRef.current
+    : adj;
   useEffect(()=>{
     if (!img||!canvasRef.current) return;
     const ctx=canvasRef.current.getContext("2d");
     const raf = requestAnimationFrame(()=>{
-      const { rotation, perspective, ...restAdj } = adj;
+      const { rotation, perspective, ...restAdj } = displayAdj;
       const key = JSON.stringify(restAdj);
       const cache = processedCacheRef.current;
       let processed;
       if (cache.img === img && cache.key === key) {
         processed = cache.data;
       } else {
-        processed = processPixels(img, adj, statsRef.current);
+        processed = processPixels(img, displayAdj, statsRef.current);
         processedCacheRef.current = { img, key, data: processed };
       }
       const w = processed.width, h = processed.height;
@@ -18776,40 +18784,7 @@ function App() {
       applyRotation(ctx, warped, w, h, rotation);
     });
     return ()=>cancelAnimationFrame(raf);
-  },[adj,img]);
-
-  // Before/after slider: renders the untouched original into a second
-  // canvas stacked on top of the main one, clipped to the divider position.
-  // Only runs while the compare overlay is open so it costs nothing otherwise.
-  useEffect(()=>{
-    if (!img||!comparing||!origCanvasRef.current) return;
-    const cv=origCanvasRef.current;
-    const src=fullResRef.current||img;
-    const w=src.width, h=src.height;
-    if (cv.width!==w||cv.height!==h){ cv.width=w; cv.height=h; }
-    const ctx=cv.getContext("2d");
-    const warped=applyPerspective(imageDataToCanvas(src), w, h, adj.perspective||0);
-    applyRotation(ctx, warped, w, h, adj.rotation||0);
-  },[img,comparing,adj.rotation,adj.perspective]);
-
-  // Drag the divider handle to reveal more/less of the original photo.
-  const onCompareDragStart = useCallback((e)=>{
-    e.preventDefault();
-    const el = compareWrapRef.current;
-    if (!el) return;
-    const move = (ev)=>{
-      const rect = el.getBoundingClientRect();
-      const x = ev.clientX - rect.left;
-      setCompareSlider(Math.min(100, Math.max(0, (x/rect.width)*100)));
-    };
-    move(e);
-    const up = ()=>{
-      window.removeEventListener("pointermove",move);
-      window.removeEventListener("pointerup",up);
-    };
-    window.addEventListener("pointermove",move);
-    window.addEventListener("pointerup",up);
-  },[]);
+  },[displayAdj,img]);
 
   const showToast=useCallback((msg)=>{
     clearTimeout(toastRef.current);
@@ -18870,6 +18845,8 @@ function App() {
       setCrop({ x: 0, y: 0, w: 1, h: 1 });
       setAnalyzed(false); setHistory([]); setActiveAdj(null);
       setActiveHDR(null); hdrRef.current=null;
+      setViewMode(null); setHasEnhanced(false);
+      analyzedAdjRef.current=null; enhancedAdjRef.current=null;
 
       const preset=HDR_PRESETS.find(h=>h.id===bestHDR);
       const mpx=((fw*fh)/1000000).toFixed(1);
@@ -18938,18 +18915,27 @@ function App() {
     // look (Smart HDR, Nature, etc.) is a separate, deliberate step the user
     // triggers via the "Enhance" button so it never gets silently re-applied
     // (or re-detected and swapped) every time Analyze/Re-Analyze runs.
+    //
+    // Every run of Analyze/Re-Analyze starts from a blank slate (keeping only
+    // geometry) rather than the previous adj -- this is what makes Re-Analyze
+    // discard any Enhance/HDR look that was applied earlier, leaving only the
+    // fresh corrections.
     setFixes(currentFixes => {
       setAnalysis(currentAnalysis => {
         if (currentAnalysis) {
           saveHist();
           setAdj(prevAdj => {
-            const na = { ...prevAdj };
+            const na = { ...blankAdj(), rotation: prevAdj.rotation, perspective: prevAdj.perspective };
             // saturation/contrast/fade are excluded: saturation and contrast/fade
             // are left for the user's own slider control or the Enhance step's
             // preset tuning, not buildFallback's generic per-photo guess.
             Object.entries(currentFixes).forEach(([k,v]) => { if (k!=="saturation"&&k!=="contrast"&&k!=="fade") na[k]=v; });
+            analyzedAdjRef.current = na;
             return na;
           });
+          setHasEnhanced(false);
+          setActiveHDR(null); hdrRef.current = null;
+          setViewMode(null);
           showToast("Auto-applied corrections");
         }
         return currentAnalysis;
@@ -18968,6 +18954,7 @@ function App() {
   const applyFix=(id)=>{
     if(fixes[id]===undefined) return;
     saveHist();
+    setViewMode(null);
     setAdj(p=>({...p,[id]:fixes[id]}));
     setFixes(p=>{const n={...p};delete n[id];return n;});
     showToast((ADJUSTMENTS.find(a=>a.id===id)?.label||id)+" set to "+(fixes[id]>0?"+":"")+fixes[id]);
@@ -18990,6 +18977,7 @@ function App() {
       m.dehaze = Math.min(m.dehaze, 20);
     }
     hdrRef.current=id; setActiveHDR(id); setAdj(m);
+    enhancedAdjRef.current = m; setHasEnhanced(true); setViewMode(null);
     showToast("HDR "+p.label+" applied");
   };
 
@@ -18997,13 +18985,15 @@ function App() {
   const undo=()=>{
     if(!history.length){showToast("Nothing to undo");return;}
     const prev=JSON.parse(history[history.length-1]);
-    setHistory(h=>h.slice(0,-1)); setAdj(prev.adj);
+    setHistory(h=>h.slice(0,-1)); setAdj(prev.adj); setViewMode(null);
     hdrRef.current=prev.hdr; setActiveHDR(prev.hdr); showToast("Undo applied");
   };
   const reset=()=>{
     saveHist(); setAdj(blankAdj()); setFixes({});
     setActiveHDR(null); hdrRef.current=null; setActiveAdj(null); showToast("Reset");
     setCrop({ x: 0, y: 0, w: 1, h: 1 });
+    setViewMode(null); setHasEnhanced(false);
+    analyzedAdjRef.current=null; enhancedAdjRef.current=null;
   };
   const saveImg=async()=>{
     if(!img) return;
@@ -19124,7 +19114,11 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
             React.createElement("span",{style:{fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:8,background:activePre.color+"22",color:activePre.color,border:"1px solid "+activePre.color+"44"}},"HDR",activePre.label)
           )),React.createElement("div",{style:{display:"flex",gap:6,alignItems:"center",overflowX:"auto",overflowY:"hidden",scrollbarWidth:"none",minWidth:0,flexShrink:1}},analyzed&&analysis&&(
             React.createElement("button",{onClick:()=>{clearTimeout(modalAutoCloseRef.current);setModal(true);},title:"Show analyze & correction summary",style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(99,102,241,0.35)",background:"rgba(99,102,241,0.08)",color:"#a5b4fc",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:5}},React.createElement("span",{style:{width:5,height:5,borderRadius:"50%",background:"#a5b4fc",display:"inline-block"}}),"Summary")
-          ),React.createElement(Btn,{onClick:undo,disabled:!history.length},"Undo"),React.createElement(Btn,{onClick:reset,disabled:!img},"Reset"),false),React.createElement("div",{style:{flexShrink:0,marginLeft:6}},React.createElement(Btn,{onClick:saveImg,disabled:!img,accent:true},"Save"))),React.createElement("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden",background:"#020408",cursor:!img?"pointer":"default",minHeight:0},onClick:!img?()=>fileRef.current&&fileRef.current.click():undefined},React.createElement("div",{ref:compareWrapRef,style:{position:"relative",display:img?"inline-block":"none",maxWidth:"100%",maxHeight:"100%"}},React.createElement("canvas",{ref:canvasRef,style:{maxWidth:"100%",maxHeight:"100%",height:"auto",width:"auto",display:"block",borderRadius:3}}),img&&comparing&&React.createElement("canvas",{ref:origCanvasRef,style:{position:"absolute",top:0,left:0,width:"100%",height:"100%",display:"block",borderRadius:3,clipPath:"inset(0 "+(100-compareSlider)+"% 0 0)",pointerEvents:"none"}}),img&&comparing&&React.createElement("div",{style:{position:"absolute",top:8,left:8,background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:9,fontWeight:800,letterSpacing:"0.1em",padding:"3px 8px",borderRadius:6,pointerEvents:"none",opacity:compareSlider>8?1:0}},"BEFORE"),img&&comparing&&React.createElement("div",{style:{position:"absolute",top:8,right:8,background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:9,fontWeight:800,letterSpacing:"0.1em",padding:"3px 8px",borderRadius:6,pointerEvents:"none",opacity:compareSlider<92?1:0}},"AFTER"),img&&comparing&&React.createElement("div",{onPointerDown:onCompareDragStart,style:{position:"absolute",top:0,bottom:0,left:"calc("+compareSlider+"% - 14px)",width:28,cursor:"ew-resize",touchAction:"none",zIndex:2}},React.createElement("div",{style:{position:"absolute",top:0,bottom:0,left:14,width:2,background:"#fff",boxShadow:"0 0 4px rgba(0,0,0,0.7)",transform:"translateX(-1px)"}}),React.createElement("div",{style:{position:"absolute",top:"50%",left:14,width:30,height:30,borderRadius:"50%",background:"#fff",transform:"translate(-50%,-50%)",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 2px 8px rgba(0,0,0,0.45)",fontSize:13,color:"#1e293b",fontWeight:700}},"⇆")),img&&React.createElement(TransformOverlay,{crop,setCrop,rotation:adj.rotation||0,onRotation:v=>setAdj(p=>({...p,rotation:v})),perspective:adj.perspective||0,onPerspective:v=>setAdj(p=>({...p,perspective:v})),comparing,compareSlider})),!img&&(
+          ),React.createElement(Btn,{onClick:undo,disabled:!history.length},"Undo"),React.createElement(Btn,{onClick:reset,disabled:!img},"Reset"),false),React.createElement("div",{style:{flexShrink:0,marginLeft:6}},React.createElement(Btn,{onClick:saveImg,disabled:!img,accent:true},"Save"))),React.createElement("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden",background:"#020408",cursor:!img?"pointer":"default",minHeight:0},onClick:!img?()=>fileRef.current&&fileRef.current.click():undefined},React.createElement("div",{ref:compareWrapRef,style:{position:"relative",display:img?"inline-block":"none",maxWidth:"100%",maxHeight:"100%"}},React.createElement("canvas",{ref:canvasRef,style:{maxWidth:"100%",maxHeight:"100%",height:"auto",width:"auto",display:"block",borderRadius:3}}),img&&viewMode&&React.createElement("div",{style:{position:"absolute",top:8,left:8,background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:9,fontWeight:800,letterSpacing:"0.1em",padding:"3px 8px",borderRadius:6,pointerEvents:"none"}},viewMode==="original"?"ORIGINAL":viewMode==="analyzed"?"ANALYZED":"ENHANCED"),img&&React.createElement(TransformOverlay,{crop,setCrop,rotation:adj.rotation||0,onRotation:v=>setAdj(p=>({...p,rotation:v})),perspective:adj.perspective||0,onPerspective:v=>setAdj(p=>({...p,perspective:v})),hidden:!!viewMode}),img&&analyzed&&React.createElement("div",{style:{position:"absolute",bottom:10,left:"50%",transform:"translateX(-50%)",display:"flex",gap:6,zIndex:3}},
+            React.createElement("button",{onClick:()=>setViewMode(v=>v==="original"?null:"original"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="original"?"#a5b4fc":BORD),background:viewMode==="original"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="original"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"Original"),
+            React.createElement("button",{onClick:()=>setViewMode(v=>v==="analyzed"?null:"analyzed"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="analyzed"?"#a5b4fc":BORD),background:viewMode==="analyzed"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="analyzed"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"Analyzed"),
+            hasEnhanced&&React.createElement("button",{onClick:()=>setViewMode(v=>v==="enhanced"?null:"enhanced"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="enhanced"?"#a5b4fc":BORD),background:viewMode==="enhanced"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="enhanced"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"Enhanced")
+          )),!img&&(
           React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",gap:14,animation:"fadeIn 0.4s"}},React.createElement("div",{style:{width:80,height:80,borderRadius:20,border:"2px dashed rgba(99,102,241,0.3)",background:"rgba(99,102,241,0.05)",display:"flex",alignItems:"center",justifyContent:"center"}},React.createElement("div",{style:{width:36,height:28,border:"3px solid rgba(99,102,241,0.5)",borderRadius:5,position:"relative"}},React.createElement("div",{style:{position:"absolute",top:-7,left:"50%",transform:"translateX(-50%)",width:12,height:7,background:"rgba(99,102,241,0.5)",borderRadius:"3px 3px 0 0"}}),React.createElement("div",{style:{position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",width:12,height:12,borderRadius:"50%",border:"2px solid rgba(99,102,241,0.7)"}}))),React.createElement("div",{style:{textAlign:"center"}},React.createElement("p",{style:{fontWeight:700,fontSize:15,color:"#cbd5e1",marginBottom:5}},"Open a photo to begin"),React.createElement("p",{style:{fontSize:12,color:"#475569",lineHeight:1.6}},"Auto HDR detection + AI white balance + sky clarity")),React.createElement("button",{onClick:e=>{e.stopPropagation();fileRef.current&&fileRef.current.click();},style:{padding:"9px 22px",borderRadius:20,border:"1px solid rgba(99,102,241,0.4)",background:"rgba(99,102,241,0.1)",color:"#a5b4fc",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Open Photo"))
         ),img&&(
           React.createElement("div",{style:{position:"absolute",top:10,left:"50%",transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center",gap:5,zIndex:3}},autoHDR&&autoPre&&(
@@ -19136,7 +19130,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
               React.createElement("div",{key:a.id,className:"chip",onClick:()=>setActiveAdj(p=>p===a.id?null:a.id),style:{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",gap:3,padding:"8px 9px",borderRadius:13,border:"1px solid "+(hasFix&&!isActive?"rgba(251,191,36,0.45)":isActive?a.color:isCorrected?"rgba(34,197,94,0.5)":BORD),background:isActive?"rgba(99,102,241,0.1)":isCorrected&&!isActive?"rgba(34,197,94,0.04)":SURF2,cursor:"pointer",minWidth:64,position:"relative",transition:"border 0.15s,background 0.15s"}},hasFix&&React.createElement("button",{onClick:e=>{e.stopPropagation();applyFix(a.id);},style:{position:"absolute",top:-6,right:-6,width:16,height:16,borderRadius:"50%",background:"#f97316",border:"2px solid "+BG,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#fff",fontWeight:900,cursor:"pointer",zIndex:1}},"+"),React.createElement("div",{style:{width:22,height:3,borderRadius:2,background:isActive?a.color:isCorrected?"#22c55e":BORD,transition:"background 0.2s"}}),React.createElement("span",{style:{fontSize:12,fontWeight:800,fontFamily:"'Space Grotesk',system-ui",color:val!==0?(isActive?a.color:"#4ade80"):"#475569"}},val>0?"+":"",val),React.createElement("span",{style:{fontSize:9,fontWeight:600,color:isActive?"#94a3b8":"#374151",textTransform:"uppercase",letterSpacing:"0.04em",whiteSpace:"nowrap"}},a.label))
             );
           }))),activeAdj&&curAdj&&(
-        React.createElement("div",{style:{padding:"10px 14px 9px",background:SURF,borderTop:"1px solid "+BORD,flexShrink:0}},React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}},React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:curAdj.color}}),React.createElement("span",{style:{fontWeight:700,fontSize:14,fontFamily:"'Space Grotesk',system-ui"}},curAdj.label),React.createElement("span",{style:{fontWeight:800,fontSize:15,fontFamily:"'Space Grotesk',system-ui",color:adj[activeAdj]!==0?curAdj.color:"#475569",minWidth:36}},adj[activeAdj]>0?"+":"",adj[activeAdj])),React.createElement("div",{style:{display:"flex",gap:6}},fixes[activeAdj]!==undefined&&React.createElement("button",{onClick:()=>applyFix(activeAdj),style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(251,191,36,0.3)",background:"rgba(251,191,36,0.1)",color:"#fbbf24",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Auto",fixes[activeAdj]>0?"+":"",fixes[activeAdj]),React.createElement("button",{onClick:()=>setAdj(p=>({...p,[activeAdj]:0})),style:{padding:"5px 11px",borderRadius:9,border:"1px solid "+BORD,background:"transparent",color:"#64748b",fontSize:11,cursor:"pointer",fontFamily:"inherit"}},"Reset"))),React.createElement("input",{type:"range",min:curAdj.min,max:curAdj.max,value:adj[activeAdj],onChange:e=>setAdj(p=>({...p,[activeAdj]:parseInt(e.target.value)}))}),React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:10,color:"#334155",marginTop:5}},React.createElement("span",null,curAdj.min),React.createElement("span",{style:{color:"#1e293b"}},"drag to adjust"),React.createElement("span",null,"+",curAdj.max)))
+        React.createElement("div",{style:{padding:"10px 14px 9px",background:SURF,borderTop:"1px solid "+BORD,flexShrink:0}},React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}},React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:curAdj.color}}),React.createElement("span",{style:{fontWeight:700,fontSize:14,fontFamily:"'Space Grotesk',system-ui"}},curAdj.label),React.createElement("span",{style:{fontWeight:800,fontSize:15,fontFamily:"'Space Grotesk',system-ui",color:adj[activeAdj]!==0?curAdj.color:"#475569",minWidth:36}},adj[activeAdj]>0?"+":"",adj[activeAdj])),React.createElement("div",{style:{display:"flex",gap:6}},fixes[activeAdj]!==undefined&&React.createElement("button",{onClick:()=>applyFix(activeAdj),style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(251,191,36,0.3)",background:"rgba(251,191,36,0.1)",color:"#fbbf24",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Auto",fixes[activeAdj]>0?"+":"",fixes[activeAdj]),React.createElement("button",{onClick:()=>{setViewMode(null);setAdj(p=>({...p,[activeAdj]:0}));},style:{padding:"5px 11px",borderRadius:9,border:"1px solid "+BORD,background:"transparent",color:"#64748b",fontSize:11,cursor:"pointer",fontFamily:"inherit"}},"Reset"))),React.createElement("input",{type:"range",min:curAdj.min,max:curAdj.max,value:adj[activeAdj],onChange:e=>{setViewMode(null);setAdj(p=>({...p,[activeAdj]:parseInt(e.target.value)}));}}),React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:10,color:"#334155",marginTop:5}},React.createElement("span",null,curAdj.min),React.createElement("span",{style:{color:"#1e293b"}},"drag to adjust"),React.createElement("span",null,"+",curAdj.max)))
       ),React.createElement("div",{style:{background:BG,borderTop:"1px solid "+BORD,flexShrink:0}},autoHDR&&autoPre&&(
           React.createElement("div",{style:{padding:"5px 12px 0",display:"flex",alignItems:"center",gap:6}},React.createElement("span",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#22c55e"}},"Auto"),React.createElement("div",{style:{width:5,height:5,borderRadius:"50%",background:autoPre.color}}),React.createElement("span",{style:{fontSize:10,fontWeight:600,color:autoPre.color}},autoPre.label,"detected"))
         ),React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,overflowX:"auto",padding:"5px 12px 6px",scrollbarWidth:"none"}},React.createElement("span",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.12em",textTransform:"uppercase",color:"#1e293b",flexShrink:0}},"Manual"),HDR_PRESETS.map(h=>(
@@ -19172,7 +19166,7 @@ function Spin(){
 // crop box/handles to frame the shot, the pill below it to straighten, and
 // the pill above it for perspective -- replaces the old Rotation/Perspective
 // slider chips so these are edited on the photo itself, not a separate control.
-function TransformOverlay({crop,setCrop,rotation,onRotation,perspective,onPerspective,comparing,compareSlider}){
+function TransformOverlay({crop,setCrop,rotation,onRotation,perspective,onPerspective,hidden}){
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
 
@@ -19237,10 +19231,11 @@ function TransformOverlay({crop,setCrop,rotation,onRotation,perspective,onPerspe
   const left=crop.x*100, top=crop.y*100, right=(crop.x+crop.w)*100, bottom=(crop.y+crop.h)*100;
   const mask = "rgba(0,0,0,0.55)";
 
-  return React.createElement("div",{ref:wrapRef,style:{position:"absolute",inset:0,pointerEvents:"none",
-    // Keep the crop/rotate handles off the revealed "before" pane so it shows
-    // the clean original photo -- only draw them over the "after" side.
-    clipPath:comparing?("inset(0 0 0 "+compareSlider+"%)"):"none"}},
+  // Hide the crop/rotate handles entirely while viewing an Original/Analyzed/
+  // Enhanced snapshot -- they edit the live adj state, which isn't what's
+  // currently on screen in that mode.
+  if (hidden) return null;
+  return React.createElement("div",{ref:wrapRef,style:{position:"absolute",inset:0,pointerEvents:"none"}},
     React.createElement("div",{style:{position:"absolute",left:0,top:0,right:0,height:top+"%",background:mask}}),
     React.createElement("div",{style:{position:"absolute",left:0,top:bottom+"%",right:0,bottom:0,background:mask}}),
     React.createElement("div",{style:{position:"absolute",left:0,top:top+"%",width:left+"%",height:crop.h*100+"%",background:mask}}),
