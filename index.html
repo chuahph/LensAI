@@ -18963,14 +18963,19 @@ function App() {
               hdrRef.current = hdrId;
               setActiveHDR(hdrId);
             }
-            // saturation is excluded here: it's a scene-tied "look" value the
-            // preset already tunes deliberately (e.g. Smart HDR's +66 offsets
-            // its own heavy dehaze/highlight-recovery so the result doesn't
-            // read as washed out). buildFallback's generic saturation rec
-            // doesn't know a preset is about to apply and was clobbering that
-            // tuned value down to a much weaker boost, undoing the preset's
-            // own anti-washout compensation every time Analyze ran.
-            Object.entries(currentFixes).forEach(([k,v]) => { if (k!=="saturation") na[k]=v; });
+            // saturation/contrast/fade are excluded here. saturation is a
+            // scene-tied "look" value the preset already tunes deliberately
+            // (e.g. Smart HDR's +66 offsets its own heavy dehaze/highlight-
+            // recovery so the result doesn't read as washed out) -- buildFallback's
+            // generic saturation rec doesn't know a preset is about to apply and
+            // was clobbering that tuned value down to a much weaker boost, undoing
+            // the preset's own anti-washout compensation every time Analyze ran.
+            // contrast/fade are excluded for the same reason they're excluded from
+            // the preset spread above: they're meant to stay under the user's own
+            // slider control, but buildFallback's cR/fdR recs were silently
+            // overwriting a manual drag any time the photo's own stats called for
+            // a different value, even though the preset itself never touched them.
+            Object.entries(currentFixes).forEach(([k,v]) => { if (k!=="saturation"&&k!=="contrast"&&k!=="fade") na[k]=v; });
             return na;
           });
           showToast("Auto-applied: corrections + HDR "+(HDR_PRESETS.find(h=>h.id===(currentAnalysis.hdrRec||autoHDR))?.label||""));
