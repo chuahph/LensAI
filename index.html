@@ -18472,6 +18472,12 @@ function autoSelectHDR(stats) {
   if (isHazy && hasSky && !isNight) scores.smartHDR += 16; // dehaze is its hallmark
   if (isHazy && !isNight) scores.smartHDR += 8; // even without sky
   if (isWashedSky && !isNight) scores.smartHDR += 18; // raised from 14
+  // Faces need gentle, skin-safe processing -- Smart HDR's heavy dehaze/
+  // saturation push (tuned for sky/landscape rescue) reads as oversaturated,
+  // waxy skin when applied to a person, so it's damped here rather than
+  // letting strong background HDR signals (a blown window/sky behind the
+  // subject) automatically win out over Portrait/People.
+  if (hasFace) scores.smartHDR = Math.round(scores.smartHDR * 0.5);
 
   // --- Urban: now driven primarily by isStructured (axis-aligned edge
   // density), the actual architectural signal, instead of contrast/sky
@@ -18944,17 +18950,32 @@ function App() {
               // unconditionally was silently wiping out whatever the user had
               // already dragged the slider to, any time they hit Analyze.
               Object.entries(p.values).forEach(([k,v]) => { if (k!=="contrast"&&k!=="fade") na[k]=v; });
+              // Skin-safe cap: Smart HDR's saturation/dehaze are tuned for
+              // sky/landscape rescue and oversaturate, waxy-fy skin when a
+              // face is in frame. Scoring already damps Smart HDR's odds of
+              // winning on a face photo, but this is the safety net for when
+              // it still wins (e.g. a severely blown background behind a
+              // small face).
+              if (hdrId === "smartHDR" && imgStats && imgStats.hasFace) {
+                na.saturation = Math.min(na.saturation, 46);
+                na.dehaze = Math.min(na.dehaze, 20);
+              }
               hdrRef.current = hdrId;
               setActiveHDR(hdrId);
             }
-            // saturation is excluded here: it's a scene-tied "look" value the
-            // preset already tunes deliberately (e.g. Smart HDR's +66 offsets
-            // its own heavy dehaze/highlight-recovery so the result doesn't
-            // read as washed out). buildFallback's generic saturation rec
-            // doesn't know a preset is about to apply and was clobbering that
-            // tuned value down to a much weaker boost, undoing the preset's
-            // own anti-washout compensation every time Analyze ran.
-            Object.entries(currentFixes).forEach(([k,v]) => { if (k!=="saturation") na[k]=v; });
+            // saturation/contrast/fade are excluded here. saturation is a
+            // scene-tied "look" value the preset already tunes deliberately
+            // (e.g. Smart HDR's +66 offsets its own heavy dehaze/highlight-
+            // recovery so the result doesn't read as washed out) -- buildFallback's
+            // generic saturation rec doesn't know a preset is about to apply and
+            // was clobbering that tuned value down to a much weaker boost, undoing
+            // the preset's own anti-washout compensation every time Analyze ran.
+            // contrast/fade are excluded for the same reason they're excluded from
+            // the preset spread above: they're meant to stay under the user's own
+            // slider control, but buildFallback's cR/fdR recs were silently
+            // overwriting a manual drag any time the photo's own stats called for
+            // a different value, even though the preset itself never touched them.
+            Object.entries(currentFixes).forEach(([k,v]) => { if (k!=="saturation"&&k!=="contrast"&&k!=="fade") na[k]=v; });
             return na;
           });
           showToast("Auto-applied: corrections + HDR "+(HDR_PRESETS.find(h=>h.id===(currentAnalysis.hdrRec||autoHDR))?.label||""));
@@ -18992,6 +19013,10 @@ function App() {
     // matching note in autoApplyAfterAnalysis for why presets shouldn't
     // touch them.
     const m={...adj}; Object.entries(p.values).forEach(([k,v])=>{ if(k!=="contrast"&&k!=="fade") m[k]=v; });
+    if (id === "smartHDR" && imgStats && imgStats.hasFace) {
+      m.saturation = Math.min(m.saturation, 46);
+      m.dehaze = Math.min(m.dehaze, 20);
+    }
     hdrRef.current=id; setActiveHDR(id); setAdj(m);
     showToast("HDR "+p.label+" applied");
   };
@@ -19133,7 +19158,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
           React.createElement("div",{style:{position:"absolute",top:10,left:"50%",transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center",gap:5,zIndex:3}},autoHDR&&autoPre&&(
               React.createElement("div",{style:{background:"rgba(6,8,15,0.88)",backdropFilter:"blur(10px)",border:"1px solid "+autoPre.color+"55",borderRadius:18,padding:"5px 11px",display:"flex",alignItems:"center",gap:6}},React.createElement("div",{style:{width:6,height:6,borderRadius:"50%",background:autoPre.color}}),React.createElement("span",{style:{fontSize:11,fontWeight:700,color:autoPre.color}},"Auto: HDR",autoPre.label),analyzed&&analysis&&React.createElement("span",{onClick:()=>{clearTimeout(modalAutoCloseRef.current);setModal(true);},style:{background:"rgba(99,102,241,0.2)",color:"#a5b4fc",fontSize:10,fontWeight:700,padding:"2px 7px",borderRadius:7,cursor:"pointer"}},analysis.overallScore,"/100"))
             ),React.createElement("div",{style:{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"center"}},imgStats&&imgStats.isHazy&&React.createElement(Flag,{color:"#fbbf24"},"Haze"),imgStats&&imgStats.hasSky&&React.createElement(Flag,{color:"#60a5fa"},"Sky"),imgStats&&imgStats.isWarm&&React.createElement(Flag,{color:"#fb923c"},"Warm cast"),imgStats&&imgStats.isCool&&React.createElement(Flag,{color:"#818cf8"},"Cool cast")))
-        )),React.createElement("input",{ref:fileRef,type:"file",accept:"image/*",style:{display:"none"},onChange:onFile}),React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 14px",background:SURF,borderTop:"1px solid "+BORD,flexShrink:0}},React.createElement("div",{style:{display:"flex",alignItems:"center",gap:7}},React.createElement("div",{style:{width:6,height:6,borderRadius:"50%",background:"#22c55e",boxShadow:"0 0 6px #22c55e",animation:"pulse 2s infinite"}}),React.createElement("span",{style:{fontSize:11,fontWeight:600,color:"#64748b",letterSpacing:"0.06em",textTransform:"uppercase"}},"AI Analysis")),React.createElement("div",{style:{display:"flex",gap:7,alignItems:"center"}},img&&React.createElement("button",{onClick:()=>fileRef.current&&fileRef.current.click(),style:{padding:"5px 10px",borderRadius:8,border:"1px solid "+BORD,background:"transparent",color:"#64748b",fontSize:11,cursor:"pointer",fontFamily:"inherit"}},"Change"),React.createElement("button",{onClick:analyze,disabled:!img||busy,style:{display:"flex",alignItems:"center",gap:6,padding:"7px 16px",borderRadius:20,border:"none",background:(!img||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:12,fontWeight:700,cursor:(!img||busy)?"not-allowed":"pointer",fontFamily:"inherit"}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Analyzing..."):analyzed?"Re-Analyze":"Analyze Photo"))),React.createElement("div",{style:{background:SURF,borderTop:"1px solid "+BORD,flexShrink:0,padding:"6px 0"}},React.createElement("div",{style:{display:"flex",gap:6,overflowX:"auto",padding:"0 12px",scrollbarWidth:"none"}},ADJUSTMENTS.map(a=>{
+        )),React.createElement("input",{ref:fileRef,type:"file",accept:"image/*",style:{display:"none"},onChange:onFile}),React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 14px",background:SURF,borderTop:"1px solid "+BORD,flexShrink:0}},React.createElement("div",{style:{display:"flex",alignItems:"center",gap:7}},React.createElement("div",{style:{width:6,height:6,borderRadius:"50%",background:"#22c55e",boxShadow:"0 0 6px #22c55e",animation:"pulse 2s infinite"}}),React.createElement("span",{style:{fontSize:11,fontWeight:600,color:"#64748b",letterSpacing:"0.06em",textTransform:"uppercase"}},"AI Analysis")),React.createElement("div",{style:{display:"flex",gap:7,alignItems:"center"}},img&&React.createElement("button",{onClick:()=>fileRef.current&&fileRef.current.click(),style:{padding:"5px 10px",borderRadius:8,border:"1px solid "+BORD,background:"transparent",color:"#64748b",fontSize:11,cursor:"pointer",fontFamily:"inherit"}},"Change"),img&&autoHDR&&autoPre&&React.createElement("button",{onClick:()=>applyHDR(autoHDR),title:"Apply the auto-detected HDR preset only, without re-running corrections",style:{padding:"7px 12px",borderRadius:20,border:"1px solid "+autoPre.color+"55",background:activeHDR===autoHDR?autoPre.color+"2a":autoPre.color+"12",color:autoPre.color,fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},"Auto HDR"),React.createElement("button",{onClick:analyze,disabled:!img||busy,style:{display:"flex",alignItems:"center",gap:6,padding:"7px 16px",borderRadius:20,border:"none",background:(!img||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:12,fontWeight:700,cursor:(!img||busy)?"not-allowed":"pointer",fontFamily:"inherit"}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Analyzing..."):analyzed?"Re-Analyze":"Analyze Photo"))),React.createElement("div",{style:{background:SURF,borderTop:"1px solid "+BORD,flexShrink:0,padding:"6px 0"}},React.createElement("div",{style:{display:"flex",gap:6,overflowX:"auto",padding:"0 12px",scrollbarWidth:"none"}},ADJUSTMENTS.map(a=>{
             const val=adj[a.id],hasFix=fixes[a.id]!==undefined,isActive=activeAdj===a.id,isCorrected=val!==0;
             return(
               React.createElement("div",{key:a.id,className:"chip",onClick:()=>setActiveAdj(p=>p===a.id?null:a.id),style:{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",gap:3,padding:"8px 9px",borderRadius:13,border:"1px solid "+(hasFix&&!isActive?"rgba(251,191,36,0.45)":isActive?a.color:isCorrected?"rgba(34,197,94,0.5)":BORD),background:isActive?"rgba(99,102,241,0.1)":isCorrected&&!isActive?"rgba(34,197,94,0.04)":SURF2,cursor:"pointer",minWidth:64,position:"relative",transition:"border 0.15s,background 0.15s"}},hasFix&&React.createElement("button",{onClick:e=>{e.stopPropagation();applyFix(a.id);},style:{position:"absolute",top:-6,right:-6,width:16,height:16,borderRadius:"50%",background:"#f97316",border:"2px solid "+BG,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#fff",fontWeight:900,cursor:"pointer",zIndex:1}},"+"),React.createElement("div",{style:{width:22,height:3,borderRadius:2,background:isActive?a.color:isCorrected?"#22c55e":BORD,transition:"background 0.2s"}}),React.createElement("span",{style:{fontSize:12,fontWeight:800,fontFamily:"'Space Grotesk',system-ui",color:val!==0?(isActive?a.color:"#4ade80"):"#475569"}},val>0?"+":"",val),React.createElement("span",{style:{fontSize:9,fontWeight:600,color:isActive?"#94a3b8":"#374151",textTransform:"uppercase",letterSpacing:"0.04em",whiteSpace:"nowrap"}},a.label))
@@ -19141,7 +19166,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
           }))),activeAdj&&curAdj&&(
         React.createElement("div",{style:{padding:"10px 14px 9px",background:SURF,borderTop:"1px solid "+BORD,flexShrink:0}},React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}},React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:curAdj.color}}),React.createElement("span",{style:{fontWeight:700,fontSize:14,fontFamily:"'Space Grotesk',system-ui"}},curAdj.label),React.createElement("span",{style:{fontWeight:800,fontSize:15,fontFamily:"'Space Grotesk',system-ui",color:adj[activeAdj]!==0?curAdj.color:"#475569",minWidth:36}},adj[activeAdj]>0?"+":"",adj[activeAdj])),React.createElement("div",{style:{display:"flex",gap:6}},fixes[activeAdj]!==undefined&&React.createElement("button",{onClick:()=>applyFix(activeAdj),style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(251,191,36,0.3)",background:"rgba(251,191,36,0.1)",color:"#fbbf24",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Auto",fixes[activeAdj]>0?"+":"",fixes[activeAdj]),React.createElement("button",{onClick:()=>setAdj(p=>({...p,[activeAdj]:0})),style:{padding:"5px 11px",borderRadius:9,border:"1px solid "+BORD,background:"transparent",color:"#64748b",fontSize:11,cursor:"pointer",fontFamily:"inherit"}},"Reset"))),React.createElement("input",{type:"range",min:curAdj.min,max:curAdj.max,value:adj[activeAdj],onChange:e=>setAdj(p=>({...p,[activeAdj]:parseInt(e.target.value)}))}),React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:10,color:"#334155",marginTop:5}},React.createElement("span",null,curAdj.min),React.createElement("span",{style:{color:"#1e293b"}},"drag to adjust"),React.createElement("span",null,"+",curAdj.max)))
       ),React.createElement("div",{style:{background:BG,borderTop:"1px solid "+BORD,flexShrink:0}},autoHDR&&autoPre&&(
-          React.createElement("div",{style:{padding:"5px 12px 0",display:"flex",alignItems:"center",gap:6}},React.createElement("span",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#22c55e"}},"Auto"),React.createElement("div",{style:{width:5,height:5,borderRadius:"50%",background:autoPre.color}}),React.createElement("span",{style:{fontSize:10,fontWeight:600,color:autoPre.color}},autoPre.label,"detected"),React.createElement("button",{onClick:()=>applyHDR(autoHDR),style:{marginLeft:"auto",padding:"3px 10px",borderRadius:10,border:"1px solid "+autoPre.color+"55",background:autoPre.color+"15",color:autoPre.color,fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Apply Auto HDR"))
+          React.createElement("div",{style:{padding:"5px 12px 0",display:"flex",alignItems:"center",gap:6}},React.createElement("span",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#22c55e"}},"Auto"),React.createElement("div",{style:{width:5,height:5,borderRadius:"50%",background:autoPre.color}}),React.createElement("span",{style:{fontSize:10,fontWeight:600,color:autoPre.color}},autoPre.label,"detected"))
         ),React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,overflowX:"auto",padding:"5px 12px 6px",scrollbarWidth:"none"}},React.createElement("span",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.12em",textTransform:"uppercase",color:"#1e293b",flexShrink:0}},"Manual"),HDR_PRESETS.map(h=>(
             React.createElement("button",{key:h.id,className:"hpill",onClick:()=>applyHDR(h.id),style:{flexShrink:0,padding:"5px 12px",borderRadius:20,border:"1px solid "+(activeHDR===h.id?h.color:h.id===autoHDR?""+h.color+"44":BORD),background:activeHDR===h.id?h.color+"1a":h.id===autoHDR?h.color+"0a":SURF2,color:activeHDR===h.id?h.color:h.id===autoHDR?h.color+"cc":"#64748b",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",transition:"all 0.15s",whiteSpace:"nowrap",boxShadow:activeHDR===h.id?"0 0 10px "+h.color+"33":"none"}},h.label,h.id===autoHDR?" *":"")
           )))),modal&&analysis&&(
