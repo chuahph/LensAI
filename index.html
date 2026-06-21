@@ -18551,7 +18551,12 @@ function buildFallback(stats) {
   // === BRIGHTNESS correction ===
   let bR=0;
   if (s.isUnderexposed)  bR=Math.min(30, Math.round((95-s.lumAvg)*0.35));
-  else if (s.isOverexposed) bR=Math.max(-30, Math.round((160-s.lumAvg)*0.35));
+  // isOverexposed can fire purely on blown-highlight percentage (pctBlown>8)
+  // even when average luminance is still moderate (e.g. a face with a bright
+  // blown window behind it) -- (160-lumAvg) is then positive, so the old
+  // formula recommended brightening an already-clipping shot. Clamped to
+  // <=0 so overexposure correction never pushes brightness up.
+  else if (s.isOverexposed) bR=Math.min(0, Math.max(-30, Math.round((160-s.lumAvg)*0.35)));
 
   // === CONTRAST: graduated with how flat the image measures, plus a ===
   // gentle pullback on scenes that are already harsh/contrasty -- but NOT
