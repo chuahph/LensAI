@@ -18982,8 +18982,13 @@ function App() {
     // touch them.
     const m={...adj}; Object.entries(p.values).forEach(([k,v])=>{ if(k!=="contrast"&&k!=="fade") m[k]=v; });
     if (id === "smartHDR" && imgStats && imgStats.hasFace) {
-      m.saturation = Math.min(m.saturation, 46);
-      m.dehaze = Math.min(m.dehaze, 20);
+      // Smart HDR's saturation/dehaze are tuned for sky/landscape rescue --
+      // at full strength on skin they read as oversaturated and waxy. The
+      // previous caps (46/20) were still visibly too vivid on faces, so
+      // they're pulled down further, closer to the dedicated Portrait
+      // preset's own saturation (42) and near-zero dehaze.
+      m.saturation = Math.min(m.saturation, 30);
+      m.dehaze = Math.min(m.dehaze, 10);
     }
     hdrRef.current=id; setActiveHDR(id); setAdj(m);
     enhancedAdjRef.current = m; setHasEnhanced(true); setViewMode(null);
