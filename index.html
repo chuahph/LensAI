@@ -18511,7 +18511,33 @@ function readExifTagValue(view, tiffStart, type, count, fieldOffset, little) {
   }
   if (type === 3) return count === 1 ? view.getUint16(dataOffset, little) : Array.from({ length: count }, (_, i) => view.getUint16(dataOffset + i * 2, little));
   if (type === 4) return count === 1 ? view.getUint32(dataOffset, little) : Array.from({ length: count }, (_, i) => view.getUint32(dataOffset + i * 4, little));
+  if (type === 7) return new Uint8Array(view.buffer, dataOffset, count); // UNDEFINED -- raw bytes, decoded per-tag by the caller (e.g. GPSAreaInformation's charset-prefixed text)
   return null;
+}
+
+// EXIF text fields like GPSAreaInformation/GPSProcessingMethod store an
+// 8-byte charset code ("ASCII\0\0\0", "UNICODE\0", or "JIS\0\0\0\0\0")
+// followed by the actual text -- this strips that prefix and decodes it.
+function decodeUndefinedText(bytes) {
+  if (!bytes || bytes.length <= 8) return null;
+  let prefix = "";
+  for (let i = 0; i < 8; i++) prefix += String.fromCharCode(bytes[i]);
+  const rest = bytes.subarray(8);
+  if (prefix.startsWith("ASCII")) {
+    let s = "";
+    for (let i = 0; i < rest.length && rest[i] !== 0; i++) s += String.fromCharCode(rest[i]);
+    return s.trim() || null;
+  }
+  if (prefix.startsWith("UNICODE")) {
+    let s = "";
+    for (let i = 0; i + 1 < rest.length; i += 2) {
+      const code = rest[i] | (rest[i + 1] << 8);
+      if (!code) break;
+      s += String.fromCharCode(code);
+    }
+    return s.trim() || null;
+  }
+  return null; // JIS or an unrecognized charset -- not worth decoding for this use case
 }
 
 function readExifIFD(view, tiffStart, ifdOffset, little) {
@@ -18538,10 +18564,79 @@ function gpsTagsToDecimal(gpsIfd) {
   return { lat: latDec, lon: lonDec };
 }
 
+// IPTC IIM location fields (City/Sub-location), if a photo editor (e.g.
+// Lightroom, Photo Mechanic) wrote them in -- camera/phone JPEGs almost
+// never have these, but it's a free check once the segment is in hand.
+// segStart/segLen point at an APP13 segment's payload (right after its
+// own 2-byte length field) and that field's value, respectively.
+function readIptcLocation(view, segStart, segLen) {
+  const SIG = "Photoshop 3.0\0";
+  for (let i = 0; i < SIG.length; i++) {
+    if (view.getUint8(segStart + i) !== SIG.charCodeAt(i)) return null;
+  }
+  const segEnd = segStart + segLen - 2;
+  let p = segStart + SIG.length;
+  while (p + 12 <= segEnd) {
+    if (view.getUint32(p) !== 0x3842494d) break; // "8BIM"
+    const resId = view.getUint16(p + 4);
+    let q = p + 6;
+    const nameLen = view.getUint8(q);
+    q += 1 + nameLen;
+    if (nameLen % 2 === 0) q += 1; // pascal string + length byte padded to an even total
+    const dataSize = view.getUint32(q);
+    q += 4;
+    if (resId === 0x0404) { // IPTC-NAA resource block
+      const iptcEnd = Math.min(q + dataSize, segEnd);
+      const fields = {};
+      let r = q;
+      while (r + 5 <= iptcEnd) {
+        if (view.getUint8(r) !== 0x1c) break;
+        const record = view.getUint8(r + 1), dataset = view.getUint8(r + 2);
+        const size = view.getUint16(r + 3);
+        const dataStart = r + 5;
+        if (record === 2 && (dataset === 90 || dataset === 92 || dataset === 95 || dataset === 101)) {
+          let s = "";
+          for (let i = 0; i < size; i++) s += String.fromCharCode(view.getUint8(dataStart + i));
+          fields[dataset] = s.trim();
+        }
+        r = dataStart + size;
+      }
+      const sub = fields[92], city = fields[90], state = fields[95], country = fields[101];
+      const parts = [sub, city].filter(Boolean);
+      return parts.length ? parts.join(", ") : (state || country || null);
+    }
+    p = q + dataSize + (dataSize % 2); // resource data is padded to an even length
+  }
+  return null;
+}
+
+// Pulls a single XMP field's value out of the raw XML packet, whether it
+// was written as an attribute (tag="value") or an element (<tag>value</tag>).
+function extractXmpField(xml, tag) {
+  const safeTag = tag.replace(":", "\\:");
+  const attr = xml.match(new RegExp(safeTag + '="([^"]*)"'));
+  if (attr) return attr[1].trim() || null;
+  const el = xml.match(new RegExp("<" + safeTag + "[^>]*>([^<]*)</" + safeTag + ">"));
+  return el ? (el[1].trim() || null) : null;
+}
+
+// XMP location fields, most specific/landmark-like first: a named place
+// (Iptc4xmpExt:LocationName/Sublocation) is worth more than a bare city,
+// which is worth more than state/country alone.
+function readXmpLocation(xml) {
+  const name = extractXmpField(xml, "Iptc4xmpExt:LocationName") || extractXmpField(xml, "Iptc4xmpExt:Sublocation");
+  const city = extractXmpField(xml, "photoshop:City");
+  const state = extractXmpField(xml, "photoshop:State");
+  const country = extractXmpField(xml, "photoshop:Country") || extractXmpField(xml, "Iptc4xmpExt:CountryName");
+  const parts = [...new Set([name, city, state, country].filter(Boolean))];
+  return parts.length ? parts.join(", ") : null;
+}
+
 // Scans only the first 128KB -- EXIF/APP1 always sits right after the JPEG
 // SOI marker, long before image data, so this bounds the read for every
 // photo in a batch instead of pulling whole files just to check metadata.
 async function readExifGpsAndDate(file) {
+  let gps = null, dateTaken = null, gpsAreaName = null, iptcLocation = null, xmpLocation = null;
   try {
     const buf = await file.slice(0, 131072).arrayBuffer();
     const view = new DataView(buf);
@@ -18555,20 +18650,39 @@ async function readExifGpsAndDate(file) {
         const tiffStart = offset + 10;
         const bom = view.getUint16(tiffStart);
         const little = bom === 0x4949;
-        if (!little && bom !== 0x4d4d) return null;
-        const ifd0 = readExifIFD(view, tiffStart, tiffStart + view.getUint32(tiffStart + 4, little), little);
-        const gps = ifd0[0x8825] != null ? gpsTagsToDecimal(readExifIFD(view, tiffStart, tiffStart + ifd0[0x8825], little)) : null;
-        let dateTaken = null;
-        if (ifd0[0x8769] != null) {
-          const exifIfd = readExifIFD(view, tiffStart, tiffStart + ifd0[0x8769], little);
-          dateTaken = exifIfd[0x9003] || null;
+        if (little || bom === 0x4d4d) {
+          const ifd0 = readExifIFD(view, tiffStart, tiffStart + view.getUint32(tiffStart + 4, little), little);
+          if (ifd0[0x8825] != null) {
+            const gpsIfd = readExifIFD(view, tiffStart, tiffStart + ifd0[0x8825], little);
+            gps = gpsTagsToDecimal(gpsIfd);
+            if (gpsIfd[0x001c] instanceof Uint8Array) gpsAreaName = decodeUndefinedText(gpsIfd[0x001c]);
+          }
+          if (ifd0[0x8769] != null) {
+            const exifIfd = readExifIFD(view, tiffStart, tiffStart + ifd0[0x8769], little);
+            dateTaken = exifIfd[0x9003] || null;
+          }
         }
-        return { gps, dateTaken };
+      } else if (marker === 0xffe1 && matchesAscii(view, offset + 4, "http://ns.adobe.com/xap/1.0/\0")) { // XMP APP1
+        const xmlStart = offset + 4 + "http://ns.adobe.com/xap/1.0/\0".length;
+        const xmlBytes = new Uint8Array(view.buffer, xmlStart, Math.max(0, (offset + 2 + segLen) - xmlStart));
+        xmpLocation = readXmpLocation(new TextDecoder("utf-8").decode(xmlBytes));
+      } else if (marker === 0xffed && matchesAscii(view, offset + 4, "Photoshop 3.0\0")) { // APP13 IPTC
+        iptcLocation = readIptcLocation(view, offset + 4, segLen);
       }
       offset += 2 + segLen;
     }
   } catch (e) { /* truncated/malformed EXIF -- treat as absent, caller falls back */ }
-  return null;
+  const embeddedLocation = gpsAreaName || xmpLocation || iptcLocation || null;
+  if (!gps && !dateTaken && !embeddedLocation) return null;
+  return { gps, dateTaken, embeddedLocation };
+}
+
+function matchesAscii(view, offset, str) {
+  if (offset + str.length > view.byteLength) return false;
+  for (let i = 0; i < str.length; i++) {
+    if (view.getUint8(offset + i) !== str.charCodeAt(i)) return false;
+  }
+  return true;
 }
 
 // Buckets nearby shots together at roughly city-block precision (~1.1km)
@@ -18666,17 +18780,21 @@ function dateFolderName(dateTaken) {
 
 // Recovers where/when a photo was actually taken, for grouping batch
 // exports by the photo's own original snapshot info rather than by the
-// scene the agent happens to detect. Priority: embedded GPS coordinates
-// (reverse-geocoded to a place name, falling back to coordinates if that
-// lookup fails), then capture date (both from EXIF, present on most
-// camera/phone photos), then the folder it was loaded from (only known
-// when picked via "Choose folder" -- webkitRelativePath is empty
-// otherwise). Returns null only when none of that is available (e.g. a
-// screenshot with no EXIF, picked individually via the iOS Photos
-// picker), the one case scene grouping should still apply.
+// scene the agent happens to detect. Priority: a location/landmark name
+// already embedded by the camera or a photo editor (GPSAreaInformation,
+// XMP, or IPTC -- skips the network lookup entirely when present), then
+// embedded GPS coordinates (reverse-geocoded to a place name, falling
+// back to coordinates if that lookup fails), then capture date (all from
+// EXIF, present on most camera/phone photos), then the folder it was
+// loaded from (only known when picked via "Choose folder" --
+// webkitRelativePath is empty otherwise). Returns null only when none of
+// that is available (e.g. a screenshot with no EXIF, picked individually
+// via the iOS Photos picker), the one case scene grouping should still
+// apply.
 async function locationGroupAgent(file) {
   const exif = await readExifGpsAndDate(file);
   if (exif) {
+    if (exif.embeddedLocation) return sanitizeFolderName(exif.embeddedLocation);
     if (exif.gps) return await reverseGeocodeAgent(exif.gps);
     const d = dateFolderName(exif.dateTaken);
     if (d) return d;
