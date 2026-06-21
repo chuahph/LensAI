@@ -18417,6 +18417,7 @@ function computeHDRAdj(baseAdj, presetId, stats) {
 //   analysisAgent       -- decoded Image -> resized ImageData + scene stats
 //   cullAgent           -- scene stats -> quality flags (blur/exposure)
 //   sceneSorterAgent    -- scene stats -> a display group ("nature","food",...)
+//   locationGroupAgent  -- original file -> its source subfolder, if any
 //   goalDetectionAgent  -- goal id ("auto"/"none"/preset id) + stats -> hdrId
 //   correctionAgent     -- scene stats -> baseline correction adjustments
 //   enhancementAgent    -- baseline adj + hdrId -> final adj (HDR merged in)
@@ -18484,6 +18485,20 @@ function sceneSorterAgent(stats) {
   return stats.scene;
 }
 
+// Recovers the subfolder a photo originally lived in when it was picked
+// via "Choose folder" (webkitRelativePath is only populated by that
+// picker, e.g. "MyAlbum/Vacation/IMG001.jpg") -- the top-level picked
+// folder itself is dropped since every photo shares it and it's not
+// meaningful structure to preserve. Returns null for anything picked
+// individually (e.g. from the iOS Photos picker), or for files sitting
+// directly in the picked folder's root with no subfolder to keep.
+function locationGroupAgent(file) {
+  const rel = file.webkitRelativePath || "";
+  if (!rel) return null;
+  const parts = rel.split("/").slice(1, -1);
+  return parts.length ? parts.join("/") : null;
+}
+
 function goalDetectionAgent(goalId, stats) {
   return goalId === "auto" ? autoSelectHDR(stats) : goalId === "none" ? null : goalId;
 }
@@ -18539,10 +18554,11 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   note("analyze");
   const { data, stats } = analysisAgent(image);
   const group = sceneSorterAgent(stats);
+  const origFolder = locationGroupAgent(file);
   note("cull");
   const cull = cullAgent(stats);
   if (cull.flagged && skipFlagged) {
-    return { name: file.name, goalId, group, culled: true, cullReasons: cull.reasons };
+    return { name: file.name, goalId, group, origFolder, culled: true, cullReasons: cull.reasons };
   }
   note("goal");
   const hdrId = goalDetectionAgent(goalId, stats);
@@ -18561,6 +18577,7 @@ async function batchProcessFile(file, goalId, onStage, opts) {
     name: file.name,
     goalId,
     group,
+    origFolder,
     blob,
     thumb,
     hdrLabel: preset ? preset.label : null,
@@ -18652,15 +18669,17 @@ function buildZipBlob(entries) {
   return new Blob([...localParts, ...centralParts, new Uint8Array(end.buffer)], { type: "application/zip" });
 }
 
-// Groups results by scene (sceneSorterAgent's output) into folder-like
-// zip paths and gives every entry a collision-free name -- the single
-// entry point the batch UI calls for "Download all as zip".
+// Groups results into folder-like zip paths -- locationGroupAgent's
+// original subfolder wins when one exists (preserves how the user already
+// organized their photos), falling back to sceneSorterAgent's
+// classification otherwise -- and gives every entry a collision-free
+// name. The single entry point the batch UI calls for "Download all".
 async function exportOrganizeAgent(results) {
   const usable = results.filter(r => !r.error && !r.culled && r.blob);
   const entries = [];
   for (const r of usable) {
     const stem = (r.name || "photo").replace(/\.[^/.]+$/, "");
-    const folder = r.group || "misc";
+    const folder = r.origFolder || r.group || "misc";
     const path = folder + "/" + stem + "-" + (r.goalId || "batch") + ".jpg";
     const bytes = new Uint8Array(await r.blob.arrayBuffer());
     entries.push({ path, bytes });
@@ -19601,18 +19620,14 @@ function BatchAgent({onClose}){
     URL.revokeObjectURL(url);
   };
 
+  // A "download every file individually" loop used to live here, firing
+  // a.click() once per result with a stagger between each. Browsers treat
+  // automated downloads past the first in a burst as a flood and silently
+  // drop them (worse on iOS/Android Safari, where it can drop down to just
+  // one regardless of stagger) -- so bulk download now always goes through
+  // exportOrganizeAgent's zip, which is exactly one download and reliable.
+  // downloadOne (single explicit user click per file) is unaffected.
   const downloadAll=async()=>{
-    // Stagger sequential downloads -- triggering many a.click() downloads
-    // within the same tick makes browsers treat it as a download flood
-    // and silently block all but the first one.
-    for(const r of results){
-      if(!r.blob) continue;
-      downloadOne(r);
-      await new Promise(res=>setTimeout(res,350));
-    }
-  };
-
-  const downloadZip=async()=>{
     setZipping(true);
     try {
       const blob=await exportOrganizeAgent(results);
@@ -19626,11 +19641,14 @@ function BatchAgent({onClose}){
 
   const doneCount=results.filter(r=>!r.error&&!r.culled).length;
   const culledCount=results.filter(r=>r.culled).length;
-  // Scene Sorter Agent's grouping, applied here purely for display order --
-  // each group keeps its own results in the order they finished.
+  // Location Group Agent's folder (when photos came from a folder pick
+  // with subfolders) takes priority over the Scene Sorter Agent's
+  // classification -- preserving where the user already organized their
+  // photos beats re-sorting by scene. Falls back to scene when there's no
+  // original subfolder to preserve (e.g. photos picked individually).
   const groups=[];
   results.forEach(r=>{
-    const key=r.group||"other";
+    const key=r.origFolder||r.group||"other";
     let g=groups.find(g=>g.key===key);
     if(!g){ g={key,items:[]}; groups.push(g); }
     g.items.push(r);
@@ -19665,10 +19683,7 @@ function BatchAgent({onClose}){
         React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+(stage?" • "+STAGE_LABELS[stage]:"")+"..."):"Run batch agent"),
         results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
           React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"+(culledCount?", "+culledCount+" skipped":"")),
-          !busy&&doneCount>0&&React.createElement("div",{style:{display:"flex",gap:6}},
-            React.createElement("button",{onClick:downloadAll,style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Download all"),
-            React.createElement("button",{onClick:downloadZip,disabled:zipping,title:"Bundle every result into one zip, organized into folders by scene (Export/Organize Agent)",style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(99,102,241,0.3)",background:"rgba(99,102,241,0.1)",color:"#a5b4fc",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping...":"Download all as zip")
-          )
+          !busy&&doneCount>0&&React.createElement("button",{onClick:downloadAll,disabled:zipping,title:"Bundles every result into one zip, organized into folders (Export/Organize Agent) -- a single reliable download instead of one-per-photo",style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping...":"Download all (.zip)")
         ),
         groups.map(g=>React.createElement("div",{key:g.key,style:{display:"flex",flexDirection:"column",gap:6}},
           groups.length>1&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},g.key+" ("+g.items.length+")"),
