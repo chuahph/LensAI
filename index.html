@@ -19033,14 +19033,23 @@ function App() {
   };
   const closeApp=()=>{
     if(!window.confirm("Close LensAI?")) return;
-    // window.close() only works on a window/tab that script itself opened
-    // (e.g. via window.open) -- on a normal user-navigated tab, browsers
-    // silently ignore it for security reasons. Try it anyway since it does
-    // work in some embedded/PWA contexts, then fall back to swapping in a
-    // plain "you can close this tab now" screen so the action always does
-    // *something* visible instead of looking like a no-op button.
+    // Goal: actually close the browser tab/window. window.close() only
+    // works on a window/tab that script itself opened (e.g. via
+    // window.open) -- on a normal user-navigated tab, browsers silently
+    // ignore it for security reasons. We try the strongest options in
+    // order:
+    //   1. window.close() directly (works in PWA/standalone & script-
+    //      opened tabs).
+    //   2. The window.open('','_self') trick: re-claims the current
+    //      window as script-opened in some engines so the following
+    //      close() is permitted.
+    // If the tab is genuinely a normal browser tab, both are blocked and
+    // the page is still here a tick later -- only THEN do we swap in the
+    // "you can close this tab now" screen, so when closing actually
+    // succeeds the user never sees a flash of fallback UI first.
     try { window.close(); } catch(e) {}
-    setAppClosed(true);
+    try { window.open("", "_self"); window.close(); } catch(e) {}
+    setTimeout(() => { setAppClosed(true); }, 150);
   };
   const saveImg=async()=>{
     if(!img) return;
