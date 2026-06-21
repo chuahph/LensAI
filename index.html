@@ -19517,6 +19517,7 @@ function Spin(){
 // without touching whatever photo is currently open there.
 function BatchAgent({onClose}){
   const fileInputRef=useRef(null);
+  const folderInputRef=useRef(null);
   const [files,setFiles]=useState([]);
   // Multiple goals can be selected at once: each selected goal produces
   // its own exported variant per photo, so e.g. picking both "Smart HDR"
@@ -19546,7 +19547,10 @@ function BatchAgent({onClose}){
   };
 
   const onPick=(e)=>{
-    const list=Array.from(e.target.files||[]);
+    // Folder picks (webkitdirectory) hand back every file under the tree,
+    // including non-images and OS cruft like .DS_Store -- filter down to
+    // images only so a folder of mixed assets doesn't choke the pipeline.
+    const list=Array.from(e.target.files||[]).filter(f=>f.type.startsWith("image/"));
     setFiles(list); setResults([]);
     e.target.value="";
   };
@@ -19642,7 +19646,11 @@ function BatchAgent({onClose}){
       React.createElement("div",{style:{padding:"14px 16px 24px",display:"flex",flexDirection:"column",gap:12}},
         React.createElement("div",{style:{fontSize:12,color:"#64748b",lineHeight:1.5}},"Pick a batch of photos and one or more goals -- the agent analyzes and corrects each photo on its own, producing one exported variant per selected goal, no per-photo input needed."),
         React.createElement("input",{ref:fileInputRef,type:"file",accept:"image/*",multiple:true,style:{display:"none"},onChange:onPick}),
-        React.createElement("button",{onClick:()=>fileInputRef.current&&fileInputRef.current.click(),disabled:busy,style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"left"}},files.length?files.length+" photo"+(files.length>1?"s":"")+" selected -- tap to change":"Choose photos"),
+        React.createElement("input",{ref:folderInputRef,type:"file",webkitdirectory:"",directory:"",multiple:true,style:{display:"none"},onChange:onPick}),
+        React.createElement("div",{style:{display:"flex",gap:6}},
+          React.createElement("button",{onClick:()=>fileInputRef.current&&fileInputRef.current.click(),disabled:busy,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"left"}},files.length?files.length+" photo"+(files.length>1?"s":"")+" selected -- tap to change":"Choose photos"),
+          React.createElement("button",{onClick:()=>folderInputRef.current&&folderInputRef.current.click(),disabled:busy,title:"Load every photo inside a folder (and its subfolders)",style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#94a3b8",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},"Choose folder")
+        ),
         React.createElement("div",null,
           React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Goals (tap to select multiple)"),
           React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.map(g=>{
