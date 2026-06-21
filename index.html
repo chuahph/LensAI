@@ -18464,14 +18464,23 @@ function autoSelectHDR(stats) {
   // Rescue preset for backlit/overexposed-sky and hazy/high-contrast shots.
   // Scored on equal footing with every other preset below -- it wins only
   // when its own signals genuinely outscore the rest, not via a bonus.
-  if (hasSky && pctBlown > 4 && !isNight) scores.smartHDR += 45; // lowered from 6 -- catches more borderline backlit-sky shots
-  if (hasSky && pctBlown > 10 && !isNight) scores.smartHDR += 20; // severe case, lowered from 14
-  if (isHighContrast && hasSky && !isNight) scores.smartHDR += 14;
-  if (isHighContrast && !isNight) scores.smartHDR += 10; // even without sky, raised from 6
-  if (pctBlown > 2 && pctBlocked > 8 && !isNight) scores.smartHDR += 20; // blown highlights + blocked shadows together is the clearest dynamic-range signal, sky or not
-  if (isHazy && hasSky && !isNight) scores.smartHDR += 16; // dehaze is its hallmark
-  if (isHazy && !isNight) scores.smartHDR += 8; // even without sky
-  if (isWashedSky && !isNight) scores.smartHDR += 18; // raised from 14
+  //
+  // Dynamic-range severity is now a single continuous score built from how
+  // FAR each signal is past its "fine" threshold, not a stack of fixed-size
+  // bonuses that jump to the same value whether a shot just barely crosses
+  // the line or blows out half the frame. Two backlit-sky photos that both
+  // clip highlights now score proportionally to how bad the clipping
+  // actually is, so the preset that wins is the one whose own evidence is
+  // strongest -- not just the one that happened to clear the most tripwires.
+  let dr = 0;
+  dr += Math.max(0, pctBlown - 2) * 3;     // every % of blown highlights past 2% adds weight
+  dr += Math.max(0, pctBlocked - 5) * 1.5; // blocked shadows -- real, but lighter than blown highlights
+  dr += Math.max(0, contrast - 45) * 0.6;  // raw scene contrast beyond what's "normal"
+  if (hasSky) dr *= 1.35;                  // sky is the highest-stakes place to lose detail
+  if (isHazy) dr += 14;                    // dehaze is Smart HDR's hallmark fix
+  if (isWashedSky) dr += 16;
+  if (isHazy && isWashedSky) dr += 10;     // both together is the textbook hazy-sky rescue case, not a borderline fog/mist shot
+  if (!isNight) scores.smartHDR += Math.min(70, dr);
   // Faces need gentle, skin-safe processing -- Smart HDR's heavy dehaze/
   // saturation push (tuned for sky/landscape rescue) reads as oversaturated,
   // waxy skin when applied to a person, so it's damped here rather than
