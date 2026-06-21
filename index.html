@@ -19738,6 +19738,7 @@ function BatchAgent({onClose}){
   const [stage,setStage]=useState(null);
   const [skipFlagged,setSkipFlagged]=useState(false);
   const [zipping,setZipping]=useState(false);
+  const [showLegend,setShowLegend]=useState(false);
 
   // Mirrors the agent names in batchProcessFile's pipeline (decodeAgent,
   // analysisAgent, ...) so the busy indicator reflects which agent is
@@ -19745,10 +19746,22 @@ function BatchAgent({onClose}){
   const STAGE_LABELS={decode:"Reading photo",analyze:"Analyzing scene",cull:"Checking quality",goal:"Selecting goal",correct:"Computing corrections",enhance:"Applying HDR",render:"Rendering output",qa:"Reviewing result"};
 
   const GOALS=[
-    {id:"fullAuto",label:"Full Auto-Detect"},
-    {id:"auto",label:"Auto-detect per photo"},
-    {id:"none",label:"Corrections only"},
-    ...HDR_PRESETS.map(h=>({id:h.id,label:h.label})),
+    {id:"fullAuto",label:"Default",desc:"Runs corrections, then checks for a dominant face: if one is found it hands off to Auto-Detect per Photo's full scoring to pick the best-fitting HDR preset; otherwise it goes straight to Smart HDR."},
+    {id:"auto",label:"Auto-Detect per Photo",desc:"Scores every HDR preset against this specific photo's scene, lighting, and color signals, then applies whichever preset scores highest."},
+    {id:"none",label:"Corrections only",desc:"Applies the baseline Correction Agent (exposure, white balance, dehaze, etc.) without layering on any HDR preset."},
+    ...HDR_PRESETS.map(h=>({id:h.id,label:h.label,desc:{
+      smartHDR:"General-purpose dynamic-range rescue: boosts shadows/highlights balance and dehazes the sky -- the safe default for scenes without a more specific match.",
+      nature:"Lifts greens/blues and warmth for landscapes, foliage, and outdoor scenery.",
+      people:"Softer, skin-friendly tones with modest sharpening and a vignette to keep the focus on the subject.",
+      food:"Punchy saturation and warmth with strong sharpening to make dishes look vivid and appetizing.",
+      urban:"Cooler tones, heavy dehaze, and strong structure/sharpening for cityscapes and architecture.",
+      night:"Lifts shadows and brightness for low-light scenes while taming highlights and adding a vignette.",
+      sports:"Strong sharpening and dehaze to keep fast-motion and outdoor action crisp.",
+      portrait:"Tuned for faces: gentle highlights/shadows, light sharpening, and a flattering vignette.",
+      macro:"Heavy sharpening, structure, and dehaze to bring out fine close-up detail.",
+      golden:"Warm, golden-hour color grading with lifted saturation and warmth.",
+      snow:"Pulls down blown highlights and cools tones to recover detail in bright, snowy scenes.",
+    }[h.id]})),
   ];
 
   const toggleGoal=(id)=>{
@@ -19860,7 +19873,22 @@ function BatchAgent({onClose}){
           React.createElement("button",{onClick:()=>folderInputRef.current&&folderInputRef.current.click(),disabled:busy,title:"Load every photo inside a folder (and its subfolders)",style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#94a3b8",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},"Choose folder")
         ),
         React.createElement("div",null,
-          React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Goals (tap to select multiple)"),
+          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:6}},
+            React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"Goals (tap to select multiple)"),
+            React.createElement("button",{onClick:()=>setShowLegend(true),title:"What do these goals do?",style:{width:14,height:14,borderRadius:"50%",border:"1px solid #475569",background:"none",color:"#64748b",fontSize:9,fontWeight:700,lineHeight:1,cursor:"pointer",padding:0,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}},"i")
+          ),
+          showLegend&&React.createElement("div",{onClick:()=>setShowLegend(false),style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:20}},
+            React.createElement("div",{onClick:e=>e.stopPropagation(),style:{background:"#0f172a",border:"1px solid "+BORD,borderRadius:14,padding:18,maxWidth:420,maxHeight:"80vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:12}},
+              React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},
+                React.createElement("div",{style:{fontSize:13,fontWeight:800,color:"#fff"}},"Goal legend"),
+                React.createElement("button",{onClick:()=>setShowLegend(false),style:{background:"none",border:"none",color:"#94a3b8",fontSize:16,cursor:"pointer",fontFamily:"inherit"}},"×")
+              ),
+              GOALS.map(g=>React.createElement("div",{key:g.id,style:{display:"flex",flexDirection:"column",gap:2}},
+                React.createElement("div",{style:{fontSize:12,fontWeight:700,color:"#a5b4fc"}},g.label),
+                React.createElement("div",{style:{fontSize:11,color:"#94a3b8",lineHeight:1.4}},g.desc)
+              ))
+            )
+          ),
           React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.map(g=>{
             const active=goals.includes(g.id);
             return React.createElement("button",{key:g.id,onClick:()=>toggleGoal(g.id),disabled:busy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:5}},active&&React.createElement("span",{style:{fontSize:10}},"✓"),g.label);
