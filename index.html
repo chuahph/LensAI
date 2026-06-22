@@ -18503,7 +18503,7 @@ function _getScratch(which, w, h) {
     c = document.createElement("canvas");
     // Locks in willReadFrequently on first use -- per spec, later plain
     // getContext("2d") calls on this same canvas (analysisAgent,
-    // downscaleForStats, imageDataToCanvas, renderAgent's outCv) return this
+    // decodeFullRes, imageDataToCanvas, renderAgent's outCv) return this
     // same context, so every getImageData call on these heavily-reused
     // scratch canvases benefits without touching each call site.
     c.getContext("2d", { willReadFrequently: true });
@@ -19022,7 +19022,13 @@ function renderAgent(data, adj, stats) {
 // photo only when that photo is actually downloaded (single download,
 // edit-preview full quality, or zip-all), so the batch loop itself never
 // pays for a full-res render that might not even be kept.
-async function fullRenderAgent(file, adj, stats) {
+// Split into a decode step and a render-from-data step so callers
+// exporting multiple goal variants of the same photo (e.g. "Auto Select"
+// + "Nature" selected together) can decode and draw the full-resolution
+// original once and reuse it across variants -- decode+drawImage on a
+// 12000px image is real, avoidable work that's otherwise repeated once
+// per variant for pixels that are identical going in.
+async function decodeFullRes(file) {
   const image = await decodeAgent(file);
   const FULL_MAX = 12000;
   let w = image.width, h = image.height;
@@ -19033,23 +19039,18 @@ async function fullRenderAgent(file, adj, stats) {
   ctx.drawImage(image, 0, 0, w, h);
   const data = ctx.getImageData(0, 0, w, h);
   if (typeof image.close === "function") image.close();
+  return data;
+}
+
+function renderFullFromData(data, adj, stats) {
   const processed = processPixels(data, adj, stats);
   const outCv = imageDataToCanvas(processed);
   return new Promise(resolve => outCv.toBlob(resolve, "image/jpeg", 0.92));
 }
 
-// Same resolution-doesn't-matter-for-aggregate-stats reasoning as
-// analysisAgent's STATS_MAX -- used to keep the QA re-check below cheap
-// even though `processed` is now the full-resolution rendered photo.
-function downscaleForStats(imageData, maxDim) {
-  let w = imageData.width, h = imageData.height;
-  if (w <= maxDim && h <= maxDim) return imageData;
-  if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
-  else { w = Math.round(w * maxDim / h); h = maxDim; }
-  const src = imageDataToCanvas(imageData);
-  const dst = _getScratch("B", w, h);
-  dst.getContext("2d").drawImage(src, 0, 0, w, h);
-  return dst.getContext("2d").getImageData(0, 0, w, h);
+async function fullRenderAgent(file, adj, stats) {
+  const data = await decodeFullRes(file);
+  return renderFullFromData(data, adj, stats);
 }
 
 // qaAgent only ever reads pctBlown/pctBlocked/isOverexposed/isUnderexposed,
@@ -19243,18 +19244,35 @@ function buildZipBlob(entries) {
 // the batch UI calls for "Download all". `files` is the original picked
 // FileList, indexed by each result's fileIndex -- batchProcessFile only
 // ever rendered a preview-resolution thumbnail, so the full-resolution
-// photo for each result is rendered here, one at a time, only for
-// results that actually make it into the zip.
-async function exportOrganizeAgent(results, files) {
+// photo for each result is rendered here, only for results that actually
+// make it into the zip.
+// Results are grouped by fileIndex first: when multiple goals are
+// selected, the same source photo produces several variants that only
+// differ in adj/stats, not in their decoded pixels -- decoding the file
+// and drawing it into the full-resolution scratch canvas is the most
+// expensive part of this whole step, so it's done once per photo and
+// reused across all of that photo's variants instead of once per variant.
+async function exportOrganizeAgent(results, files, onProgress) {
   const usable = results.filter(r => !r.error && !r.culled && r.adj);
+  const byFile = new Map();
+  usable.forEach(r => {
+    if (!byFile.has(r.fileIndex)) byFile.set(r.fileIndex, []);
+    byFile.get(r.fileIndex).push(r);
+  });
   const entries = [];
-  for (const r of usable) {
-    const blob = await fullRenderAgent(files[r.fileIndex], r.adj, r.stats);
-    const stem = (r.name || "photo").replace(/\.[^/.]+$/, "");
-    const folder = r.origFolder || r.group || "misc";
-    const path = folder + "/" + stem + "-" + (r.goalId || "batch") + ".jpg";
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    entries.push({ path, bytes });
+  let done = 0;
+  for (const [fileIndex, variants] of byFile) {
+    const fullData = await decodeFullRes(files[fileIndex]);
+    for (const r of variants) {
+      const blob = await renderFullFromData(fullData, r.adj, r.stats);
+      const stem = (r.name || "photo").replace(/\.[^/.]+$/, "");
+      const folder = r.origFolder || r.group || "misc";
+      const path = folder + "/" + stem + "-" + (r.goalId || "batch") + ".jpg";
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      entries.push({ path, bytes });
+      done++;
+      if (onProgress) onProgress(done, usable.length);
+    }
   }
   return buildZipBlob(entries);
 }
@@ -20163,6 +20181,7 @@ function BatchAgent({onClose}){
   const [stage,setStage]=useState(null);
   const [skipFlagged,setSkipFlagged]=useState(false);
   const [zipping,setZipping]=useState(false);
+  const [zipProgress,setZipProgress]=useState({done:0,total:0});
   const [showLegend,setShowLegend]=useState(false);
   const [editIdx,setEditIdx]=useState(null);
   const [editPreset,setEditPreset]=useState(null);
@@ -20352,9 +20371,9 @@ function BatchAgent({onClose}){
   // exportOrganizeAgent's zip, which is exactly one download and reliable.
   // downloadOne (single explicit user click per file) is unaffected.
   const downloadAll=async()=>{
-    setZipping(true);
+    setZipping(true); setZipProgress({done:0,total:0});
     try {
-      const blob=await exportOrganizeAgent(results, files);
+      const blob=await exportOrganizeAgent(results, files, (done,total)=>setZipProgress({done,total}));
       const url=URL.createObjectURL(blob);
       const a=document.createElement("a");
       a.href=url; a.download="lensai-batch-"+Date.now()+".zip";
@@ -20425,7 +20444,7 @@ function BatchAgent({onClose}){
         React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy||overLimit,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy||overLimit)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy||overLimit)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+(stage?" • "+STAGE_LABELS[stage]:"")+"..."):"Run batch agent"),
         results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
           React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"+(culledCount?", "+culledCount+" skipped":"")),
-          !busy&&doneCount>0&&React.createElement("button",{onClick:downloadAll,disabled:zipping,title:"Bundles every result into one zip, organized into folders (Export/Organize Agent) -- a single reliable download instead of one-per-photo",style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping...":"Download all (.zip)")
+          !busy&&doneCount>0&&React.createElement("button",{onClick:downloadAll,disabled:zipping,title:"Bundles every result into one zip, organized into folders (Export/Organize Agent) -- a single reliable download instead of one-per-photo",style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping "+zipProgress.done+"/"+zipProgress.total+"...":"Download all (.zip)")
         ),
         groups.map(g=>React.createElement("div",{key:g.key,style:{display:"flex",flexDirection:"column",gap:6}},
           groups.length>1&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},g.key+" ("+g.items.length+")"),
