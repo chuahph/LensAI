@@ -17555,7 +17555,15 @@ function analyzeImage(data) {
   let scene='people';
   if (isNight)                                          scene='night';
   else if (gAvg>rAvg*1.06&&gAvg>bAvg*1.05&&gAvg>80&&!isStructured) scene='nature';
-  else if (rAvg>155&&gAvg>95&&bAvg<95)                 scene='food';
+  // Food's warm RGB box (rAvg>155, mid-range gAvg, low bAvg) is also exactly
+  // what a sunset/golden-hour sky looks like (warm orange, little blue) and
+  // what a warm-lit brick/terracotta building looks like -- this box used to
+  // fire before sky or structure were even considered, so those landscape/
+  // urban shots got tagged scene='food' outright. That wrong tag then fed
+  // straight into golden hour's own 70%-damping rule below (`scene==="food"`),
+  // crushing golden hour's score on the exact sunset photos it should win.
+  // Gated the same way nature's own green-dominance check above already is.
+  else if (!hasSky&&!isStructured&&rAvg>155&&gAvg>95&&bAvg<95) scene='food';
   else if (hasBigFace&&rAvg>gAvg&&rAvg>bAvg)          scene='portrait';
   else if (hasSky&&isStructured)                       scene='urban';
   else if (hasSky&&contrast>45&&!isStructured)         scene='nature';
@@ -19461,18 +19469,35 @@ function autoSelectHDR(stats) {
   // --- Snow: very bright + desaturated + lots of blown highlight detail to
   // recover -- distinct from smartHDR's "blown sky" rescue case since snow
   // dominates the whole frame (ground included), not just the sky. Excludes
-  // isStructured so a bright white building facade doesn't read as snow. ---
-  if (lumAvg > 175 && avgSat < 24 && pctHighlight > 55 && !isNight && !isStructured) scores.snow += 40;
+  // isStructured so a bright white building facade doesn't read as snow.
+  // Also excludes hasFace -- this is the highest-weight rule in the whole
+  // function (40, same range as a real face's own portrait bonus), and a
+  // bright/overexposed close-up face (pale skin, blown highlights, washed-
+  // out skin saturation under flash or harsh light) clears all three of its
+  // thresholds just as easily as an actual snow scene. The second snow rule
+  // already carried this exact exclusion -- this one was the gap. ---
+  if (lumAvg > 175 && avgSat < 24 && pctHighlight > 55 && !isNight && !isStructured && !hasFace) scores.snow += 40;
   if (pctBlown > 15 && avgSat < 20 && !hasFace && !isStructured) scores.snow += 15;
   if (isCoolCast && lumAvg > 160) scores.snow += 8;
 
   // --- Sports: high contrast + high saturation + sharp (frozen action) ---
+  // Both rules now exclude hasFace -- a dramatic, high-contrast, sharply-
+  // focused portrait (strong directional lighting, crisp eyes) used to clear
+  // the second rule's thresholds with no face exclusion at all, even though
+  // the first rule right above it already carries one for the same reason.
   if (contrast > 65 && avgSat > 30 && !hasFace && !isStructured) scores.sports += 25; // exclude architecture, same as the rule below
-  if (sharpness > 35 && contrast > 55 && !isStructured) scores.sports += 15; // exclude architecture
+  if (sharpness > 35 && contrast > 55 && !isStructured && !hasFace) scores.sports += 15; // exclude architecture
 
   // --- Macro: close-up texture -- high contrast, no sky, low blur ---
+  // The second rule lacked the isStructured exclusion the first one already
+  // has -- a sharp, no-sky architectural interior (grid-like railings,
+  // staircases, building facades shot up close) clears "not blurry, sharp,
+  // no sky" just as easily as an actual macro/texture subject, and without
+  // a sky-gated scene='urban' tag to fall back on indoors, urban's own score
+  // there was only the bare isStructured bonus (30) -- not enough of a
+  // margin over macro's full 35 once this rule fired unguarded.
   if (!hasSky && skyRatio < 0.03 && contrast > 55 && !hasFace) scores.macro += 20;
-  if (!isBlurry && sharpness > 40 && !hasSky) scores.macro += 15;
+  if (!isBlurry && sharpness > 40 && !hasSky && !isStructured) scores.macro += 15;
 
   // --- People: catch-all for indoor/social scenes, low contrast ---
   if (!hasSky && !hasFace && contrast < 50 && scene === "people") scores.people += 15;
