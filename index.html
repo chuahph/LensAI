@@ -20042,10 +20042,12 @@ function Spin(){
 // some modern iPhones tolerate, to also cover older/low-RAM devices)
 // leaves ~500MB of headroom for already-finished photos once the current
 // photo's own peak is subtracted -- divided by a ~15MB average blob, that
-// supports a batch in the low 30s. Rounded down for margin since this is
-// a heuristic, not something profiled on real hardware; large libraries
-// of high-megapixel photos still work fine, just split across more runs.
-const BATCH_PHOTO_LIMIT = 20;
+// supports a batch in the low 30s even at this all-48MP worst case. Set to
+// the top of that computed range rather than rounded down further, since
+// this is a heuristic and not something profiled on real hardware; large
+// libraries of high-megapixel photos still work fine, just split across
+// more runs.
+const BATCH_PHOTO_LIMIT = 30;
 
 // Goal-based batch agent UI: pick a goal + a pile of photos, tap Run, and
 // every photo gets analyzed/corrected (and optionally HDR-enhanced) on its
