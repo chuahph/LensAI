@@ -19425,18 +19425,29 @@ function autoSelectHDR(stats) {
   if (scene === "urban") scores.urban += 25;
   if (hasSky && isStructured && avgSat < 25) scores.urban += 12; // concrete/steel
   if (isHazy && isStructured) scores.urban += 8; // city haze, not fog -- requires structure too
-  if (edgeDirectionality > 0.25 && hasSky) scores.urban += 8;
+  // Every other urban rule above requires isStructured -- this one didn't,
+  // so a strong single horizon-line edge (sea horizon, mountain ridge,
+  // a beach/coastal nature shot) could skew edgeDirectionality toward one
+  // axis with no actual architecture present and still pick up urban points.
+  if (edgeDirectionality > 0.25 && hasSky && isStructured) scores.urban += 8;
 
   // --- Nature: green dominance, organic (non-structured) sky, saturation ---
   if (scene === "nature") scores.nature += 25;
   if (hasSky && avgSat > 25 && !isNight && !isStructured) scores.nature += 18;
   if (hasSky && skyBlueDepth > 25 && !isWashedSky && !isStructured) scores.nature += 12;
-  if (!hasSky && avgSat > 20 && contrast < 60 && !isStructured) scores.nature += 10; // forest/foliage
+  // No-sky rules elsewhere (snow, sports, macro) all exclude hasFace for the
+  // same reason: a colorful, low-contrast indoor portrait (no sky, moderate
+  // saturation from clothing/background) clears this "forest/foliage" box
+  // just as easily as actual foliage. This was the one without that gate.
+  if (!hasSky && avgSat > 20 && contrast < 60 && !isStructured && !hasFace) scores.nature += 10; // forest/foliage
   if (isHazy && !isStructured) scores.nature += 6; // fog/mist in nature, not urban haze
 
   // --- Food: warm tones, close framing, no sky ---
   if (scene === "food" && !hasSky) scores.food += 40;
-  if (!hasSky && isWarmCast && lumAvg > 90 && lumAvg < 190) scores.food += 10;
+  // Same gap as nature's no-sky rule above: warm incandescent/tungsten
+  // lighting on a person indoors (no sky, moderate brightness) clears this
+  // box with no actual food in frame.
+  if (!hasSky && isWarmCast && lumAvg > 90 && lumAvg < 190 && !hasFace) scores.food += 10;
 
   // --- Portrait: face detected, typically no sky, warm-ish ---
   // hasFace is a color-only heuristic (skin-tone chromaticity ratio over
@@ -19478,7 +19489,10 @@ function autoSelectHDR(stats) {
   // already carried this exact exclusion -- this one was the gap. ---
   if (lumAvg > 175 && avgSat < 24 && pctHighlight > 55 && !isNight && !isStructured && !hasFace) scores.snow += 40;
   if (pctBlown > 15 && avgSat < 20 && !hasFace && !isStructured) scores.snow += 15;
-  if (isCoolCast && lumAvg > 160) scores.snow += 8;
+  // Both rules above exclude hasFace+isStructured; this one didn't -- a
+  // cool-toned bright building facade or a pale face under cool light could
+  // pick up snow points with no actual snow in frame.
+  if (isCoolCast && lumAvg > 160 && !hasFace && !isStructured) scores.snow += 8;
 
   // --- Sports: high contrast + high saturation + sharp (frozen action) ---
   // Both rules now exclude hasFace -- a dramatic, high-contrast, sharply-
@@ -19497,7 +19511,10 @@ function autoSelectHDR(stats) {
   // there was only the bare isStructured bonus (30) -- not enough of a
   // margin over macro's full 35 once this rule fired unguarded.
   if (!hasSky && skyRatio < 0.03 && contrast > 55 && !hasFace) scores.macro += 20;
-  if (!isBlurry && sharpness > 40 && !hasSky && !isStructured) scores.macro += 15;
+  // The rule above already excludes hasFace; this one didn't -- a sharp,
+  // in-focus, no-sky face close-up (extreme portrait crop) cleared this
+  // rule's thresholds with no actual macro/texture subject in frame.
+  if (!isBlurry && sharpness > 40 && !hasSky && !isStructured && !hasFace) scores.macro += 15;
 
   // --- People: catch-all for indoor/social scenes, low contrast ---
   if (!hasSky && !hasFace && contrast < 50 && scene === "people") scores.people += 15;
