@@ -19028,8 +19028,15 @@ function renderAgent(data, adj, stats) {
 // original once and reuse it across variants -- decode+drawImage on a
 // 12000px image is real, avoidable work that's otherwise repeated once
 // per variant for pixels that are identical going in.
-async function decodeFullRes(file) {
-  const image = await decodeAgent(file);
+// Split out from decodeFullRes so callers processing several photos in a
+// row (exportOrganizeAgent) can kick off the next photo's decodeAgent --
+// createImageBitmap, which the browser typically decodes off the main
+// thread -- while still drawing/encoding the current one, instead of the
+// two running strictly back-to-back. Only an ImageBitmap (not yet a full
+// getImageData buffer) is ever held an extra photo ahead, so this doesn't
+// reintroduce the multi-full-res-buffer memory risk the shared scratch
+// canvas exists to avoid.
+function drawFullResFromBitmap(image) {
   const FULL_MAX = 12000;
   let w = image.width, h = image.height;
   if (w > FULL_MAX) { h = Math.round(h * FULL_MAX / w); w = FULL_MAX; }
@@ -19040,6 +19047,11 @@ async function decodeFullRes(file) {
   const data = ctx.getImageData(0, 0, w, h);
   if (typeof image.close === "function") image.close();
   return data;
+}
+
+async function decodeFullRes(file) {
+  const image = await decodeAgent(file);
+  return drawFullResFromBitmap(image);
 }
 
 function renderFullFromData(data, adj, stats) {
@@ -19259,11 +19271,22 @@ async function exportOrganizeAgent(results, files, onProgress) {
     if (!byFile.has(r.fileIndex)) byFile.set(r.fileIndex, []);
     byFile.get(r.fileIndex).push(r);
   });
+  const fileIndexes = [...byFile.keys()];
   const entries = [];
   let done = 0;
-  for (const [fileIndex, variants] of byFile) {
-    const fullData = await decodeFullRes(files[fileIndex]);
-    for (const r of variants) {
+  // Pipelined: each photo's decodeAgent (native, typically off-main-thread)
+  // is kicked off one photo ahead of when it's needed, so its latency
+  // overlaps with the previous photo's draw/process/encode instead of the
+  // single-photo-save path's advantage (decode happens once, well before
+  // export) being entirely absent here. The actual draw/process/encode
+  // stays strictly sequential through the one shared scratch canvas.
+  let nextBitmap = fileIndexes.length ? decodeAgent(files[fileIndexes[0]]) : null;
+  for (let i = 0; i < fileIndexes.length; i++) {
+    const fileIndex = fileIndexes[i];
+    const image = await nextBitmap;
+    nextBitmap = (i + 1 < fileIndexes.length) ? decodeAgent(files[fileIndexes[i + 1]]) : null;
+    const fullData = drawFullResFromBitmap(image);
+    for (const r of byFile.get(fileIndex)) {
       const blob = await renderFullFromData(fullData, r.adj, r.stats);
       const stem = (r.name || "photo").replace(/\.[^/.]+$/, "");
       const folder = r.origFolder || r.group || "misc";
@@ -19408,23 +19431,44 @@ function autoSelectHDR(stats) {
   if (!hasSky && isWarmCast && lumAvg > 90 && lumAvg < 190) scores.food += 10;
 
   // --- Portrait: face detected, typically no sky, warm-ish ---
-  if (hasFace) scores.portrait += 35;
+  // hasFace is a color-only heuristic (skin-tone chromaticity ratio over
+  // the whole frame) that also fires on warm/browned food and sand/wood/
+  // foliage tones in scenery shots -- this flat +35 alone routinely
+  // outscored food's and nature's own signature-gated points, so dishes
+  // and landscapes were getting portrait treatment despite no face being
+  // present. `scene` already resolves food/nature ahead of portrait by
+  // checking their own, more specific color signatures first, so when it
+  // lands on one of those, that's stronger independent evidence the
+  // skin-tone reading here is a false positive rather than a real face --
+  // same mutual-exclusion pattern sports/macro/people already use (!hasFace).
+  // brick/terracotta (scene='urban') was the other named false-positive
+  // source in the skin-detection comment above, alongside food/wood --
+  // excluded here too for the same reason.
+  const faceLooksReal = scene !== "food" && scene !== "nature" && scene !== "urban";
+  if (hasFace && faceLooksReal) scores.portrait += 35;
   if (scene === "portrait") scores.portrait += 25;
-  if (hasFace && !hasSky) scores.portrait += 10;
+  if (hasFace && !hasSky && faceLooksReal) scores.portrait += 10;
 
   // --- Golden hour: strong warm cast, not blown, not night ---
   if (isWarmCast && tempAxis > 22 && !isOverexposed && !isNight) scores.golden += 30;
   if (isWarmCast && lumAvg > 90 && lumAvg < 180) scores.golden += 10;
+  // Golden hour's only signal is color temperature -- nothing here checks
+  // `scene`, so a strongly warm-toned dish (fried/roasted food easily clears
+  // both thresholds above) could outscore food's own, more specific
+  // signature whenever that signature's narrower RGB box didn't quite match.
+  // Damped the same way smartHDR already damps against hasFace.
+  if (scene === "food") scores.golden = Math.round(scores.golden * 0.3);
 
   // --- Snow: very bright + desaturated + lots of blown highlight detail to
   // recover -- distinct from smartHDR's "blown sky" rescue case since snow
-  // dominates the whole frame (ground included), not just the sky. ---
-  if (lumAvg > 175 && avgSat < 24 && pctHighlight > 55 && !isNight) scores.snow += 40;
-  if (pctBlown > 15 && avgSat < 20 && !hasFace) scores.snow += 15;
+  // dominates the whole frame (ground included), not just the sky. Excludes
+  // isStructured so a bright white building facade doesn't read as snow. ---
+  if (lumAvg > 175 && avgSat < 24 && pctHighlight > 55 && !isNight && !isStructured) scores.snow += 40;
+  if (pctBlown > 15 && avgSat < 20 && !hasFace && !isStructured) scores.snow += 15;
   if (isCoolCast && lumAvg > 160) scores.snow += 8;
 
   // --- Sports: high contrast + high saturation + sharp (frozen action) ---
-  if (contrast > 65 && avgSat > 30 && !hasFace) scores.sports += 25;
+  if (contrast > 65 && avgSat > 30 && !hasFace && !isStructured) scores.sports += 25; // exclude architecture, same as the rule below
   if (sharpness > 35 && contrast > 55 && !isStructured) scores.sports += 15; // exclude architecture
 
   // --- Macro: close-up texture -- high contrast, no sky, low blur ---
