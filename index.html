@@ -18567,20 +18567,37 @@ async function decodeAgent(file) {
 }
 
 function analysisAgent(image) {
-  // Unattended over potentially many photos -- capped well below the
-  // interactive editor's 12000px full-res export ceiling so a large
-  // batch stays fast and doesn't risk exhausting tab memory processing
-  // several full-res images back to back with no user able to intervene.
-  const MAX = 2400;
+  // Stats (histogram, contrast, sky/face detection, etc.) are aggregate/
+  // statistical measures that are stable across resolution -- a small
+  // preview gives essentially identical numbers to the full-res original,
+  // exactly the same trade-off the interactive single-photo editor already
+  // relies on (see loadImage's comment). Scanning a 12000px image through
+  // the entire 5-pass analysis pipeline for near-identical numbers would
+  // just waste time and memory on every photo in the batch for no benefit.
+  const STATS_MAX = 1200;
+  let sw = image.width, sh = image.height;
+  if (sw > STATS_MAX) { sh = Math.round(sh * STATS_MAX / sw); sw = STATS_MAX; }
+  if (sh > STATS_MAX) { sw = Math.round(sw * STATS_MAX / sh); sh = STATS_MAX; }
+  const scv = document.createElement("canvas");
+  scv.width = sw; scv.height = sh;
+  const sctx = scv.getContext("2d");
+  sctx.drawImage(image, 0, 0, sw, sh);
+  const stats = analyzeImage(sctx.getImageData(0, 0, sw, sh));
+
+  // The actual rendered/exported photo, in contrast, must match the
+  // original's resolution -- capped only by the same browser-canvas
+  // ceiling the single-photo editor uses (12000px covers virtually all
+  // consumer/prosumer photography), not an arbitrary batch-only downscale.
+  const FULL_MAX = 12000;
   let w = image.width, h = image.height;
-  if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
-  if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; }
+  if (w > FULL_MAX) { h = Math.round(h * FULL_MAX / w); w = FULL_MAX; }
+  if (h > FULL_MAX) { w = Math.round(w * FULL_MAX / h); h = FULL_MAX; }
   const cv = document.createElement("canvas");
   cv.width = w; cv.height = h;
   const ctx = cv.getContext("2d");
   ctx.drawImage(image, 0, 0, w, h);
   const data = ctx.getImageData(0, 0, w, h);
-  return { data, stats: analyzeImage(data) };
+  return { data, stats };
 }
 
 // Flags photos bad enough that no amount of correction will save them --
@@ -18973,6 +18990,21 @@ async function renderAgent(data, adj, stats) {
   return { blob, thumb: thumbCv.toDataURL("image/jpeg", 0.7), processed };
 }
 
+// Same resolution-doesn't-matter-for-aggregate-stats reasoning as
+// analysisAgent's STATS_MAX -- used to keep the QA re-check below cheap
+// even though `processed` is now the full-resolution rendered photo.
+function downscaleForStats(imageData, maxDim) {
+  let w = imageData.width, h = imageData.height;
+  if (w <= maxDim && h <= maxDim) return imageData;
+  if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+  else { w = Math.round(w * maxDim / h); h = maxDim; }
+  const src = imageDataToCanvas(imageData);
+  const dst = document.createElement("canvas");
+  dst.width = w; dst.height = h;
+  dst.getContext("2d").drawImage(src, 0, 0, w, h);
+  return dst.getContext("2d").getImageData(0, 0, w, h);
+}
+
 // Re-checks the *rendered* output, not the original -- catches over/under-
 // correction the pipeline itself introduced (e.g. a highlight-recovery
 // push that wasn't enough, or a saturation boost that clipped), which the
@@ -19011,7 +19043,7 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   note("render");
   const { blob, thumb, processed } = await renderAgent(data, finalAdj, stats);
   note("qa");
-  const qa = qaAgent(analyzeImage(processed));
+  const qa = qaAgent(analyzeImage(downscaleForStats(processed, 1200)));
 
   const preset = HDR_PRESETS.find(h => h.id === hdrId);
   return {
@@ -19981,21 +20013,23 @@ function Spin(){
   return React.createElement("span",{style:{width:10,height:10,borderRadius:"50%",border:"2px solid rgba(255,255,255,0.2)",borderTopColor:"#fff",display:"inline-block",animation:"spin 0.5s linear infinite"}});
 }
 
-// The per-photo PEAK working set is already bounded well below what it
-// looks like at a glance: analysisAgent downsamples to a 2400px-long-edge
-// canvas before any pixel work happens, and processPixels' internal
-// snapshot buffer (_snapshot) is a single reused scratch array, not a
-// fresh allocation per photo -- so that part doesn't accumulate across a
-// batch at all. What DOES accumulate, one entry per finished photo in
-// `results`, is just the rendered JPEG blob (roughly 1-3MB at 2400px/0.92
-// quality) plus a tiny 220px-wide thumbnail dataURL (tens of KB) -- on the
-// order of ~2-3MB/photo. Even iOS Safari's tighter per-tab budget on older
-// devices (low-RAM iPhones/iPads, often only a few hundred MB before the
-// tab gets killed) has comfortable headroom well past 40 photos' worth of
-// that; this is mostly guarding against the *peak* transient overhead
-// (decode + intermediate typed-array math) stacking with the OS and other
-// open tabs, not the cumulative result list itself.
-const BATCH_PHOTO_LIMIT = 80;
+// Batch output now renders at the original photo's full resolution (see
+// analysisAgent) instead of a capped 2400px preview, so both halves of the
+// memory budget changed:
+//  - PEAK per-photo working set: processPixels' internal snapshot buffer
+//    (_snapshot) is a single reused scratch array, not a fresh allocation
+//    per photo, so it doesn't accumulate -- but it's now sized to the
+//    full-res image (e.g. ~200MB raw for a 48MP photo) instead of a
+//    2400px-capped one, so each photo's transient peak is meaningfully
+//    bigger than before.
+//  - CUMULATIVE growth: one entry per finished photo stays in `results`
+//    (blob + tiny thumbnail) until exported. The blob is now a full-res
+//    JPEG -- roughly 3-8MB for typical 12-24MP photos, more for very high
+//    megapixel originals -- instead of the ~1-3MB a 2400px cap produced.
+// Lowered from 80 back down to keep both numbers comfortably inside even
+// iOS Safari's tighter per-tab budget on older/low-RAM devices; large
+// libraries still work fine, just split across more than one run.
+const BATCH_PHOTO_LIMIT = 30;
 
 // Goal-based batch agent UI: pick a goal + a pile of photos, tap Run, and
 // every photo gets analyzed/corrected (and optionally HDR-enhanced) on its
