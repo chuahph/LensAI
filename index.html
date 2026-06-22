@@ -19288,6 +19288,16 @@ async function exportOrganizeAgent(results, files, onProgress) {
   });
   const fileIndexes = [...byFile.keys()];
   const entries = [];
+  // Real photo names collide constantly once origFolder falls back to
+  // scene-group (no EXIF location/date, no folder picker -- the common
+  // case for individually-picked phone photos): IMG_1234.jpg from two
+  // different shots landing in the same scene both produce the exact same
+  // zip path, e.g. people/IMG_1234-fullAuto.jpg twice. A zip with two
+  // entries at one path isn't just "one overwrites the other" -- several
+  // unzip tools (notably iOS/Android's built-in archive viewers) treat it
+  // as corrupt and refuse to extract anything. Track every path used and
+  // suffix with -2, -3, ... on repeat so every entry is unique.
+  const usedPaths = new Map();
   let done = 0;
   // Pipelined: each photo's decodeAgent (native, typically off-main-thread)
   // is kicked off one photo ahead of when it's needed, so its latency
@@ -19305,7 +19315,14 @@ async function exportOrganizeAgent(results, files, onProgress) {
       const blob = await renderFullFromData(fullData, r.adj, r.stats);
       const stem = (r.name || "photo").replace(/\.[^/.]+$/, "");
       const folder = r.origFolder || r.group || "misc";
-      const path = folder + "/" + stem + "-" + (r.goalId || "batch") + ".jpg";
+      let path = folder + "/" + stem + "-" + (r.goalId || "batch") + ".jpg";
+      if (usedPaths.has(path)) {
+        const n = usedPaths.get(path) + 1;
+        usedPaths.set(path, n);
+        path = folder + "/" + stem + "-" + (r.goalId || "batch") + "-" + n + ".jpg";
+      } else {
+        usedPaths.set(path, 1);
+      }
       const bytes = new Uint8Array(await blob.arrayBuffer());
       entries.push({ path, bytes });
       done++;
