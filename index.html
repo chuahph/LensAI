@@ -18842,6 +18842,44 @@ function withScratchLock(task) {
   return run;
 }
 
+// Screen Wake Lock: the only lever a web page has against the OS putting a
+// phone to sleep mid-batch -- once the screen turns off, mobile browsers
+// suspend the tab's JS entirely and a multi-photo batch just stalls until
+// the user wakes the device again. There's no API to request background
+// CPU priority, so this can't help once the *tab* itself is backgrounded
+// (switched away from), but it keeps the screen (and so the page) awake
+// for the common case of a batch left running with the screen about to
+// auto-sleep. Refcounted so overlapping users (batch run + a concurrent
+// reanalyze) share one lock and it's only released once all of them are
+// done; the OS releases the underlying lock automatically whenever the tab
+// *is* backgrounded, so it's re-requested on visibilitychange while at
+// least one user is still active.
+let _wakeLock = null;
+let _wakeLockUsers = 0;
+async function _requestWakeLock() {
+  if (_wakeLock || !("wakeLock" in navigator)) return;
+  try {
+    _wakeLock = await navigator.wakeLock.request("screen");
+    _wakeLock.addEventListener("release", () => { _wakeLock = null; });
+  } catch (e) { /* denied, no screen, battery saver, etc -- nothing to do */ }
+}
+function acquireWakeLock() {
+  _wakeLockUsers++;
+  _requestWakeLock();
+}
+function releaseWakeLock() {
+  _wakeLockUsers = Math.max(0, _wakeLockUsers - 1);
+  if (_wakeLockUsers === 0 && _wakeLock) {
+    _wakeLock.release().catch(() => {});
+    _wakeLock = null;
+  }
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && _wakeLockUsers > 0) _requestWakeLock();
+  });
+}
+
 function imageDataToCanvas(imageData) {
   const c = _getScratch("A", imageData.width, imageData.height);
   c.getContext("2d").putImageData(imageData, 0, 0);
@@ -20275,6 +20313,15 @@ function App() {
 
   useEffect(()=>{ hdrRef.current=activeHDR; },[activeHDR]);
 
+  // Hold the screen-wake-lock for as long as a photo is open: live preview
+  // re-renders (and the eventual full-res Save) keep the CPU busy on every
+  // slider drag, and a screen timeout mid-edit would suspend that work.
+  useEffect(()=>{
+    if (!img) return;
+    acquireWakeLock();
+    return () => releaseWakeLock();
+  },[img]);
+
   // Caches the last processPixels() result keyed on every adj field except
   // rotation/perspective, which are pure post-processing geometric warps
   // (applyPerspective/applyRotation below) that never feed back into
@@ -20875,27 +20922,32 @@ function BatchAgent({onClose}){
   const run=async()=>{
     if(!files.length||!goals.length||busy||overLimit) return;
     setBusy(true); setProgress(0); setResults([]); setStage(null);
+    acquireWakeLock(); // keep the screen (and so the tab) awake for the whole batch
     const total=files.length*goals.length;
     setProgressTotal(total);
     const out=[];
     let done=0;
-    for(let i=0;i<files.length;i++){
-      for(let j=0;j<goals.length;j++){
-        try { out.push({...await withScratchLock(()=>batchProcessFile(files[i], goals[j], setStage, {skipFlagged})), fileIndex:i}); }
-        catch(err){
-          console.error("[LensAI] Batch item failed:", files[i].name, goals[j], err);
-          out.push({ name: files[i].name, goalId: goals[j], fileIndex:i, error: true });
+    try {
+      for(let i=0;i<files.length;i++){
+        for(let j=0;j<goals.length;j++){
+          try { out.push({...await withScratchLock(()=>batchProcessFile(files[i], goals[j], setStage, {skipFlagged})), fileIndex:i}); }
+          catch(err){
+            console.error("[LensAI] Batch item failed:", files[i].name, goals[j], err);
+            out.push({ name: files[i].name, goalId: goals[j], fileIndex:i, error: true });
+          }
+          done++;
+          setProgress(done);
+          setResults([...out]);
+          // Yield a tick between photos so the progress UI actually paints
+          // instead of the whole batch running inside one blocked frame.
+          await new Promise(r=>setTimeout(r,0));
         }
-        done++;
-        setProgress(done);
-        setResults([...out]);
-        // Yield a tick between photos so the progress UI actually paints
-        // instead of the whole batch running inside one blocked frame.
-        await new Promise(r=>setTimeout(r,0));
       }
+    } finally {
+      setStage(null);
+      setBusy(false);
+      releaseWakeLock();
     }
-    setStage(null);
-    setBusy(false);
   };
 
   const goalLabel=(r)=>{
@@ -20994,6 +21046,7 @@ function BatchAgent({onClose}){
     const file=files[r.fileIndex];
     if(!file) return;
     setEditBusy(true);
+    acquireWakeLock();
     try {
       // Serialized on the shared scratch like the preview render above --
       // batchProcessFile's analysis/preview render draws into the same
@@ -21004,7 +21057,7 @@ function BatchAgent({onClose}){
       setEditPreviewFor({preset:presetId, corrections:applyCorrections});
     } catch(err){
       console.error("[LensAI] Reanalyze failed:", file.name, presetId, err);
-    } finally { setEditBusy(false); }
+    } finally { setEditBusy(false); releaseWakeLock(); }
   };
   // Picking a different HDR type or toggling corrections re-renders and
   // swaps the preview immediately, rather than requiring a separate
@@ -21144,6 +21197,28 @@ function BatchAgent({onClose}){
           React.createElement("img",{src:editFullUrl||(editPreview||results[editIdx]).thumb,style:{width:"100%",maxHeight:"50vh",objectFit:"contain",borderRadius:10,display:"block",background:"#000",opacity:editBusy?0.5:1}}),
           editBusy&&React.createElement("div",{style:{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:6,color:"#fff",fontSize:12,fontWeight:700}},React.createElement(Spin,null),"Reanalyzing...")
         ),
+        // Full breakdown of every correction actually applied to this photo
+        // -- previously the only feedback here was the tiny "Auto: Food"
+        // badge on the thumbnail (and qaFlags hidden in a hover-only title
+        // attribute), neither of which says what was actually adjusted.
+        (()=>{
+          const shown=editPreview||results[editIdx];
+          const adj=shown.adj||{};
+          const applied=ADJUSTMENTS.filter(a=>Math.round(adj[a.id]||0)!==0);
+          return React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:7,background:"#131b2c",border:"1px solid "+BORD,borderRadius:10,padding:"10px 12px"}},
+            React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"Corrections applied"),
+            (shown.hdrLabel||shown.stats&&shown.stats.scene)&&React.createElement("div",{style:{fontSize:12,color:"#a5b4fc",fontWeight:700}},
+              (shown.hdrLabel?"HDR: "+shown.hdrLabel:"No HDR preset")+(shown.stats&&shown.stats.scene?" -- detected as "+shown.stats.scene+" scene":"")),
+            applied.length
+              ? React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:6}},
+                  applied.map(a=>React.createElement("span",{key:a.id,style:{fontSize:11,fontWeight:600,color:a.color,background:a.color+"18",border:"1px solid "+a.color+"44",borderRadius:8,padding:"3px 8px"}},
+                    a.label+" "+(adj[a.id]>0?"+":"")+Math.round(adj[a.id])))
+                )
+              : React.createElement("div",{style:{fontSize:11,color:"#64748b"}},"No adjustments applied"),
+            shown.qaFlags&&shown.qaFlags.length>0&&React.createElement("div",{style:{fontSize:11,color:"#fbbf24"}},"QA flags: "+shown.qaFlags.join(", ")),
+            shown.cullFlags&&shown.cullFlags.length>0&&React.createElement("div",{style:{fontSize:11,color:"#f87171"}},"Quality flags: "+shown.cullFlags.join(", "))
+          );
+        })(),
         React.createElement("label",{style:{display:"flex",alignItems:"center",gap:8,cursor:editBusy?"not-allowed":"pointer",fontSize:12,fontWeight:600,color:"#cbd5e1"}},
           React.createElement("input",{type:"checkbox",checked:editCorrections,disabled:editBusy,onChange:toggleCorrections}),
           "Apply auto corrections (exposure, white balance, dehaze)"
