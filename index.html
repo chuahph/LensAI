@@ -18499,7 +18499,16 @@ function processPixels(src, adj, imgStats) {
 let _scratchA = null, _scratchB = null;
 function _getScratch(which, w, h) {
   let c = which === "A" ? _scratchA : _scratchB;
-  if (!c) { c = document.createElement("canvas"); if (which === "A") _scratchA = c; else _scratchB = c; }
+  if (!c) {
+    c = document.createElement("canvas");
+    // Locks in willReadFrequently on first use -- per spec, later plain
+    // getContext("2d") calls on this same canvas (analysisAgent,
+    // downscaleForStats, imageDataToCanvas, renderAgent's outCv) return this
+    // same context, so every getImageData call on these heavily-reused
+    // scratch canvases benefits without touching each call site.
+    c.getContext("2d", { willReadFrequently: true });
+    if (which === "A") _scratchA = c; else _scratchB = c;
+  }
   if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
   return c;
 }
@@ -19099,7 +19108,11 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   note("render");
   const { blob, thumb, processed } = await renderAgent(data, finalAdj, stats);
   note("qa");
-  const qa = qaAgent(analyzeExposureOnly(downscaleForStats(processed, 1200)));
+  // analyzeExposureOnly is a single cheap histogram pass (unlike the old
+  // multi-pass analyzeImage this downscale was originally written to make
+  // affordable), so it can run directly on the full-res processed pixels --
+  // skips an extra drawImage+getImageData canvas round-trip per photo.
+  const qa = qaAgent(analyzeExposureOnly(processed));
 
   const preset = HDR_PRESETS.find(h => h.id === hdrId);
   return {
