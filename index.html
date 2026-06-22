@@ -17626,10 +17626,30 @@ function analyzeImage(data) {
   // and a sane food-lighting brightness range.
   const foodMultiHue = blueSkyRatio<0.06 && hueVariety>=3 && lumAvg>70 && lumAvg<225 && !isCoolCast;
   const foodWarmTone = blueSkyRatio<0.06 && !isCoolCast && !hasFace && avgSat>22 && lumAvg>70 && lumAvg<220;
+  // Warm/neutral dishes that FILL the frame -- noodles, rice, broth bowls,
+  // stir-fries, dumplings: the bulk of Asian food -- read as skin-tone to
+  // hasFace and were being stolen by the portrait branch (ramen/pho/fried
+  // rice all measured scene=portrait/people before this). Colour alone can't
+  // separate a warm dish from a face, so two orthogonal signals do it:
+  //   - foodTextured: the dish surface is textured/structured (noodle tangle,
+  //     rice grains, mixed ingredients) -- isStructured is true -- whereas a
+  //     real face is smooth (every portrait test case measured isStructured
+  //     false). A skin-toned, no-blue-sky frame that is ALSO structured is
+  //     therefore food, not a portrait. skinRatio>0.20 just requires the warm
+  //     food tones to actually be present, so plain grey architecture (also
+  //     structured, but not warm) isn't swept in.
+  //   - foodDenseColor: a smoother dish that still packs the frame with
+  //     saturation beyond what skin reaches (very high skinRatio AND high
+  //     avgSat). A face's skin is far less saturated than a colourful plated
+  //     dish, so this catches smooth close-ups (dumpling baskets, sushi
+  //     platters) without matching a warm-lit indoor portrait (whose avgSat
+  //     stays ~25-30, below the bar).
+  const foodTextured = blueSkyRatio<0.06 && isStructured && skinRatio>0.20 && lumAvg>70 && lumAvg<225 && !isCoolCast;
+  const foodDenseColor = blueSkyRatio<0.06 && skinRatio>0.6 && avgSat>38 && lumAvg>90 && lumAvg<210 && !isCoolCast;
 
   let scene='people';
   if (isNight)                                          scene='night';
-  else if (foodMultiHue || foodWarmTone)                scene='food';
+  else if (foodMultiHue || foodWarmTone || foodTextured || foodDenseColor) scene='food';
   else if (gAvg>rAvg*1.06&&gAvg>bAvg*1.05&&gAvg>80&&!isStructured) scene='nature';
   else if (hasBigFace&&rAvg>gAvg&&rAvg>bAvg)          scene='portrait';
   else if (hasSky&&isStructured)                       scene='urban';
@@ -17660,7 +17680,7 @@ function analyzeImage(data) {
     wbCorrection: isCoolCast?Math.min(20,(-tempAxis)*0.5):isWarmCast?Math.max(-20,(-tempAxis)*0.5):0,
     isWarm:isWarmCast, isCool:isCoolCast,
     sat:avgSat, pctLowSat, pctHighSat,
-    hueVariety, satPixFrac,
+    hueVariety, satPixFrac, skinRatio,
     sharpness, sharp:sharpness,
     edgeDirectionality, isStructured,
     awbR:awbRc, awbG:1.0, awbB:awbBc,
