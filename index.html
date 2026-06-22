@@ -17665,7 +17665,20 @@ function analyzeImage(data) {
   // high-contrast with sky). isStructured (axis-aligned edge density from
   // the sharpness pass) now disambiguates: architecture has strong grid-like
   // horizontal/vertical edges, foliage/organic scenes don't.
-  const isNight=lumAvg<65||(lumAvg<90&&pctBlocked>35);
+  // Night detection. The first two clauses catch outright-dark frames. The
+  // third catches the common night-CITY case the others miss: a night street
+  // or lit building has a large genuinely-dark region (the black sky plus
+  // shadows) but bright signage/lamps drag the AVERAGE luma up to ~70-90, so
+  // a mean-only test reads it as a normal daytime scene. Those same warm
+  // lamp-lit, structured, red-dominant frames were then being grabbed by the
+  // food paths (warm building light trips the skin/warm tests) -- the
+  // reported "night street wrongly detected" case. The signature that
+  // separates them from a (merely dim) food close-up is a big dark area
+  // (pctShadow>42, vs ~24 for dim food) sitting on TRUE blacks (blackPoint<10,
+  // vs ~23 for evenly-dim food that never reaches black). Excludes a dominant
+  // face so a low-key/dramatic portrait stays Portrait rather than Night.
+  const isNight=lumAvg<65 || (lumAvg<90&&pctBlocked>35)
+    || (lumAvg<100 && pctShadow>42 && blackPoint<10 && !hasBigFace);
 
   // FOOD signature -- evaluated BEFORE nature/portrait/urban, because each of
   // those three steals a whole class of food shot when checked first:
