@@ -19791,7 +19791,19 @@ function App() {
     analyzedAdjRef.current=null; enhancedAdjRef.current=null;
   };
   const closeApp=()=>{
-    if(!window.confirm("Close LensAI?")) return;
+    // window.confirm can throw outright rather than just declining to show
+    // anything -- a sandboxed iframe missing allow-modals, or a native
+    // WKWebView wrapper with no confirm-panel delegate implemented, both
+    // throw instead of returning false. That's exactly the same class of
+    // environment quirk the attemptClose() fallbacks below already
+    // anticipate (Capacitor/Cordova/Electron) -- left unguarded, it surfaced
+    // as an uncaught error (the "LensAI hit a problem" overlay) the instant
+    // the X button was tapped in one of those embeddings. Treat a throw as
+    // "no dialog available to ask," not "user said no" -- proceed with the
+    // close the user already explicitly requested by tapping the X.
+    let confirmed = true;
+    try { confirmed = window.confirm("Close LensAI?"); } catch (e) { confirmed = true; }
+    if (!confirmed) return;
     // Goal: actually close the browser tab/window (or, if running inside
     // a native wrapper, quit that too) -- not just unmount the React app.
     // window.close() only works on a window/tab that script itself opened;
