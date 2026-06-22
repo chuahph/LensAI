@@ -18578,8 +18578,13 @@ function analysisAgent(image) {
   let sw = image.width, sh = image.height;
   if (sw > STATS_MAX) { sh = Math.round(sh * STATS_MAX / sw); sw = STATS_MAX; }
   if (sh > STATS_MAX) { sw = Math.round(sw * STATS_MAX / sh); sh = STATS_MAX; }
-  const scv = document.createElement("canvas");
-  scv.width = sw; scv.height = sh;
+  // Reuses the same shared scratch canvas (_getScratch) the rest of the
+  // pipeline already relies on instead of allocating a fresh canvas per
+  // photo here -- iOS/WebKit doesn't promptly release a canvas's backing
+  // store just because the element became unreachable, so a batch that
+  // creates a new up-to-12000px canvas on every single photo can exhaust
+  // memory and crash well before BATCH_PHOTO_LIMIT is ever reached.
+  const scv = _getScratch("A", sw, sh);
   const sctx = scv.getContext("2d");
   sctx.drawImage(image, 0, 0, sw, sh);
   const stats = analyzeImage(sctx.getImageData(0, 0, sw, sh));
@@ -18592,8 +18597,7 @@ function analysisAgent(image) {
   let w = image.width, h = image.height;
   if (w > FULL_MAX) { h = Math.round(h * FULL_MAX / w); w = FULL_MAX; }
   if (h > FULL_MAX) { w = Math.round(w * FULL_MAX / h); h = FULL_MAX; }
-  const cv = document.createElement("canvas");
-  cv.width = w; cv.height = h;
+  const cv = _getScratch("A", w, h);
   const ctx = cv.getContext("2d");
   ctx.drawImage(image, 0, 0, w, h);
   const data = ctx.getImageData(0, 0, w, h);
@@ -18999,8 +19003,7 @@ function downscaleForStats(imageData, maxDim) {
   if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
   else { w = Math.round(w * maxDim / h); h = maxDim; }
   const src = imageDataToCanvas(imageData);
-  const dst = document.createElement("canvas");
-  dst.width = w; dst.height = h;
+  const dst = _getScratch("B", w, h);
   dst.getContext("2d").drawImage(src, 0, 0, w, h);
   return dst.getContext("2d").getImageData(0, 0, w, h);
 }
