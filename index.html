@@ -17556,7 +17556,7 @@ function analyzeImage(data) {
   if (isNight)                                          scene='night';
   else if (gAvg>rAvg*1.06&&gAvg>bAvg*1.05&&gAvg>80&&!isStructured) scene='nature';
   else if (rAvg>155&&gAvg>95&&bAvg<95)                 scene='food';
-  else if (hasFace&&rAvg>gAvg&&rAvg>bAvg)             scene='portrait';
+  else if (hasBigFace&&rAvg>gAvg&&rAvg>bAvg)          scene='portrait';
   else if (hasSky&&isStructured)                       scene='urban';
   else if (hasSky&&contrast>45&&!isStructured)         scene='nature';
   else if (hasSky&&gAvg>80)                            scene='nature';
@@ -19355,7 +19355,7 @@ function autoSelectHDR(stats) {
     scene, isNight, isHazy, isBlurry, hasSky, skyRatio, isWashedSky,
     skyBlueDepth, lumAvg, contrast, avgSat, pctLowSat, pctBlown, pctBlocked,
     pctHighlight, isUnderexposed, isOverexposed, isHighContrast, sharpness,
-    isWarmCast, isCoolCast, hasFace, tempAxis,
+    isWarmCast, isCoolCast, hasFace, hasBigFace, tempAxis,
     isStructured, edgeDirectionality,
   } = stats;
 
@@ -19433,21 +19433,20 @@ function autoSelectHDR(stats) {
   // --- Portrait: face detected, typically no sky, warm-ish ---
   // hasFace is a color-only heuristic (skin-tone chromaticity ratio over
   // the whole frame) that also fires on warm/browned food and sand/wood/
-  // foliage tones in scenery shots -- this flat +35 alone routinely
-  // outscored food's and nature's own signature-gated points, so dishes
-  // and landscapes were getting portrait treatment despite no face being
-  // present. `scene` already resolves food/nature ahead of portrait by
-  // checking their own, more specific color signatures first, so when it
-  // lands on one of those, that's stronger independent evidence the
-  // skin-tone reading here is a false positive rather than a real face --
-  // same mutual-exclusion pattern sports/macro/people already use (!hasFace).
-  // brick/terracotta (scene='urban') was the other named false-positive
-  // source in the skin-detection comment above, alongside food/wood --
-  // excluded here too for the same reason.
+  // foliage tones in scenery shots -- gating it against scene wasn't
+  // enough on its own, since plenty of those same false-positive shots
+  // (a macro/no-sky texture shot, a warm-lit room) don't land in food/
+  // nature/urban's own scene buckets either and fall through to the
+  // 'people' default, where faceLooksReal is still true. The main +35
+  // confidence bonus now requires hasBigFace (the much-higher 0.28
+  // ratio bar, same one Auto Select's own fallback-to-corrections-only
+  // gate uses) instead of the loose hasFace, so incidental skin-tone-
+  // colored pixels scattered across a scenery/macro shot can no longer
+  // alone outscore food/nature/urban's own signature-gated points.
   const faceLooksReal = scene !== "food" && scene !== "nature" && scene !== "urban";
-  if (hasFace && faceLooksReal) scores.portrait += 35;
+  if (hasBigFace && faceLooksReal) scores.portrait += 35;
   if (scene === "portrait") scores.portrait += 25;
-  if (hasFace && !hasSky && faceLooksReal) scores.portrait += 10;
+  if (hasBigFace && !hasSky && faceLooksReal) scores.portrait += 10;
 
   // --- Golden hour: strong warm cast, not blown, not night ---
   if (isWarmCast && tempAxis > 22 && !isOverexposed && !isNight) scores.golden += 30;
