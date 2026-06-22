@@ -20042,10 +20042,12 @@ function Spin(){
 // some modern iPhones tolerate, to also cover older/low-RAM devices)
 // leaves ~500MB of headroom for already-finished photos once the current
 // photo's own peak is subtracted -- divided by a ~15MB average blob, that
-// supports a batch in the low 30s. Rounded down for margin since this is
-// a heuristic, not something profiled on real hardware; large libraries
-// of high-megapixel photos still work fine, just split across more runs.
-const BATCH_PHOTO_LIMIT = 20;
+// supports a batch in the low 30s even at this all-48MP worst case. Set to
+// the top of that computed range rather than rounded down further, since
+// this is a heuristic and not something profiled on real hardware; large
+// libraries of high-megapixel photos still work fine, just split across
+// more runs.
+const BATCH_PHOTO_LIMIT = 30;
 
 // Goal-based batch agent UI: pick a goal + a pile of photos, tap Run, and
 // every photo gets analyzed/corrected (and optionally HDR-enhanced) on its
@@ -20273,6 +20275,9 @@ function BatchAgent({onClose}){
           React.createElement("button",{onClick:()=>fileInputRef.current&&fileInputRef.current.click(),disabled:busy,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"1px solid "+(overLimit?"rgba(248,113,113,0.5)":BORD),background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"left"}},files.length?files.length+" photo"+(files.length>1?"s":"")+" selected -- tap to change":"Choose photos"),
           React.createElement("button",{onClick:()=>folderInputRef.current&&folderInputRef.current.click(),disabled:busy,title:"Load every photo inside a folder (and its subfolders)",style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#94a3b8",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},"Choose folder")
         ),
+        overLimit&&React.createElement("div",{style:{fontSize:11,color:"#fca5a5",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:10,padding:"8px 11px",lineHeight:1.5}},
+          files.length+" photos selected -- batches are capped at "+BATCH_PHOTO_LIMIT+" at a time to avoid exhausting memory and crashing the page (especially on iOS). Remove some photos, or run this batch in smaller groups."
+        ),
         React.createElement("div",null,
           React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:6}},
             React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"Goals (tap to select multiple)"),
@@ -20298,9 +20303,6 @@ function BatchAgent({onClose}){
         React.createElement("label",{style:{display:"flex",alignItems:"center",gap:7,fontSize:11,color:"#94a3b8",cursor:busy?"default":"pointer"}},
           React.createElement("input",{type:"checkbox",checked:skipFlagged,disabled:busy,onChange:e=>setSkipFlagged(e.target.checked)}),
           "Skip photos that are too blurry/dark/blown to fix (Culling Agent)"
-        ),
-        overLimit&&React.createElement("div",{style:{fontSize:11,color:"#fca5a5",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:10,padding:"8px 11px",lineHeight:1.5}},
-          files.length+" photos selected -- batches are capped at "+BATCH_PHOTO_LIMIT+" at a time to avoid exhausting memory and crashing the page (especially on iOS). Remove some photos, or run this batch in smaller groups."
         ),
         React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy||overLimit,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy||overLimit)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy||overLimit)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+(stage?" • "+STAGE_LABELS[stage]:"")+"..."):"Run batch agent"),
         results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
