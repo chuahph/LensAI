@@ -17639,6 +17639,18 @@ function _chunkRows(w) {
   return Math.max(8, Math.round(250000 / Math.max(1, w)));
 }
 function _tick() {
+  // setTimeout yields control back to the renderer so a long row-band scan
+  // can't trip the page-unresponsive hang detector -- but that detector,
+  // and the responsiveness it's protecting, only matter while the page is
+  // actually visible. Once the tab/app is backgrounded (locking the phone
+  // mid-export, switching apps), browsers throttle background-tab timers to
+  // ~1/sec or worse, so every one of the hundreds of yields a 48MP export
+  // needs turns into up to a full second of pure throttling overhead --
+  // exactly why a batch export left running in the background can take
+  // minutes per photo instead of seconds. A microtask yield (no timer
+  // scheduled) still lets pending promises/IO interleave without ever
+  // hitting that throttle.
+  if (typeof document !== "undefined" && document.hidden) return Promise.resolve();
   return new Promise(res => setTimeout(res, 0));
 }
 
