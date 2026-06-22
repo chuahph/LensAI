@@ -20226,6 +20226,7 @@ function BatchAgent({onClose}){
   const [skipFlagged,setSkipFlagged]=useState(false);
   const [zipping,setZipping]=useState(false);
   const [zipProgress,setZipProgress]=useState({done:0,total:0});
+  const [exportError,setExportError]=useState(null);
   const [showLegend,setShowLegend]=useState(false);
   const [editIdx,setEditIdx]=useState(null);
   const [editPreset,setEditPreset]=useState(null);
@@ -20319,6 +20320,7 @@ function BatchAgent({onClose}){
     if(!file) return;
     const idx=results.indexOf(r);
     setDownloadingIdx(idx);
+    setExportError(null);
     try {
       const blob=await fullRenderAgent(file, r.adj, r.stats);
       const url=URL.createObjectURL(blob);
@@ -20330,6 +20332,15 @@ function BatchAgent({onClose}){
       a.download=stem+"-"+(r.goalId||"batch")+"-"+Date.now()+".jpg";
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
+    } catch (err) {
+      // A failed full-res render (huge-canvas allocation failure, a
+      // corrupt/unreadable file, etc.) must not escape as an unhandled
+      // promise rejection -- onClick handlers have nothing awaiting their
+      // returned promise, so the app's global unhandledrejection handler
+      // would treat it as fatal and cover the whole UI with a reload
+      // overlay, destroying every in-progress batch result over what
+      // should just be one failed download. Same fix as saveImg's.
+      setExportError("Couldn't download \""+(r.name||"that photo")+"\" -- "+(err&&err.message||"try again"));
     } finally { setDownloadingIdx(null); }
   };
 
@@ -20357,6 +20368,13 @@ function BatchAgent({onClose}){
       if(cancelled) return;
       url=URL.createObjectURL(blob);
       setEditFullUrl(url);
+    }).catch(()=>{
+      // Same fix as downloadOne/downloadAll -- this .then had no .catch,
+      // so a failed full-res render here (e.g. mid-edit on a huge photo)
+      // was an unhandled rejection that would nuke the whole UI. Falls
+      // back to the existing small thumb instead (editFullUrl just stays
+      // null, see the <img> below).
+      if(!cancelled) setExportError("Couldn't render a full-quality preview -- showing the lower-res thumbnail instead.");
     });
     return ()=>{ cancelled=true; if(url) URL.revokeObjectURL(url); };
   },[editIdx,editPreview]);
@@ -20415,7 +20433,7 @@ function BatchAgent({onClose}){
   // exportOrganizeAgent's zip, which is exactly one download and reliable.
   // downloadOne (single explicit user click per file) is unaffected.
   const downloadAll=async()=>{
-    setZipping(true); setZipProgress({done:0,total:0});
+    setZipping(true); setZipProgress({done:0,total:0}); setExportError(null);
     try {
       const blob=await exportOrganizeAgent(results, files, (done,total)=>setZipProgress({done,total}));
       const url=URL.createObjectURL(blob);
@@ -20423,6 +20441,13 @@ function BatchAgent({onClose}){
       a.href=url; a.download="lensai-batch-"+Date.now()+".zip";
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
+    } catch (err) {
+      // Same fix as downloadOne/saveImg -- a failed full-res render
+      // partway through the zip (one bad file, a huge-canvas allocation
+      // failure, etc.) must not become an unhandled promise rejection,
+      // or the app's global handler covers the whole UI with a reload
+      // overlay over what should just be a failed export.
+      setExportError("Zip export failed -- "+(err&&err.message||"try again")+". Try a smaller batch or fewer goals.");
     } finally { setZipping(false); }
   };
 
@@ -20489,6 +20514,10 @@ function BatchAgent({onClose}){
         results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
           React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"+(culledCount?", "+culledCount+" skipped":"")),
           !busy&&doneCount>0&&React.createElement("button",{onClick:downloadAll,disabled:zipping,title:"Bundles every result into one zip, organized into folders (Export/Organize Agent) -- a single reliable download instead of one-per-photo",style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping "+zipProgress.done+"/"+zipProgress.total+"...":"Download all (.zip)")
+        ),
+        exportError&&React.createElement("div",{style:{fontSize:11,color:"#f87171",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:8,padding:"8px 10px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}},
+          React.createElement("span",null,exportError),
+          React.createElement("button",{onClick:()=>setExportError(null),"aria-label":"Dismiss",style:{flexShrink:0,background:"none",border:"none",color:"#f87171",fontSize:14,cursor:"pointer",fontFamily:"inherit",lineHeight:1}},"×")
         ),
         groups.map(g=>React.createElement("div",{key:g.key,style:{display:"flex",flexDirection:"column",gap:6}},
           groups.length>1&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},g.key+" ("+g.items.length+")"),
