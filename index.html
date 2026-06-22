@@ -17711,10 +17711,30 @@ function analyzeImage(data) {
   //     stays ~25-30, below the bar).
   const foodTextured = blueSkyRatio<0.06 && isStructured && skinRatio>0.20 && lumAvg>70 && lumAvg<225 && !isCoolCast;
   const foodDenseColor = blueSkyRatio<0.06 && skinRatio>0.6 && avgSat>38 && lumAvg>90 && lumAvg<210 && !isCoolCast;
+  // foodWarmCast: catches low-saturation warm dishes the paths above miss --
+  // a pale sandwich/toast or a steamed bun sits below food's avgSat>22 bars
+  // yet is unmistakably a warm-toned, sky-free close-up with no single
+  // dominant face. Without this they slip past every food path and land on
+  // the People branch (warm bread tones trip the moderate-skin test) or on
+  // nature. The discriminators that keep this from grabbing actual people or
+  // foliage: isWarmCast (a dish/its lighting skews warm; a group of people in
+  // mixed/neutral light does not), rAvg>gAvg (food is red/orange-dominant,
+  // foliage is green-dominant), no real sky, and !hasBigFace (a true portrait
+  // subject is still claimed by Portrait, which is checked right after food).
+  // blueSkyRatio tolerance here is deliberately looser (0.15) than the other
+  // food paths' 0.06: a real food photo routinely has a bright white plate, a
+  // cool-toned drink, a window edge or cool shadows that register as a small
+  // patch of "blue sky", nudging blueSkyRatio to ~0.08-0.12 and (at the strict
+  // 0.06 bar) kicking the dish out of every food path -- onto People (warm
+  // bread/meat trips the moderate-skin test) or Urban. A genuine outdoor scene
+  // sits far higher (brick building 0.52, cityscape 0.73), so 0.15 still
+  // excludes those while rescuing real plated food. The warm+red-dominant+
+  // no-dominant-face gates keep it from grabbing people/foliage.
+  const foodWarmCast = blueSkyRatio<0.15 && isWarmCast && rAvg>gAvg && !hasBigFace && lumAvg>70 && lumAvg<240;
 
   let scene='people';
   if (isNight)                                          scene='night';
-  else if (foodMultiHue || foodWarmTone || foodTextured || foodDenseColor) scene='food';
+  else if (foodMultiHue || foodWarmTone || foodTextured || foodDenseColor || foodWarmCast) scene='food';
   // Green-dominant foliage stays nature first -- this must run before the
   // face branches so warm leaf-litter / autumn / forest-floor patches that
   // trip the skin-tone test (localized warm browns) are claimed by nature
