@@ -19981,6 +19981,15 @@ function Spin(){
   return React.createElement("span",{style:{width:10,height:10,borderRadius:"50%",border:"2px solid rgba(255,255,255,0.2)",borderTopColor:"#fff",display:"inline-block",animation:"spin 0.5s linear infinite"}});
 }
 
+// Each photo in the batch is decoded to a full canvas ImageData, analyzed,
+// rendered, AND kept as a thumbnail dataURL all at once -- on iOS Safari
+// that working set (not just the JPEGs themselves) is what exhausts the
+// WebKit per-tab memory ceiling and silently kills the page, with no error
+// to catch or recover from. Capping the batch size keeps a single run
+// inside a budget that's been safe across iPhone hardware in practice;
+// large libraries still work fine, just split across more than one run.
+const BATCH_PHOTO_LIMIT = 40;
+
 // Goal-based batch agent UI: pick a goal + a pile of photos, tap Run, and
 // every photo gets analyzed/corrected (and optionally HDR-enhanced) on its
 // own via batchProcessFile -- no per-photo interaction. Fully self-contained
@@ -20047,8 +20056,10 @@ function BatchAgent({onClose}){
     e.target.value="";
   };
 
+  const overLimit=files.length>BATCH_PHOTO_LIMIT;
+
   const run=async()=>{
-    if(!files.length||!goals.length||busy) return;
+    if(!files.length||!goals.length||busy||overLimit) return;
     setBusy(true); setProgress(0); setResults([]); setStage(null);
     const total=files.length*goals.length;
     setProgressTotal(total);
@@ -20202,7 +20213,7 @@ function BatchAgent({onClose}){
         React.createElement("input",{ref:fileInputRef,type:"file",accept:"image/*",multiple:true,style:{display:"none"},onChange:onPick}),
         React.createElement("input",{ref:folderInputRef,type:"file",webkitdirectory:"",directory:"",multiple:true,style:{display:"none"},onChange:onPick}),
         React.createElement("div",{style:{display:"flex",gap:6}},
-          React.createElement("button",{onClick:()=>fileInputRef.current&&fileInputRef.current.click(),disabled:busy,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"left"}},files.length?files.length+" photo"+(files.length>1?"s":"")+" selected -- tap to change":"Choose photos"),
+          React.createElement("button",{onClick:()=>fileInputRef.current&&fileInputRef.current.click(),disabled:busy,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"1px solid "+(overLimit?"rgba(248,113,113,0.5)":BORD),background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"left"}},files.length?files.length+" photo"+(files.length>1?"s":"")+" selected -- tap to change":"Choose photos"),
           React.createElement("button",{onClick:()=>folderInputRef.current&&folderInputRef.current.click(),disabled:busy,title:"Load every photo inside a folder (and its subfolders)",style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#94a3b8",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},"Choose folder")
         ),
         React.createElement("div",null,
@@ -20231,7 +20242,10 @@ function BatchAgent({onClose}){
           React.createElement("input",{type:"checkbox",checked:skipFlagged,disabled:busy,onChange:e=>setSkipFlagged(e.target.checked)}),
           "Skip photos that are too blurry/dark/blown to fix (Culling Agent)"
         ),
-        React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+(stage?" • "+STAGE_LABELS[stage]:"")+"..."):"Run batch agent"),
+        overLimit&&React.createElement("div",{style:{fontSize:11,color:"#fca5a5",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:10,padding:"8px 11px",lineHeight:1.5}},
+          files.length+" photos selected -- batches are capped at "+BATCH_PHOTO_LIMIT+" at a time to avoid exhausting memory and crashing the page (especially on iOS). Remove some photos, or run this batch in smaller groups."
+        ),
+        React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy||overLimit,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy||overLimit)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy||overLimit)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+(stage?" • "+STAGE_LABELS[stage]:"")+"..."):"Run batch agent"),
         results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
           React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"+(culledCount?", "+culledCount+" skipped":"")),
           !busy&&doneCount>0&&React.createElement("button",{onClick:downloadAll,disabled:zipping,title:"Bundles every result into one zip, organized into folders (Export/Organize Agent) -- a single reliable download instead of one-per-photo",style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping...":"Download all (.zip)")
