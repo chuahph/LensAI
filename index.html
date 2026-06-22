@@ -17440,8 +17440,20 @@ function analyzeImage(data) {
   const isGreenTint=tintAxis>12;
   const isMagentaTint=tintAxis<-10;
 
-  // === SATURATION ===
-  let satSum=0, lowSatCount=0, highSatCount=0;
+  // === SATURATION + HUE VARIETY ===
+  // hueHist: count of meaningfully-saturated pixels falling in each of 12
+  // 30-degree hue bins. The spread of populated bins ("hue variety") is the
+  // single most food-distinctive signal available from frame-average stats:
+  // a plated dish carries several distinct hues at once (sauce red, herb
+  // green, carb gold, protein brown, garnish), whereas the scenes food keeps
+  // getting confused with are each dominated by ONE hue family -- foliage is
+  // green-only, a portrait is skin-orange + a usually-uniform background,
+  // a building/concrete scene is near-neutral with few saturated pixels at
+  // all. Counting how many hue families are genuinely present therefore
+  // separates food from nature/portrait/urban far more reliably than any of
+  // the overlapping warm/green/structured colour tests used before.
+  let satSum=0, lowSatCount=0, highSatCount=0, satPixCount=0;
+  const hueHist=new Array(12).fill(0);
   for (let i=0;i<d.length;i+=4) {
     const r=d[i],g=d[i+1],b=d[i+2];
     const maxC=Math.max(r,g,b), minC=Math.min(r,g,b);
@@ -17449,10 +17461,37 @@ function analyzeImage(data) {
     satSum+=s;
     if (s<0.15) lowSatCount++;
     if (s>0.65) highSatCount++;
+    // Only count pixels with real colour (saturation + brightness) toward
+    // the hue histogram, so JPEG noise on near-neutral pixels can't smear a
+    // spurious hue across all bins.
+    const delta=maxC-minC;
+    if (s>0.20 && maxC>40 && delta>10) {
+      let hue;
+      if (maxC===r)      hue=((g-b)/delta)%6;
+      else if (maxC===g) hue=(b-r)/delta+2;
+      else               hue=(r-g)/delta+4;
+      hue*=60; if (hue<0) hue+=360;
+      hueHist[Math.min(11,Math.floor(hue/30))]++;
+      satPixCount++;
+    }
   }
   const avgSat=(satSum/n)*100;
   const pctLowSat=(lowSatCount/n)*100;
   const pctHighSat=(highSatCount/n)*100;
+  // hueVariety: how many hue bins each hold a non-trivial share (>=6%) of the
+  // saturated pixels. Requiring a minimum share (not just "any pixel landed
+  // here") keeps a single dominant-hue scene with a thin scatter of stray
+  // colours -- a green forest with a few brown branches, a portrait with a
+  // hint of coloured background -- reading as low variety, while a genuine
+  // multi-ingredient dish lights up several bins each with real coverage.
+  // Only trustworthy when enough of the frame actually has colour
+  // (satPixFrac): a near-monochrome / very dark frame has too few saturated
+  // samples for the bin shares to mean anything.
+  const satPixFrac=satPixCount/n;
+  let hueVariety=0;
+  if (satPixCount>0) {
+    for (let k=0;k<12;k++) if (hueHist[k]/satPixCount>=0.06) hueVariety++;
+  }
 
   // === SHARPNESS + EDGE DIRECTIONALITY: Laplacian + gradient orientation ===
   // Reuses the same sample loop to also measure whether edges are mostly
@@ -17562,29 +17601,36 @@ function analyzeImage(data) {
   // the sharpness pass) now disambiguates: architecture has strong grid-like
   // horizontal/vertical edges, foliage/organic scenes don't.
   const isNight=lumAvg<65||(lumAvg<90&&pctBlocked>35);
+
+  // FOOD signature -- evaluated BEFORE nature/portrait/urban, because each of
+  // those three steals a whole class of food shot when checked first:
+  //   - nature (green-dominant) grabs salads/green-forward plates,
+  //   - portrait (skin-tone) grabs warm food -- pasta, bread, roast, sauces
+  //     all trip the skin-chromaticity hasFace test,
+  //   - urban (structured) grabs any dish on a patterned plate / tiled
+  //     counter / checkered cloth.
+  // The discriminator that actually separates a plated dish from all three is
+  // hue VARIETY: a dish carries several distinct hues at once (sauce red,
+  // herb green, carb gold, protein brown, plate neutral), whereas foliage is
+  // green-only, a portrait is skin + a mostly-uniform background, and a
+  // building is near-neutral. Two complementary food paths:
+  //   1. foodMultiHue -- 3+ populated hue families with no REAL blue sky.
+  //      This is the robust, dominant-tone-independent signal and is
+  //      deliberately NOT gated on !hasFace (warm dishes legitimately trip
+  //      hasFace; excluding them was exactly why pasta/roast read as portrait).
+  //   2. foodWarmTone -- the previous warm/saturated/no-face/no-blue-sky box,
+  //      kept so a single-tone warm dish (roast, soup, bread) with low hue
+  //      variety still lands on food.
+  // Both require blueSkyRatio<0.06 (the real-blue-dominance signal, not the
+  // looser skyRatio/hasSky that also counts a bright plate/napkin as "sky")
+  // and a sane food-lighting brightness range.
+  const foodMultiHue = blueSkyRatio<0.06 && hueVariety>=3 && lumAvg>70 && lumAvg<225 && !isCoolCast;
+  const foodWarmTone = blueSkyRatio<0.06 && !isCoolCast && !hasFace && avgSat>22 && lumAvg>70 && lumAvg<220;
+
   let scene='people';
   if (isNight)                                          scene='night';
+  else if (foodMultiHue || foodWarmTone)                scene='food';
   else if (gAvg>rAvg*1.06&&gAvg>bAvg*1.05&&gAvg>80&&!isStructured) scene='nature';
-  // Food's old warm RGB box (rAvg>155, mid-range gAvg, low bAvg) only caught
-  // golden/roasted dishes -- salads, pasta, white-plated or cool-lit food
-  // never matched it, and even warm dishes were excluded outright by a
-  // single sliver of window/sky behind the table (the old !hasSky gate).
-  // Both gaps left those shots with no scene tag at all, falling straight
-  // through to urban's own isStructured rule below (which fires on the
-  // checkered tablecloth/patterned plate/tiled counter most food shots
-  // have, with no food-awareness at all) or nature's sky-gated rules.
-  // Replaced with a broader, more food-specific test: little-to-no REAL
-  // sky (blueSkyRatio<0.06, not the looser combined skyRatio/hasSky --
-  // those also count any bright neutral patch, e.g. a plate or napkin near
-  // the top of a close-up shot, as "sky", which would wrongly disqualify
-  // plenty of genuine food photos), not a cool/blue cast (food lighting
-  // skews warm-to-neutral, almost never cool), some real color (avgSat>22
-  // -- the sauces/garnish/varied ingredients real food almost always has,
-  // which plain concrete/steel/grey backgrounds don't), and no dominant
-  // face (so a warm, saturated portrait doesn't get relabeled).
-  // Deliberately still not gated on isStructured -- see the urban rule
-  // below, which now requires hasSky instead so it no longer collides here.
-  else if (blueSkyRatio<0.06&&!isCoolCast&&!hasFace&&avgSat>22&&lumAvg>70&&lumAvg<220) scene='food';
   else if (hasBigFace&&rAvg>gAvg&&rAvg>bAvg)          scene='portrait';
   else if (hasSky&&isStructured)                       scene='urban';
   else if (hasSky&&contrast>45&&!isStructured)         scene='nature';
@@ -17614,6 +17660,7 @@ function analyzeImage(data) {
     wbCorrection: isCoolCast?Math.min(20,(-tempAxis)*0.5):isWarmCast?Math.max(-20,(-tempAxis)*0.5):0,
     isWarm:isWarmCast, isCool:isCoolCast,
     sat:avgSat, pctLowSat, pctHighSat,
+    hueVariety, satPixFrac,
     sharpness, sharp:sharpness,
     edgeDirectionality, isStructured,
     awbR:awbRc, awbG:1.0, awbB:awbBc,
@@ -19618,7 +19665,7 @@ function autoSelectHDR(stats) {
     skyBlueDepth, lumAvg, contrast, avgSat, pctLowSat, pctBlown, pctBlocked,
     pctHighlight, isUnderexposed, isOverexposed, isHighContrast, sharpness,
     isWarmCast, isCoolCast, hasFace, hasBigFace, tempAxis,
-    isStructured, edgeDirectionality,
+    isStructured, edgeDirectionality, hueVariety,
   } = stats;
 
   // Weighted scoring: each preset accumulates points from independent signals.
@@ -19712,10 +19759,26 @@ function autoSelectHDR(stats) {
   // threshold, silently zeroing the score for food shots the classifier had
   // already correctly tagged but which still had a sliver of sky in frame.
   if (scene === "food") scores.food += 40;
+  // A multi-hue dish with no real sky is an even stronger food signal -- give
+  // it extra weight so it clears the dynamic-range/structure presets below
+  // even on a bright, high-contrast plate.
+  if (scene === "food" && hueVariety >= 3) scores.food += 12;
   // Same gap as nature's no-sky rule above: warm incandescent/tungsten
   // lighting on a person indoors (no sky, moderate brightness) clears this
   // box with no actual food in frame.
   if (!hasSky && isWarmCast && lumAvg > 90 && lumAvg < 190 && !hasFace) scores.food += 10;
+  // Once the scene is confidently food, damp the presets food is most often
+  // mislabeled as -- same damping idiom already used for golden vs. food and
+  // smartHDR vs. hasFace. A bright white plate inflates smartHDR's blown-
+  // highlight dynamic-range score (it reads the plate as a backlit-sky
+  // emergency), a patterned plate/cloth inflates urban's structure score, and
+  // a green-forward or warm dish inflates nature's. None of those should beat
+  // a correctly-detected dish.
+  if (scene === "food") {
+    scores.smartHDR = Math.round(scores.smartHDR * 0.35);
+    scores.urban    = Math.round(scores.urban    * 0.35);
+    scores.nature   = Math.round(scores.nature   * 0.35);
+  }
 
   // --- Portrait: face detected, typically no sky, warm-ish ---
   // hasFace is a color-only heuristic (skin-tone chromaticity ratio over
