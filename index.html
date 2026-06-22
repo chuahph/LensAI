@@ -17558,12 +17558,19 @@ function analyzeImage(data) {
   // Food's warm RGB box (rAvg>155, mid-range gAvg, low bAvg) is also exactly
   // what a sunset/golden-hour sky looks like (warm orange, little blue) and
   // what a warm-lit brick/terracotta building looks like -- this box used to
-  // fire before sky or structure were even considered, so those landscape/
-  // urban shots got tagged scene='food' outright. That wrong tag then fed
-  // straight into golden hour's own 70%-damping rule below (`scene==="food"`),
-  // crushing golden hour's score on the exact sunset photos it should win.
-  // Gated the same way nature's own green-dominance check above already is.
-  else if (!hasSky&&!isStructured&&rAvg>155&&gAvg>95&&bAvg<95) scene='food';
+  // fire before sky was even considered, so those landscape shots got tagged
+  // scene='food' outright. That wrong tag then fed straight into golden
+  // hour's own 70%-damping rule below (`scene==="food"`), crushing golden
+  // hour's score on the exact sunset photos it should win. Gated on !hasSky
+  // the same way nature's own green-dominance check above already is.
+  // NOTE: deliberately NOT gated on !isStructured -- food photography very
+  // commonly has axis-aligned structure (patterned plates, checkered cloths,
+  // cutting-board grain, tiled counters) that isn't "wrong" for food the way
+  // a brick building is. Excluding those left scene='food' unreachable for
+  // any plated/structured shot, so urban's ungated isStructured rule below
+  // won outright. Sky-less exterior brick/terracotta shots are rare and the
+  // !hasSky gate alone already excludes the common (sky-visible) case.
+  else if (!hasSky&&rAvg>155&&gAvg>95&&bAvg<95) scene='food';
   else if (hasBigFace&&rAvg>gAvg&&rAvg>bAvg)          scene='portrait';
   else if (hasSky&&isStructured)                       scene='urban';
   else if (hasSky&&contrast>45&&!isStructured)         scene='nature';
