@@ -18822,6 +18822,26 @@ function _releaseScratch() {
   _scratchBuf = null;
 }
 
+// Serializes every operation that draws into the shared scratch canvases /
+// snapshot buffer (analysisAgent, fullRenderAgent/renderFullFromData,
+// imageDataToCanvas, exportOrganizeAgent). Those globals are reused across
+// the whole app to keep peak memory down, but that makes them single-owner:
+// if two renders run at once they resize and overwrite the SAME backing
+// store mid-pipeline. The batch loop is already sequential, but the manual
+// "Reanalyze" editor is not -- its full-resolution preview render runs in an
+// effect that the busy flag doesn't cover, so flipping presets or clicking
+// through photos could start a second render on top of an in-flight one,
+// corrupting the canvas and (on large photos) crashing the tab. Funnelling
+// every scratch user through one promise chain guarantees they run strictly
+// one-at-a-time regardless of what the UI fires; errors are isolated so one
+// failed render can't wedge the queue.
+let _scratchChain = Promise.resolve();
+function withScratchLock(task) {
+  const run = _scratchChain.then(task, task);
+  _scratchChain = run.then(() => {}, () => {});
+  return run;
+}
+
 function imageDataToCanvas(imageData) {
   const c = _getScratch("A", imageData.width, imageData.height);
   c.getContext("2d").putImageData(imageData, 0, 0);
@@ -20861,7 +20881,7 @@ function BatchAgent({onClose}){
     let done=0;
     for(let i=0;i<files.length;i++){
       for(let j=0;j<goals.length;j++){
-        try { out.push({...await batchProcessFile(files[i], goals[j], setStage, {skipFlagged}), fileIndex:i}); }
+        try { out.push({...await withScratchLock(()=>batchProcessFile(files[i], goals[j], setStage, {skipFlagged})), fileIndex:i}); }
         catch(err){
           console.error("[LensAI] Batch item failed:", files[i].name, goals[j], err);
           out.push({ name: files[i].name, goalId: goals[j], fileIndex:i, error: true });
@@ -20893,7 +20913,7 @@ function BatchAgent({onClose}){
     setDownloadingIdx(idx);
     setExportError(null);
     try {
-      const blob=await addExifDateToBlob(await fullRenderAgent(file, r.adj, r.stats));
+      const blob=await addExifDateToBlob(await withScratchLock(()=>fullRenderAgent(file, r.adj, r.stats)));
       const url=URL.createObjectURL(blob);
       const a=document.createElement("a");
       a.href=url;
@@ -20935,7 +20955,12 @@ function BatchAgent({onClose}){
     setEditFullUrl(null);
     let cancelled=false;
     let url=null;
-    fullRenderAgent(file, shown.adj, shown.stats).then(blob=>{
+    // Serialized so this full-res preview render can never overlap another
+    // scratch user (a previous still-running preview render, a reanalyze, a
+    // download) -- overlapping renders share the same scratch canvas/buffer
+    // and corrupt or crash on large photos. Scratch is released afterward so
+    // the ~192MB full-res buffers don't stay pinned across a string of edits.
+    withScratchLock(()=>fullRenderAgent(file, shown.adj, shown.stats)).then(blob=>{
       if(cancelled) return;
       url=URL.createObjectURL(blob);
       setEditFullUrl(url);
@@ -20946,7 +20971,7 @@ function BatchAgent({onClose}){
       // back to the existing small thumb instead (editFullUrl just stays
       // null, see the <img> below).
       if(!cancelled) setExportError("Couldn't render a full-quality preview -- showing the lower-res thumbnail instead.");
-    });
+    }).finally(()=>{ _releaseScratch(); });
     return ()=>{ cancelled=true; if(url) URL.revokeObjectURL(url); };
   },[editIdx,editPreview]);
 
@@ -20970,7 +20995,11 @@ function BatchAgent({onClose}){
     if(!file) return;
     setEditBusy(true);
     try {
-      const updated=await batchProcessFile(file, presetId, null, {skipFlagged:false, applyCorrections});
+      // Serialized on the shared scratch like the preview render above --
+      // batchProcessFile's analysis/preview render draws into the same
+      // scratch canvas, so it must not run while a full-res preview render
+      // is still in flight.
+      const updated=await withScratchLock(()=>batchProcessFile(file, presetId, null, {skipFlagged:false, applyCorrections}));
       setEditPreview({...updated, fileIndex:r.fileIndex});
       setEditPreviewFor({preset:presetId, corrections:applyCorrections});
     } catch(err){
@@ -21006,7 +21035,7 @@ function BatchAgent({onClose}){
   const downloadAll=async()=>{
     setZipping(true); setZipProgress({done:0,total:0}); setExportError(null);
     try {
-      const blob=await exportOrganizeAgent(results, files, (done,total)=>setZipProgress({done,total}));
+      const blob=await withScratchLock(()=>exportOrganizeAgent(results, files, (done,total)=>setZipProgress({done,total})));
       const url=URL.createObjectURL(blob);
       const a=document.createElement("a");
       a.href=url; a.download="lensai-batch-"+Date.now()+".zip";
