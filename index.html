@@ -17652,20 +17652,35 @@ function _snapshot(out) {
 function _chunkRows(w) {
   return Math.max(8, Math.round(250000 / Math.max(1, w)));
 }
+// Real macrotask yield via MessageChannel instead of setTimeout. Browsers
+// clamp any setTimeout chain to 4ms once it's nested more than a handful of
+// calls deep (HTML spec "timer nesting level" rule) -- a 48MP export's
+// hundreds of per-pass yields are exactly such a chain, so every single one
+// of them was eating a real 4ms even though nothing else is competing for
+// the main thread. A MessageChannel postMessage is still a genuine task-queue
+// yield (hang detector, paint, pending IO all get to interleave) but isn't
+// subject to that timer-nesting clamp, so the same yield costs <0.01ms
+// instead of 4ms.
+let _tickChannel = null, _tickQueue = [];
+function _zeroDelayYield(cb) {
+  if (!_tickChannel) {
+    _tickChannel = new MessageChannel();
+    _tickChannel.port1.onmessage = () => { const fn = _tickQueue.shift(); if (fn) fn(); };
+  }
+  _tickQueue.push(cb);
+  _tickChannel.port2.postMessage(null);
+}
 function _tick() {
-  // setTimeout yields control back to the renderer so a long row-band scan
-  // can't trip the page-unresponsive hang detector -- but that detector,
-  // and the responsiveness it's protecting, only matter while the page is
-  // actually visible. Once the tab/app is backgrounded (locking the phone
-  // mid-export, switching apps), browsers throttle background-tab timers to
+  // Once the tab/app is backgrounded (locking the phone mid-export,
+  // switching apps), browsers throttle background-tab timers/tasks to
   // ~1/sec or worse, so every one of the hundreds of yields a 48MP export
   // needs turns into up to a full second of pure throttling overhead --
   // exactly why a batch export left running in the background can take
-  // minutes per photo instead of seconds. A microtask yield (no timer
+  // minutes per photo instead of seconds. A microtask yield (no task
   // scheduled) still lets pending promises/IO interleave without ever
   // hitting that throttle.
   if (typeof document !== "undefined" && document.hidden) return Promise.resolve();
-  return new Promise(res => setTimeout(res, 0));
+  return new Promise(res => _zeroDelayYield(res));
 }
 
 // ============================================================
