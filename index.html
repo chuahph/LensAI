@@ -17978,8 +17978,15 @@ async function dehazePass(out, w, h, strength) {
 // ============================================================
 // MAIN PIXEL PROCESSOR
 // ============================================================
-async function processPixels(src, adj, imgStats) {
-  const out = new Uint8ClampedArray(src.data);
+async function processPixels(src, adj, imgStats, opts) {
+  // inPlace: mutate src.data directly instead of allocating a full second
+  // copy of the pixel buffer. On a 48MP photo that buffer is ~192MB, so
+  // skipping it is a big cut to peak memory -- the difference between a
+  // mobile (iOS Safari) tab surviving a full-res export and the OS killing
+  // it mid-render. Only safe when the caller's src is freshly decoded and
+  // single-use (renderFullFromData's batch/export data); the live editor
+  // must NOT use it, since it caches and re-reads the original `img`.
+  const out = (opts && opts.inPlace) ? src.data : new Uint8ClampedArray(src.data);
   const w=src.width, h=src.height;
   const chunkRows = _chunkRows(w);
 
@@ -18574,6 +18581,20 @@ function _getScratch(which, w, h) {
   return c;
 }
 
+// Drop the large reusable buffers back to ~nothing once a full-res job is
+// done. _scratchA/_scratchB hold a w*h*4 backing store (192MB at 48MP) and
+// _scratchBuf (processPixels' snapshot) another 192MB -- all module globals
+// that otherwise stay pinned at their largest size for the life of the page
+// after a single big export, leaving the app perpetually close to the iOS
+// memory ceiling. Shrinking the canvases to 0x0 frees the backing store
+// while keeping the canvas/context objects (and their willReadFrequently
+// binding) intact for next time; nulling _scratchBuf lets it be collected.
+function _releaseScratch() {
+  if (_scratchA) { _scratchA.width = 0; _scratchA.height = 0; }
+  if (_scratchB) { _scratchB.width = 0; _scratchB.height = 0; }
+  _scratchBuf = null;
+}
+
 function imageDataToCanvas(imageData) {
   const c = _getScratch("A", imageData.width, imageData.height);
   c.getContext("2d").putImageData(imageData, 0, 0);
@@ -19116,7 +19137,13 @@ async function decodeFullRes(file) {
 }
 
 async function renderFullFromData(data, adj, stats) {
-  const processed = await processPixels(data, adj, stats);
+  // `data` here is always freshly decoded and used exactly once (either
+  // drawFullResFromBitmap output in the zip-export loop, or decodeFullRes
+  // output in fullRenderAgent), so processPixels can mutate it in place
+  // rather than cloning the whole full-res buffer -- see processPixels'
+  // inPlace note. This halves the per-photo allocation on the 48MP export
+  // path that was killing the tab on iOS.
+  const processed = await processPixels(data, adj, stats, { inPlace: true });
   const outCv = imageDataToCanvas(processed);
   return new Promise(resolve => outCv.toBlob(resolve, "image/jpeg", 0.92));
 }
@@ -19351,11 +19378,24 @@ async function exportOrganizeAgent(results, files, onProgress) {
   // single-photo-save path's advantage (decode happens once, well before
   // export) being entirely absent here. The actual draw/process/encode
   // stays strictly sequential through the one shared scratch canvas.
+  //
+  // BUT a decoded full-res ImageBitmap is itself huge (~192MB at 48MP), so
+  // holding the next photo's bitmap in flight while the current one is mid-
+  // render roughly doubles the bitmap memory at peak. On a memory-tight
+  // device (iOS Safari, ~1-1.5GB tab ceiling) that extra bitmap is enough
+  // to push a single 48MP photo's export over the edge and get the tab
+  // killed -- the "crashes before even one photo finishes" report. So the
+  // look-ahead decode is gated on the CURRENT photo's size: only prefetch
+  // when this photo is small enough that a second bitmap is affordable;
+  // for big photos, decode strictly sequentially.
+  const PREFETCH_MAX_PX = 16 * 1000 * 1000; // ~16MP
   let nextBitmap = fileIndexes.length ? decodeAgent(files[fileIndexes[0]]) : null;
   for (let i = 0; i < fileIndexes.length; i++) {
     const fileIndex = fileIndexes[i];
-    const image = await nextBitmap;
-    nextBitmap = (i + 1 < fileIndexes.length) ? decodeAgent(files[fileIndexes[i + 1]]) : null;
+    const image = nextBitmap ? await nextBitmap : await decodeAgent(files[fileIndexes[i]]);
+    nextBitmap = null;
+    const huge = image.width * image.height > PREFETCH_MAX_PX;
+    if (!huge && i + 1 < fileIndexes.length) nextBitmap = decodeAgent(files[fileIndexes[i + 1]]);
     const fullData = drawFullResFromBitmap(image);
     for (const r of byFile.get(fileIndex)) {
       // renderFullFromData's processPixels step is a synchronous, unbroken
@@ -19388,6 +19428,13 @@ async function exportOrganizeAgent(results, files, onProgress) {
       if (onProgress) onProgress(done, usable.length);
     }
   }
+  // Every full-res render is done; the scratch canvas (192MB at 48MP) and
+  // processPixels' snapshot buffer (another 192MB) are no longer needed.
+  // Free them BEFORE assembling the final zip Blob, since buildZipBlob
+  // concatenates every entry's bytes into one new Blob -- briefly holding
+  // both the source byte arrays and the combined copy. Reclaiming ~384MB
+  // right at that last allocation spike keeps the peak down on iOS.
+  _releaseScratch();
   return buildZipBlob(entries);
 }
 
@@ -20237,6 +20284,11 @@ function App() {
     } catch(err) {
       console.error("[LensAI] Save failed:", err);
       showToast("Save failed -- try again");
+    } finally {
+      // Hand the big full-res scratch canvases + snapshot buffer back after
+      // a save so the app doesn't sit pinned at the export's peak footprint;
+      // the live editor re-creates them at preview size on its next render.
+      _releaseScratch();
     }
   };
 
@@ -20474,7 +20526,7 @@ function BatchAgent({onClose}){
       // overlay, destroying every in-progress batch result over what
       // should just be one failed download. Same fix as saveImg's.
       setExportError("Couldn't download \""+(r.name||"that photo")+"\" -- "+(err&&err.message||"try again"));
-    } finally { setDownloadingIdx(null); }
+    } finally { setDownloadingIdx(null); _releaseScratch(); }
   };
 
   // Lets a finished batch result be revisited one photo at a time: pick a
