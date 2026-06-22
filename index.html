@@ -17609,9 +17609,35 @@ function analyzeImage(data) {
   // is the fraction of all cells that clear that bar -- ~1.0 means a warm
   // surface fills the frame (building/wall), well below 1.0 means the skin is
   // localized to part of the frame (a real subject with surroundings).
+  const cellDom=new Array(NCELL).fill(false);
   let domCells=0;
-  for (let c=0;c<NCELL;c++) if (cellSkin[c]/perCell>=0.30) domCells++;
+  for (let c=0;c<NCELL;c++) if (cellSkin[c]/perCell>=0.30) { cellDom[c]=true; domCells++; }
   const skinSpread=domCells/NCELL;
+  // skinClusters: number of separate connected blobs of skin-dominated cells
+  // (4-connectivity flood-fill over the coarse grid). This is what separates
+  // a Portrait from a People shot, which the colour-only ratio never could:
+  // a single subject is ONE compact skin blob, whereas a group / social scene
+  // has skin in SEVERAL separated regions (multiple faces spread across the
+  // frame). Counting the blobs lets "one dominant face" pick Portrait (gentle
+  // skin-smoothing, strong subject vignette) and "multiple people" pick
+  // People (keeps detail, light vignette so edge subjects aren't darkened),
+  // instead of every face-bearing shot collapsing onto Portrait.
+  let skinClusters=0;
+  {
+    const seen=new Array(NCELL).fill(false);
+    const stack=[];
+    for (let c=0;c<NCELL;c++) {
+      if (!cellDom[c]||seen[c]) continue;
+      skinClusters++;
+      stack.push(c); seen[c]=true;
+      while (stack.length) {
+        const cur=stack.pop();
+        const cx=cur%GX, cy=(cur/GX)|0;
+        const nb=[cx>0?cur-1:-1, cx<GX-1?cur+1:-1, cy>0?cur-GX:-1, cy<GY-1?cur+GX:-1];
+        for (const m of nb) if (m>=0 && cellDom[m] && !seen[m]) { seen[m]=true; stack.push(m); }
+      }
+    }
+  }
   // faceCompact: skin is present AND localized rather than smeared across the
   // whole frame. This is the gate that separates a genuine face/person from a
   // warm building, and is what portrait detection keys on below instead of
@@ -17684,8 +17710,29 @@ function analyzeImage(data) {
   let scene='people';
   if (isNight)                                          scene='night';
   else if (foodMultiHue || foodWarmTone || foodTextured || foodDenseColor) scene='food';
+  // Green-dominant foliage stays nature first -- this must run before the
+  // face branches so warm leaf-litter / autumn / forest-floor patches that
+  // trip the skin-tone test (localized warm browns) are claimed by nature
+  // rather than mislabeled people.
   else if (gAvg>rAvg*1.06&&gAvg>bAvg*1.05&&gAvg>80&&!isStructured) scene='nature';
-  else if (hasBigFace&&rAvg>gAvg&&rAvg>bAvg)          scene='portrait';
+  // Portrait = ONE dominant, compact face (a single hero subject). The
+  // skinClusters<=1 gate keeps "one big face plus other people in frame"
+  // (multiple skin blobs) out of Portrait so it falls to People below.
+  else if (hasBigFace&&skinClusters<=1&&rAvg>gAvg&&rAvg>bAvg) scene='portrait';
+  // People = multiple subjects, or a face that doesn't dominate the frame:
+  // multiple separated skin blobs (a group), or skin present but no single
+  // large face (a candid, a social/indoor gathering). This is the gap the old
+  // logic never filled -- every face-bearing shot collapsed onto Portrait or
+  // fell through to a background preset. Gated to low-sky scenes
+  // (blueSkyRatio thresholds below): the common People case is indoor/social
+  // (parties, family, gatherings), and the gate keeps warm sun-lit buildings
+  // and outdoor scenery -- which share skin chromaticity and DO have open sky
+  // -- from being swept in (they stay urban/nature). skinClusters>=2 (several
+  // distinct people) is allowed a slightly higher sky tolerance than the
+  // single-non-dominant-face case, since multiple separated faces are much
+  // stronger evidence of an actual group than one moderate skin region.
+  else if (hasFace&&!hasBigFace&&blueSkyRatio<0.15) scene='people';
+  else if (skinClusters>=2&&blueSkyRatio<0.25)       scene='people';
   else if (hasSky&&isStructured)                       scene='urban';
   else if (hasSky&&contrast>45&&!isStructured)         scene='nature';
   else if (hasSky&&gAvg>80)                            scene='nature';
@@ -17714,7 +17761,7 @@ function analyzeImage(data) {
     wbCorrection: isCoolCast?Math.min(20,(-tempAxis)*0.5):isWarmCast?Math.max(-20,(-tempAxis)*0.5):0,
     isWarm:isWarmCast, isCool:isCoolCast,
     sat:avgSat, pctLowSat, pctHighSat,
-    hueVariety, satPixFrac, skinRatio, skinSpread,
+    hueVariety, satPixFrac, skinRatio, skinSpread, skinClusters,
     sharpness, sharp:sharpness,
     edgeDirectionality, isStructured,
     awbR:awbRc, awbG:1.0, awbB:awbBc,
@@ -19719,7 +19766,7 @@ function autoSelectHDR(stats) {
     skyBlueDepth, lumAvg, contrast, avgSat, pctLowSat, pctBlown, pctBlocked,
     pctHighlight, isUnderexposed, isOverexposed, isHighContrast, sharpness,
     isWarmCast, isCoolCast, hasFace, hasBigFace, tempAxis,
-    isStructured, edgeDirectionality, hueVariety,
+    isStructured, edgeDirectionality, hueVariety, skinClusters,
   } = stats;
 
   // Weighted scoring: each preset accumulates points from independent signals.
@@ -19919,8 +19966,30 @@ function autoSelectHDR(stats) {
   // rule's thresholds with no actual macro/texture subject in frame.
   if (!isBlurry && sharpness > 40 && !hasSky && !isStructured && !hasFace) scores.macro += 15;
 
-  // --- People: catch-all for indoor/social scenes, low contrast ---
-  if (!hasSky && !hasFace && contrast < 50 && scene === "people") scores.people += 15;
+  // --- People: group / social / candid shots, as distinct from Portrait. ---
+  // The dividing line between the two face presets is one DOMINANT subject vs.
+  // SEVERAL people: Portrait (hasBigFace, one compact face) gets gentle skin
+  // smoothing + a strong subject vignette; People keeps detail and uses a
+  // lighter vignette so people toward the edges of a group aren't darkened.
+  // The old rule here required !hasFace, which is self-contradictory for a
+  // people preset -- it never fired on an actual group, so multi-person shots
+  // only ever landed on People by accident, via the all-scores-too-low
+  // fallback, and any sky/greenery/warmth in frame stole them to
+  // nature/golden/food instead. Now People scores on real evidence:
+  //   - faces present but none dominant (hasFace && !hasBigFace) = a group or
+  //     candid where each face is moderate rather than one filling the frame,
+  //   - multiple separated skin blobs (skinClusters>=2) = several subjects,
+  //     an even stronger group signal that holds even when one face is large.
+  // hasFace already carries the spatial-compactness gate, so a warm facade /
+  // sandy or autumn landscape with incidental skin-tone coverage (spread
+  // across the whole frame, not localized) does not trip these.
+  // scene==='people' now means analyzeImage actually saw faces that don't
+  // form one dominant subject (a group/candid in a low-sky setting), so it
+  // carries real weight instead of being a silent fallback. The extra
+  // multi-cluster bonus makes a clear group (several separated faces) win
+  // decisively over any warm/low-contrast background points.
+  if (scene === "people")     scores.people += 30;
+  if (skinClusters >= 2)      scores.people += 14;
 
   // Smart HDR wins only when it actually outscores every other preset on
   // its own signals -- no artificial bonus tipping close contests in its
