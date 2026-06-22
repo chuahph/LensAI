@@ -18560,6 +18560,17 @@ function computeHDRAdj(baseAdj, presetId, stats) {
 // interactive edits.
 
 async function decodeAgent(file) {
+  // createImageBitmap decodes natively (often off the main thread) straight
+  // from the file's bytes -- no base64 round-trip, which on a large photo
+  // is both a slow string conversion and a ~33% larger in-memory copy of
+  // the file before decoding even starts. drawImage() accepts an
+  // ImageBitmap exactly like an <img>, so nothing downstream needs to
+  // change. Falls back to the old FileReader/<img> path for the rare
+  // browser/format combo createImageBitmap can't decode.
+  if (typeof createImageBitmap === "function") {
+    try { return await createImageBitmap(file, { imageOrientation: "from-image" }); }
+    catch (err) { /* fall through */ }
+  }
   const dataUrl = await new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = e => resolve(e.target.result);
@@ -19016,6 +19027,31 @@ function downscaleForStats(imageData, maxDim) {
   return dst.getContext("2d").getImageData(0, 0, w, h);
 }
 
+// qaAgent only ever reads pctBlown/pctBlocked/isOverexposed/isUnderexposed,
+// but the QA recheck was running the full analyzeImage pipeline a second
+// time per photo (sky/skin/sharpness/edge-direction passes included) just
+// to get those 4 numbers -- doubling the most expensive step of the batch
+// loop for data nothing downstream uses. This computes only the histogram
+// pass those 4 fields actually depend on.
+function analyzeExposureOnly(data) {
+  const d = data.data, n = d.length / 4;
+  let lumSum = 0, hiClip = 0, shClip = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const lum = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    lumSum += lum;
+    if (lum > 245) hiClip++;
+    if (lum < 10) shClip++;
+  }
+  const lumAvg = lumSum / n;
+  const pctBlown = (hiClip / n) * 100;
+  const pctBlocked = (shClip / n) * 100;
+  return {
+    pctBlown, pctBlocked,
+    isUnderexposed: lumAvg < 85 || (pctBlocked > 20 && lumAvg < 110),
+    isOverexposed: lumAvg > 165 || pctBlown > 8,
+  };
+}
+
 // Re-checks the *rendered* output, not the original -- catches over/under-
 // correction the pipeline itself introduced (e.g. a highlight-recovery
 // push that wasn't enough, or a saturation boost that clipped), which the
@@ -19054,7 +19090,7 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   note("render");
   const { blob, thumb, processed } = await renderAgent(data, finalAdj, stats);
   note("qa");
-  const qa = qaAgent(analyzeImage(downscaleForStats(processed, 1200)));
+  const qa = qaAgent(analyzeExposureOnly(downscaleForStats(processed, 1200)));
 
   const preset = HDR_PRESETS.find(h => h.id === hdrId);
   return {
