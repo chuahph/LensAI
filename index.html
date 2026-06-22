@@ -19221,6 +19221,14 @@ function autoSelectHDR(stats) {
   dr += Math.max(0, pctBlown - 2) * 3;     // every % of blown highlights past 2% adds weight
   dr += Math.max(0, pctBlocked - 5) * 1.5; // blocked shadows -- real, but lighter than blown highlights
   dr += Math.max(0, contrast - 45) * 0.6;  // raw scene contrast beyond what's "normal"
+  // isHighContrast was computed and destructured but never actually fed into
+  // the score -- the single strongest piece of HDR-rescue evidence (highlights
+  // AND shadows clipping at the same time, not just one or the other) was a
+  // dead signal. Weighted higher than the "contrast alone" case below, since a
+  // sharp graphic/architectural scene can hit contrast>65 without genuinely
+  // losing detail at both ends.
+  if (pctBlocked > 15 && pctBlown > 5) dr += 18;
+  else if (isHighContrast) dr += 6;
   if (hasSky) dr *= 1.35;                  // sky is the highest-stakes place to lose detail
   if (isHazy) dr += 14;                    // dehaze is Smart HDR's hallmark fix
   if (isWashedSky) dr += 16;
