@@ -20125,15 +20125,23 @@ function Spin(){
 // with a 1200px preview per photo, same as the interactive single-photo
 // editor -- the original full-resolution decode only happens later, one
 // photo at a time, when a result is actually downloaded (fullRenderAgent:
-// single download, edit-preview, or zip-all). So per-photo working set
-// during the loop itself is small and roughly constant regardless of the
-// original photo's megapixel count; what `results` accumulates per
-// finished photo is just adj/stats (tiny) plus a 220px thumbnail dataURL.
-// This limit is kept conservative anyway since it's a heuristic that
-// hasn't been profiled against real hardware, not because the loop is
-// expected to come close to it -- large libraries still work fine, just
-// split across more runs.
-const BATCH_PHOTO_LIMIT = 30;
+// single download, edit-preview, or zip-all). Per-photo working set
+// during the loop is now small (a couple of <=1200px buffers, a few MB at
+// most) AND flat regardless of the original photo's megapixel count --
+// the old ~600-700MB-per-48MP-photo math this limit was originally sized
+// against no longer applies to the loop itself. What `results`
+// accumulates per finished photo is just adj/stats (tiny) plus a 220px
+// thumbnail dataURL (~10-15KB), so cumulative growth across even a large
+// batch is negligible too.
+// What still bounds a sane upper limit isn't memory but two serialized,
+// per-photo costs: locationGroupAgent's reverse-geocode lookup throttles
+// itself to ~1 request/second per distinct GPS coordinate (Nominatim's
+// usage policy), and "Download all" full-renders every result at full
+// resolution sequentially before zipping. Both scale linearly with photo
+// count, so this is raised generously from the old full-res-driven 30,
+// but still capped well short of making either of those a multi-minute
+// wait for a single run.
+const BATCH_PHOTO_LIMIT = 100;
 
 // Goal-based batch agent UI: pick a goal + a pile of photos, tap Run, and
 // every photo gets analyzed/corrected (and optionally HDR-enhanced) on its
@@ -20386,7 +20394,7 @@ function BatchAgent({onClose}){
           React.createElement("button",{onClick:()=>folderInputRef.current&&folderInputRef.current.click(),disabled:busy,title:"Load every photo inside a folder (and its subfolders)",style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#94a3b8",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},"Choose folder")
         ),
         overLimit&&React.createElement("div",{style:{fontSize:11,color:"#fca5a5",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:10,padding:"8px 11px",lineHeight:1.5}},
-          files.length+" photos selected -- batches are capped at "+BATCH_PHOTO_LIMIT+" at a time to avoid exhausting memory and crashing the page (especially on iOS). Remove some photos, or run this batch in smaller groups."
+          files.length+" photos selected -- batches are capped at "+BATCH_PHOTO_LIMIT+" at a time to keep a single run from taking too long (location lookups and full-resolution downloads are processed one photo at a time). Remove some photos, or run this batch in smaller groups."
         ),
         React.createElement("div",null,
           React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:6}},
