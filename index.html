@@ -18595,13 +18595,15 @@ async function decodeAgent(file) {
 }
 
 function analysisAgent(image) {
-  // Stats (histogram, contrast, sky/face detection, etc.) are aggregate/
-  // statistical measures that are stable across resolution -- a small
-  // preview gives essentially identical numbers to the full-res original,
-  // exactly the same trade-off the interactive single-photo editor already
-  // relies on (see loadImage's comment). Scanning a 12000px image through
-  // the entire 5-pass analysis pipeline for near-identical numbers would
-  // just waste time and memory on every photo in the batch for no benefit.
+  // Same preview-resolution trade-off the interactive single-photo editor
+  // uses (see loadImage's PREV_MAX): stats are aggregate/statistical
+  // measures stable across resolution, AND this same preview is what
+  // gets analyzed/corrected/enhanced live -- the full-resolution image is
+  // only ever touched later, on demand, when a result actually needs to
+  // be downloaded (fullRenderAgent). Doing the expensive full-res draw
+  // eagerly for every photo here (the old behavior) is exactly the extra
+  // batch-only cost that made per-photo batch processing slower than the
+  // single-photo flow, which never renders full-res until export.
   const STATS_MAX = 1200;
   let sw = image.width, sh = image.height;
   if (sw > STATS_MAX) { sh = Math.round(sh * STATS_MAX / sw); sw = STATS_MAX; }
@@ -18610,26 +18612,14 @@ function analysisAgent(image) {
   // pipeline already relies on instead of allocating a fresh canvas per
   // photo here -- iOS/WebKit doesn't promptly release a canvas's backing
   // store just because the element became unreachable, so a batch that
-  // creates a new up-to-12000px canvas on every single photo can exhaust
-  // memory and crash well before BATCH_PHOTO_LIMIT is ever reached.
+  // creates a new canvas on every single photo can exhaust memory and
+  // crash well before BATCH_PHOTO_LIMIT is ever reached.
   const scv = _getScratch("A", sw, sh);
   const sctx = scv.getContext("2d");
   sctx.drawImage(image, 0, 0, sw, sh);
-  const stats = analyzeImage(sctx.getImageData(0, 0, sw, sh));
-
-  // The actual rendered/exported photo, in contrast, must match the
-  // original's resolution -- capped only by the same browser-canvas
-  // ceiling the single-photo editor uses (12000px covers virtually all
-  // consumer/prosumer photography), not an arbitrary batch-only downscale.
-  const FULL_MAX = 12000;
-  let w = image.width, h = image.height;
-  if (w > FULL_MAX) { h = Math.round(h * FULL_MAX / w); w = FULL_MAX; }
-  if (h > FULL_MAX) { w = Math.round(w * FULL_MAX / h); h = FULL_MAX; }
-  const cv = _getScratch("A", w, h);
-  const ctx = cv.getContext("2d");
-  ctx.drawImage(image, 0, 0, w, h);
-  const data = ctx.getImageData(0, 0, w, h);
-  return { data, stats };
+  const previewData = sctx.getImageData(0, 0, sw, sh);
+  const stats = analyzeImage(previewData);
+  return { previewData, stats };
 }
 
 // Flags photos bad enough that no amount of correction will save them --
@@ -19005,21 +18995,47 @@ function enhancementAgent(baseAdj, hdrId, stats) {
   return hdrId ? computeHDRAdj(baseAdj, hdrId, stats) : baseAdj;
 }
 
-async function renderAgent(data, adj, stats) {
+// Renders at whatever resolution `data` already is -- during the batch
+// loop that's analysisAgent's 1200px preview, matching the single-photo
+// editor's live-edit rendering. Produces the grid thumbnail and the
+// pixels QA re-checks; the full-resolution downloadable photo is a
+// separate, on-demand step (fullRenderAgent below).
+function renderAgent(data, adj, stats) {
   const processed = processPixels(data, adj, stats);
   const outCv = imageDataToCanvas(processed);
-  const blob = await new Promise(resolve => outCv.toBlob(resolve, "image/jpeg", 0.92));
-
-  // Thumbnail drawn (and the source blob produced above) before this
-  // function returns -- imageDataToCanvas hands back a shared scratch
-  // canvas that the next sequential batch item will redraw into, so
-  // nothing from outCv can be read lazily after this call returns.
+  // Thumbnail drawn before this function returns -- imageDataToCanvas
+  // hands back a shared scratch canvas that the next sequential batch
+  // item will redraw into, so nothing from outCv can be read lazily
+  // after this call returns.
   const TW = 220;
   const th = Math.max(1, Math.round(TW * outCv.height / outCv.width));
   const thumbCv = document.createElement("canvas");
   thumbCv.width = TW; thumbCv.height = th;
   thumbCv.getContext("2d").drawImage(outCv, 0, 0, TW, th);
-  return { blob, thumb: thumbCv.toDataURL("image/jpeg", 0.7), processed };
+  return { thumb: thumbCv.toDataURL("image/jpeg", 0.7), processed };
+}
+
+// The on-demand full-resolution counterpart to renderAgent -- re-decodes
+// the original file and re-runs the same correction/enhancement pipeline
+// at full resolution, exactly mirroring the single-photo editor's saveImg
+// (which also only renders full-res once, at export). Called lazily per
+// photo only when that photo is actually downloaded (single download,
+// edit-preview full quality, or zip-all), so the batch loop itself never
+// pays for a full-res render that might not even be kept.
+async function fullRenderAgent(file, adj, stats) {
+  const image = await decodeAgent(file);
+  const FULL_MAX = 12000;
+  let w = image.width, h = image.height;
+  if (w > FULL_MAX) { h = Math.round(h * FULL_MAX / w); w = FULL_MAX; }
+  if (h > FULL_MAX) { w = Math.round(w * FULL_MAX / h); h = FULL_MAX; }
+  const cv = _getScratch("A", w, h);
+  const ctx = cv.getContext("2d");
+  ctx.drawImage(image, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h);
+  if (typeof image.close === "function") image.close();
+  const processed = processPixels(data, adj, stats);
+  const outCv = imageDataToCanvas(processed);
+  return new Promise(resolve => outCv.toBlob(resolve, "image/jpeg", 0.92));
 }
 
 // Same resolution-doesn't-matter-for-aggregate-stats reasoning as
@@ -19081,15 +19097,17 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   note("decode");
   const image = await decodeAgent(file);
   note("analyze");
-  const { data, stats } = analysisAgent(image);
-  // analysisAgent already copied everything it needs out into `data`/
-  // `stats` -- nothing downstream touches `image` again. An ImageBitmap
-  // (the fast path decodeAgent now prefers) holds its own large decoded
-  // pixel buffer that, unlike a plain <img>, browsers don't promise to
-  // release until close() is called explicitly -- left to GC timing, that
-  // buffer can pile up across a batch loop the same way the unreleased
-  // canvas backing stores did before. Close it the moment it's no longer
-  // needed instead of waiting on GC.
+  const { previewData, stats } = analysisAgent(image);
+  // analysisAgent already copied everything it needs out into
+  // `previewData`/`stats` -- nothing downstream in this function touches
+  // `image` again (the full-resolution pixels are only re-decoded later,
+  // on demand, by fullRenderAgent). An ImageBitmap (the fast path
+  // decodeAgent now prefers) holds its own large decoded pixel buffer
+  // that, unlike a plain <img>, browsers don't promise to release until
+  // close() is called explicitly -- left to GC timing, that buffer can
+  // pile up across a batch loop the same way the unreleased canvas
+  // backing stores did before. Close it the moment it's no longer needed
+  // instead of waiting on GC.
   if (typeof image.close === "function") image.close();
   const group = sceneSorterAgent(stats);
   const origFolder = await locationGroupAgent(file);
@@ -19106,12 +19124,11 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   note("enhance");
   const finalAdj = enhancementAgent(baseAdj, hdrId, stats);
   note("render");
-  const { blob, thumb, processed } = await renderAgent(data, finalAdj, stats);
+  const { thumb, processed } = renderAgent(previewData, finalAdj, stats);
   note("qa");
-  // analyzeExposureOnly is a single cheap histogram pass (unlike the old
-  // multi-pass analyzeImage this downscale was originally written to make
-  // affordable), so it can run directly on the full-res processed pixels --
-  // skips an extra drawImage+getImageData canvas round-trip per photo.
+  // analyzeExposureOnly is a single cheap histogram pass, run directly on
+  // the preview-resolution processed pixels -- exposure stats are stable
+  // across resolution just like the rest of this pipeline's stats.
   const qa = qaAgent(analyzeExposureOnly(processed));
 
   const preset = HDR_PRESETS.find(h => h.id === hdrId);
@@ -19122,7 +19139,12 @@ async function batchProcessFile(file, goalId, onStage, opts) {
     applyCorrections,
     group,
     origFolder,
-    blob,
+    // Kept so a full-resolution render can be produced later, on demand,
+    // by fullRenderAgent -- only when this specific result is actually
+    // downloaded (single download, edit-preview, or zip-all), instead of
+    // eagerly rendering full-res for every photo during the batch loop.
+    adj: finalAdj,
+    stats,
     thumb,
     hdrLabel: preset ? preset.label : null,
     score: fallback.overallScore,
@@ -19218,15 +19240,20 @@ function buildZipBlob(entries) {
 // capture date, then source folder) wins when any of it is available, falling back to
 // sceneSorterAgent's classification only when a photo has none of that
 // -- and gives every entry a collision-free name. The single entry point
-// the batch UI calls for "Download all".
-async function exportOrganizeAgent(results) {
-  const usable = results.filter(r => !r.error && !r.culled && r.blob);
+// the batch UI calls for "Download all". `files` is the original picked
+// FileList, indexed by each result's fileIndex -- batchProcessFile only
+// ever rendered a preview-resolution thumbnail, so the full-resolution
+// photo for each result is rendered here, one at a time, only for
+// results that actually make it into the zip.
+async function exportOrganizeAgent(results, files) {
+  const usable = results.filter(r => !r.error && !r.culled && r.adj);
   const entries = [];
   for (const r of usable) {
+    const blob = await fullRenderAgent(files[r.fileIndex], r.adj, r.stats);
     const stem = (r.name || "photo").replace(/\.[^/.]+$/, "");
     const folder = r.origFolder || r.group || "misc";
     const path = folder + "/" + stem + "-" + (r.goalId || "batch") + ".jpg";
-    const bytes = new Uint8Array(await r.blob.arrayBuffer());
+    const bytes = new Uint8Array(await blob.arrayBuffer());
     entries.push({ path, bytes });
   }
   return buildZipBlob(entries);
@@ -20094,28 +20121,18 @@ function Spin(){
   return React.createElement("span",{style:{width:10,height:10,borderRadius:"50%",border:"2px solid rgba(255,255,255,0.2)",borderTopColor:"#fff",display:"inline-block",animation:"spin 0.5s linear infinite"}});
 }
 
-// Batch output renders at the original photo's full resolution (see
-// analysisAgent), so this is sized for the worst realistic case -- every
-// photo in the batch at 48MP (e.g. 8064x6048, current flagship phone
-// cameras) -- rather than an average mixed-resolution library:
-//  - PEAK per-photo working set: a 48MP raw buffer is ~186MB
-//    (8064*6048*4 bytes), and the pipeline holds several buffers near that
-//    size at once while one photo is mid-render (source ImageData, the
-//    processed output array, processPixels' reused despeckle scratch
-//    buffer, the output canvas) -- realistically ~600-700MB transient
-//    while the CURRENT photo is processing.
-//  - CUMULATIVE growth: one entry per already-finished photo stays in
-//    `results` (blob + tiny thumbnail) until exported. A 48MP JPEG at
-//    0.92 quality typically lands ~10-20MB.
-// Budgeting a conservative ~1.2GB usable ceiling (well under the ~1.5-2GB
-// some modern iPhones tolerate, to also cover older/low-RAM devices)
-// leaves ~500MB of headroom for already-finished photos once the current
-// photo's own peak is subtracted -- divided by a ~15MB average blob, that
-// supports a batch in the low 30s even at this all-48MP worst case. Set to
-// the top of that computed range rather than rounded down further, since
-// this is a heuristic and not something profiled on real hardware; large
-// libraries of high-megapixel photos still work fine, just split across
-// more runs.
+// The main batch loop (analysisAgent/renderAgent) now only ever works
+// with a 1200px preview per photo, same as the interactive single-photo
+// editor -- the original full-resolution decode only happens later, one
+// photo at a time, when a result is actually downloaded (fullRenderAgent:
+// single download, edit-preview, or zip-all). So per-photo working set
+// during the loop itself is small and roughly constant regardless of the
+// original photo's megapixel count; what `results` accumulates per
+// finished photo is just adj/stats (tiny) plus a 220px thumbnail dataURL.
+// This limit is kept conservative anyway since it's a heuristic that
+// hasn't been profiled against real hardware, not because the loop is
+// expected to come close to it -- large libraries still work fine, just
+// split across more runs.
 const BATCH_PHOTO_LIMIT = 30;
 
 // Goal-based batch agent UI: pick a goal + a pile of photos, tap Run, and
@@ -20146,6 +20163,12 @@ function BatchAgent({onClose}){
   const [editPreviewFor,setEditPreviewFor]=useState(null);
   const [editBusy,setEditBusy]=useState(false);
   const [editFullUrl,setEditFullUrl]=useState(null);
+  // Tracks which single result (by index into `results`) is currently
+  // having its full-resolution photo rendered for download -- batch
+  // results only ever carry a preview-resolution thumbnail, so a single
+  // download now renders full-res on demand (fullRenderAgent) instead of
+  // it already being sitting in memory.
+  const [downloadingIdx,setDownloadingIdx]=useState(null);
 
   // Mirrors the agent names in batchProcessFile's pipeline (decodeAgent,
   // analysisAgent, ...) so the busy indicator reflects which agent is
@@ -20219,17 +20242,24 @@ function BatchAgent({onClose}){
     return r.hdrLabel;
   };
 
-  const downloadOne=(r)=>{
-    if(!r.blob) return;
-    const url=URL.createObjectURL(r.blob);
-    const a=document.createElement("a");
-    a.href=url;
-    const stem=(r.name||"photo").replace(/\.[^/.]+$/,"");
-    // goalId is included so multiple variants of the same original photo
-    // (one per selected goal) never collide/overwrite each other.
-    a.download=stem+"-"+(r.goalId||"batch")+"-"+Date.now()+".jpg";
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
+  const downloadOne=async(r)=>{
+    if(!r.adj) return;
+    const file=files[r.fileIndex];
+    if(!file) return;
+    const idx=results.indexOf(r);
+    setDownloadingIdx(idx);
+    try {
+      const blob=await fullRenderAgent(file, r.adj, r.stats);
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement("a");
+      a.href=url;
+      const stem=(r.name||"photo").replace(/\.[^/.]+$/,"");
+      // goalId is included so multiple variants of the same original photo
+      // (one per selected goal) never collide/overwrite each other.
+      a.download=stem+"-"+(r.goalId||"batch")+"-"+Date.now()+".jpg";
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } finally { setDownloadingIdx(null); }
   };
 
   // Lets a finished batch result be revisited one photo at a time: pick a
@@ -20238,15 +20268,26 @@ function BatchAgent({onClose}){
   // without having to re-run (or hand-tune) the whole batch.
   // The grid thumbnail is a small (220px-wide) dataURL meant for the
   // results grid -- blown up to the modal's larger preview width it looks
-  // pixelated/distorted. Swap in an object URL of the actual full-
-  // resolution rendered blob instead, so the preview (and any difference
-  // between presets) is shown at real quality.
+  // pixelated/distorted. Render the actual full-resolution photo on
+  // demand instead (results only carry adj/stats, not a pre-rendered
+  // full-res blob), so the preview (and any difference between presets)
+  // is shown at real quality.
   useEffect(()=>{
     const shown = editIdx!=null ? (editPreview||results[editIdx]) : null;
-    if(!shown||!shown.blob){ setEditFullUrl(null); return; }
-    const url=URL.createObjectURL(shown.blob);
-    setEditFullUrl(url);
-    return ()=>URL.revokeObjectURL(url);
+    const file = shown ? files[shown.fileIndex] : null;
+    if(!shown||!shown.adj||!file){ setEditFullUrl(null); return; }
+    // Falls back to the small thumb (see the <img> below) until the
+    // full-res render for this photo finishes, rather than briefly
+    // showing the previous photo's full-res image.
+    setEditFullUrl(null);
+    let cancelled=false;
+    let url=null;
+    fullRenderAgent(file, shown.adj, shown.stats).then(blob=>{
+      if(cancelled) return;
+      url=URL.createObjectURL(blob);
+      setEditFullUrl(url);
+    });
+    return ()=>{ cancelled=true; if(url) URL.revokeObjectURL(url); };
   },[editIdx,editPreview]);
 
   const openEdit=(idx)=>{
@@ -20305,7 +20346,7 @@ function BatchAgent({onClose}){
   const downloadAll=async()=>{
     setZipping(true);
     try {
-      const blob=await exportOrganizeAgent(results);
+      const blob=await exportOrganizeAgent(results, files);
       const url=URL.createObjectURL(blob);
       const a=document.createElement("a");
       a.href=url; a.download="lensai-batch-"+Date.now()+".zip";
@@ -20386,7 +20427,7 @@ function BatchAgent({onClose}){
               : r.culled
               ? React.createElement("div",{title:(r.cullReasons||[]).join(", "),style:{height:96,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#fbbf24",padding:6,textAlign:"center"}},"Skipped: "+(r.cullReasons||[]).join(", "))
               : React.createElement("img",{src:r.thumb,onClick:()=>openEdit(results.indexOf(r)),title:"Tap to reanalyze with a different HDR type",style:{width:"100%",height:96,objectFit:"cover",display:"block",cursor:"pointer"}}),
-            !r.error&&!r.culled&&React.createElement("button",{onClick:()=>downloadOne(r),title:"Download",style:{position:"absolute",bottom:4,right:4,width:22,height:22,borderRadius:"50%",border:"none",background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}},"↓"),
+            !r.error&&!r.culled&&React.createElement("button",{onClick:()=>downloadOne(r),disabled:downloadingIdx===results.indexOf(r),title:"Download",style:{position:"absolute",bottom:4,right:4,width:22,height:22,borderRadius:"50%",border:"none",background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:11,cursor:downloadingIdx===results.indexOf(r)?"wait":"pointer",display:"flex",alignItems:"center",justifyContent:"center"}},downloadingIdx===results.indexOf(r)?React.createElement(Spin,null):"↓"),
             !r.error&&!r.culled&&goalLabel(r)&&React.createElement("div",{style:{position:"absolute",top:4,left:4,background:"rgba(0,0,0,0.6)",color:"#a5b4fc",fontSize:8,fontWeight:700,padding:"2px 5px",borderRadius:5}},goalLabel(r)),
             !r.error&&!r.culled&&r.qaFlags&&React.createElement("div",{title:"QA Agent: "+r.qaFlags.join(", "),style:{position:"absolute",top:4,right:4,width:16,height:16,borderRadius:"50%",background:"rgba(251,191,36,0.85)",color:"#1c1917",fontSize:10,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}},"!")
           )))
