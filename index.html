@@ -19073,6 +19073,15 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   const image = await decodeAgent(file);
   note("analyze");
   const { data, stats } = analysisAgent(image);
+  // analysisAgent already copied everything it needs out into `data`/
+  // `stats` -- nothing downstream touches `image` again. An ImageBitmap
+  // (the fast path decodeAgent now prefers) holds its own large decoded
+  // pixel buffer that, unlike a plain <img>, browsers don't promise to
+  // release until close() is called explicitly -- left to GC timing, that
+  // buffer can pile up across a batch loop the same way the unreleased
+  // canvas backing stores did before. Close it the moment it's no longer
+  // needed instead of waiting on GC.
+  if (typeof image.close === "function") image.close();
   const group = sceneSorterAgent(stats);
   const origFolder = await locationGroupAgent(file);
   note("cull");
