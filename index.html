@@ -17703,7 +17703,12 @@ function analyzeImage(data) {
   // looser skyRatio/hasSky that also counts a bright plate/napkin as "sky")
   // and a sane food-lighting brightness range.
   const foodMultiHue = blueSkyRatio<0.06 && hueVariety>=3 && lumAvg>70 && lumAvg<225 && !isCoolCast;
-  const foodWarmTone = blueSkyRatio<0.06 && !isCoolCast && !hasFace && avgSat>22 && lumAvg>70 && lumAvg<220;
+  // gAvg>rAvg*0.58 (see foodWarmCast below): a frame of vivid man-made red --
+  // vermilion torii gates, a wall of red signage -- is warm, saturated and
+  // face-free, matching this single-warm-tone path exactly, but crushes green
+  // far below any real dish. The same green-floor that protects foodWarmCast
+  // keeps those out of food here too.
+  const foodWarmTone = blueSkyRatio<0.06 && !isCoolCast && !hasFace && avgSat>22 && gAvg>rAvg*0.58 && lumAvg>70 && lumAvg<220;
   // Warm/neutral dishes that FILL the frame -- noodles, rice, broth bowls,
   // stir-fries, dumplings: the bulk of Asian food -- read as skin-tone to
   // hasFace and were being stolen by the portrait branch (ramen/pho/fried
@@ -17743,11 +17748,35 @@ function analyzeImage(data) {
   // sits far higher (brick building 0.52, cityscape 0.73), so 0.15 still
   // excludes those while rescuing real plated food. The warm+red-dominant+
   // no-dominant-face gates keep it from grabbing people/foliage.
-  const foodWarmCast = blueSkyRatio<0.15 && isWarmCast && rAvg>gAvg && !hasBigFace && lumAvg>70 && lumAvg<240;
+  // gAvg>rAvg*0.58: food is warm but never PURE red -- even a tomato-sauce or
+  // red-meat dish keeps its green channel above ~0.64 of red (measured across
+  // a real food set, the lowest was 0.639). A vivid man-made red object that
+  // fills the frame -- vermilion torii gates, a wall of red signage -- crushes
+  // green far below that (torii measured 0.46-0.52). Without this gate those
+  // tripped foodWarmCast (warm + red-dominant + no big face) and a group
+  // selfie under torii read as "food" instead of "people". 0.58 sits between
+  // the two populations so it excludes the artificial-red scenes while keeping
+  // every real dish.
+  const foodWarmCast = blueSkyRatio<0.15 && isWarmCast && rAvg>gAvg && gAvg>rAvg*0.58 && !hasBigFace && lumAvg>70 && lumAvg<240;
+
+  // Outdoor/indoor architecture: a structured scene with real sky/open area
+  // that is NOT a sharp close-up. The sharpness floor is what separates it
+  // from food: a real food photo is also frequently structured (textured dish)
+  // AND reads hasSky (bright white plate/table), so sky+structure ALONE wrongly
+  // grabs plated food -- but food is shot close-up and comes out sharp (a
+  // verified food set measured sharpness 58-79), whereas a street/arcade/
+  // storefront is a receding scene with depth that reads soft (the misfiring
+  // urban shots measured 32-47). The <52 gate sits in the clean gap between the
+  // two. Used to (a) veto every food path below, since warm building facades /
+  // arcade signage / street colour otherwise trip foodMultiHue/foodTextured/
+  // foodWarmCast, and (b) claim the scene for Urban ahead of the People
+  // branches so a street shot with a few distant pedestrians isn't called
+  // People.
+  const isArchitectural = hasSky && isStructured && sharpness < 52;
 
   let scene='people';
   if (isNight)                                          scene='night';
-  else if (foodMultiHue || foodWarmTone || foodTextured || foodDenseColor || foodWarmCast) scene='food';
+  else if (!isArchitectural && (foodMultiHue || foodWarmTone || foodTextured || foodDenseColor || foodWarmCast)) scene='food';
   // Green-dominant foliage stays nature first -- this must run before the
   // face branches so warm leaf-litter / autumn / forest-floor patches that
   // trip the skin-tone test (localized warm browns) are claimed by nature
@@ -17757,6 +17786,13 @@ function analyzeImage(data) {
   // skinClusters<=1 gate keeps "one big face plus other people in frame"
   // (multiple skin blobs) out of Portrait so it falls to People below.
   else if (hasBigFace&&skinClusters<=1&&rAvg>gAvg&&rAvg>bAvg) scene='portrait';
+  // Architecture (sky + structure) with no single dominant subject is Urban,
+  // decided BEFORE the People branches: a street/arcade/storefront shot with a
+  // scatter of distant pedestrians registers skin blobs (skinClusters>=2) that
+  // would otherwise be read as a "group of people", but the photo is of the
+  // place, not the people. Gated !hasBigFace so a genuine portrait/selfie taken
+  // in front of a building is still claimed by Portrait/People above & below.
+  else if (isArchitectural && !hasBigFace)                  scene='urban';
   // People = multiple subjects, or a face that doesn't dominate the frame:
   // multiple separated skin blobs (a group), or skin present but no single
   // large face (a candid, a social/indoor gathering). This is the gap the old
