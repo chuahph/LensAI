@@ -19720,20 +19720,38 @@ function autoSelectHDR(stats) {
   // --- Portrait: face detected, typically no sky, warm-ish ---
   // hasFace is a color-only heuristic (skin-tone chromaticity ratio over
   // the whole frame) that also fires on warm/browned food and sand/wood/
-  // foliage tones in scenery shots -- gating it against scene wasn't
-  // enough on its own, since plenty of those same false-positive shots
-  // (a macro/no-sky texture shot, a warm-lit room) don't land in food/
-  // nature/urban's own scene buckets either and fall through to the
-  // 'people' default, where faceLooksReal is still true. The main +35
-  // confidence bonus now requires hasBigFace (the much-higher 0.28
-  // ratio bar, same one Auto Select's own fallback-to-corrections-only
-  // gate uses) instead of the loose hasFace, so incidental skin-tone-
-  // colored pixels scattered across a scenery/macro shot can no longer
-  // alone outscore food/nature/urban's own signature-gated points.
-  const faceLooksReal = scene !== "food" && scene !== "nature" && scene !== "urban";
+  // foliage tones in scenery shots. The main +35 confidence bonus requires
+  // hasBigFace (the much-higher 0.28 ratio bar, same one Auto Select's own
+  // fallback-to-corrections-only gate uses) instead of the loose hasFace,
+  // so incidental skin-tone-colored pixels scattered across a scenery/
+  // macro shot can't alone outscore food/nature/urban's own signature-
+  // gated points.
+  // faceLooksReal used to also exclude scene==="nature"/"urban" -- but
+  // `scene` is a single first-match-wins tag computed from FRAME-AVERAGE
+  // color/edges, and a real, prominent person (hasBigFace, 28%+ of the
+  // frame genuinely skin-toned) standing in front of a building or
+  // greenery routinely gets outvoted in that average by the sky/facade/
+  // foliage behind them, landing scene on 'urban'/'nature' despite the
+  // photo clearly being of a person. Excluding those scene tags here then
+  // zeroed portrait's main bonus exactly when a real subject shares the
+  // frame with background architecture/nature -- the reported "people
+  // photographed in front of buildings/scenery still pick urban/nature"
+  // case. scene==="food" is excluded only for documentation continuity:
+  // analyzeImage's food branch already requires !hasFace, so it can never
+  // be true here anyway (hasBigFace implies hasFace).
+  const faceLooksReal = scene !== "food";
   if (hasBigFace && faceLooksReal) scores.portrait += 35;
   if (scene === "portrait") scores.portrait += 25;
   if (hasBigFace && !hasSky && faceLooksReal) scores.portrait += 10;
+  // A real, prominent face is the subject -- not the building/foliage
+  // sharing the frame with it. Damp urban/nature's background-composition
+  // points (same damping idiom already used for smartHDR/golden vs.
+  // hasFace/food) so a strong architectural or organic backdrop can't
+  // outscore an actual person standing in front of it.
+  if (hasBigFace) {
+    scores.urban = Math.round(scores.urban * 0.4);
+    scores.nature = Math.round(scores.nature * 0.4);
+  }
 
   // --- Golden hour: strong warm cast, not blown, not night ---
   if (isWarmCast && tempAxis > 22 && !isOverexposed && !isNight) scores.golden += 30;
@@ -19800,8 +19818,13 @@ function autoSelectHDR(stats) {
       bestScore = scores[key]; best = key;
     }
   }
-  // Require minimum confidence -- otherwise fall back to safe default
+  // Require minimum confidence -- otherwise fall back to safe default.
+  // Checked before the generic hasSky->nature fallback: a real, prominent
+  // face is a far more specific signal than "there's sky in the frame",
+  // and without this check a low-confidence portrait shot with any sky
+  // visible behind the subject defaulted to nature instead of portrait.
   if (bestScore < 15) {
+    if (hasBigFace) return "portrait";
     if (hasSky) return "nature";
     return "people";
   }
