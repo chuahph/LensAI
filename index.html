@@ -18567,20 +18567,37 @@ async function decodeAgent(file) {
 }
 
 function analysisAgent(image) {
-  // Unattended over potentially many photos -- capped well below the
-  // interactive editor's 12000px full-res export ceiling so a large
-  // batch stays fast and doesn't risk exhausting tab memory processing
-  // several full-res images back to back with no user able to intervene.
-  const MAX = 2400;
+  // Stats (histogram, contrast, sky/face detection, etc.) are aggregate/
+  // statistical measures that are stable across resolution -- a small
+  // preview gives essentially identical numbers to the full-res original,
+  // exactly the same trade-off the interactive single-photo editor already
+  // relies on (see loadImage's comment). Scanning a 12000px image through
+  // the entire 5-pass analysis pipeline for near-identical numbers would
+  // just waste time and memory on every photo in the batch for no benefit.
+  const STATS_MAX = 1200;
+  let sw = image.width, sh = image.height;
+  if (sw > STATS_MAX) { sh = Math.round(sh * STATS_MAX / sw); sw = STATS_MAX; }
+  if (sh > STATS_MAX) { sw = Math.round(sw * STATS_MAX / sh); sh = STATS_MAX; }
+  const scv = document.createElement("canvas");
+  scv.width = sw; scv.height = sh;
+  const sctx = scv.getContext("2d");
+  sctx.drawImage(image, 0, 0, sw, sh);
+  const stats = analyzeImage(sctx.getImageData(0, 0, sw, sh));
+
+  // The actual rendered/exported photo, in contrast, must match the
+  // original's resolution -- capped only by the same browser-canvas
+  // ceiling the single-photo editor uses (12000px covers virtually all
+  // consumer/prosumer photography), not an arbitrary batch-only downscale.
+  const FULL_MAX = 12000;
   let w = image.width, h = image.height;
-  if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
-  if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; }
+  if (w > FULL_MAX) { h = Math.round(h * FULL_MAX / w); w = FULL_MAX; }
+  if (h > FULL_MAX) { w = Math.round(w * FULL_MAX / h); h = FULL_MAX; }
   const cv = document.createElement("canvas");
   cv.width = w; cv.height = h;
   const ctx = cv.getContext("2d");
   ctx.drawImage(image, 0, 0, w, h);
   const data = ctx.getImageData(0, 0, w, h);
-  return { data, stats: analyzeImage(data) };
+  return { data, stats };
 }
 
 // Flags photos bad enough that no amount of correction will save them --
@@ -18973,6 +18990,21 @@ async function renderAgent(data, adj, stats) {
   return { blob, thumb: thumbCv.toDataURL("image/jpeg", 0.7), processed };
 }
 
+// Same resolution-doesn't-matter-for-aggregate-stats reasoning as
+// analysisAgent's STATS_MAX -- used to keep the QA re-check below cheap
+// even though `processed` is now the full-resolution rendered photo.
+function downscaleForStats(imageData, maxDim) {
+  let w = imageData.width, h = imageData.height;
+  if (w <= maxDim && h <= maxDim) return imageData;
+  if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+  else { w = Math.round(w * maxDim / h); h = maxDim; }
+  const src = imageDataToCanvas(imageData);
+  const dst = document.createElement("canvas");
+  dst.width = w; dst.height = h;
+  dst.getContext("2d").drawImage(src, 0, 0, w, h);
+  return dst.getContext("2d").getImageData(0, 0, w, h);
+}
+
 // Re-checks the *rendered* output, not the original -- catches over/under-
 // correction the pipeline itself introduced (e.g. a highlight-recovery
 // push that wasn't enough, or a saturation boost that clipped), which the
@@ -19011,7 +19043,7 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   note("render");
   const { blob, thumb, processed } = await renderAgent(data, finalAdj, stats);
   note("qa");
-  const qa = qaAgent(analyzeImage(processed));
+  const qa = qaAgent(analyzeImage(downscaleForStats(processed, 1200)));
 
   const preset = HDR_PRESETS.find(h => h.id === hdrId);
   return {
@@ -19981,6 +20013,24 @@ function Spin(){
   return React.createElement("span",{style:{width:10,height:10,borderRadius:"50%",border:"2px solid rgba(255,255,255,0.2)",borderTopColor:"#fff",display:"inline-block",animation:"spin 0.5s linear infinite"}});
 }
 
+// Batch output now renders at the original photo's full resolution (see
+// analysisAgent) instead of a capped 2400px preview, so both halves of the
+// memory budget changed:
+//  - PEAK per-photo working set: processPixels' internal snapshot buffer
+//    (_snapshot) is a single reused scratch array, not a fresh allocation
+//    per photo, so it doesn't accumulate -- but it's now sized to the
+//    full-res image (e.g. ~200MB raw for a 48MP photo) instead of a
+//    2400px-capped one, so each photo's transient peak is meaningfully
+//    bigger than before.
+//  - CUMULATIVE growth: one entry per finished photo stays in `results`
+//    (blob + tiny thumbnail) until exported. The blob is now a full-res
+//    JPEG -- roughly 3-8MB for typical 12-24MP photos, more for very high
+//    megapixel originals -- instead of the ~1-3MB a 2400px cap produced.
+// Lowered from 80 back down to keep both numbers comfortably inside even
+// iOS Safari's tighter per-tab budget on older/low-RAM devices; large
+// libraries still work fine, just split across more than one run.
+const BATCH_PHOTO_LIMIT = 30;
+
 // Goal-based batch agent UI: pick a goal + a pile of photos, tap Run, and
 // every photo gets analyzed/corrected (and optionally HDR-enhanced) on its
 // own via batchProcessFile -- no per-photo interaction. Fully self-contained
@@ -20047,8 +20097,10 @@ function BatchAgent({onClose}){
     e.target.value="";
   };
 
+  const overLimit=files.length>BATCH_PHOTO_LIMIT;
+
   const run=async()=>{
-    if(!files.length||!goals.length||busy) return;
+    if(!files.length||!goals.length||busy||overLimit) return;
     setBusy(true); setProgress(0); setResults([]); setStage(null);
     const total=files.length*goals.length;
     setProgressTotal(total);
@@ -20202,7 +20254,7 @@ function BatchAgent({onClose}){
         React.createElement("input",{ref:fileInputRef,type:"file",accept:"image/*",multiple:true,style:{display:"none"},onChange:onPick}),
         React.createElement("input",{ref:folderInputRef,type:"file",webkitdirectory:"",directory:"",multiple:true,style:{display:"none"},onChange:onPick}),
         React.createElement("div",{style:{display:"flex",gap:6}},
-          React.createElement("button",{onClick:()=>fileInputRef.current&&fileInputRef.current.click(),disabled:busy,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"left"}},files.length?files.length+" photo"+(files.length>1?"s":"")+" selected -- tap to change":"Choose photos"),
+          React.createElement("button",{onClick:()=>fileInputRef.current&&fileInputRef.current.click(),disabled:busy,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"1px solid "+(overLimit?"rgba(248,113,113,0.5)":BORD),background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"left"}},files.length?files.length+" photo"+(files.length>1?"s":"")+" selected -- tap to change":"Choose photos"),
           React.createElement("button",{onClick:()=>folderInputRef.current&&folderInputRef.current.click(),disabled:busy,title:"Load every photo inside a folder (and its subfolders)",style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#94a3b8",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},"Choose folder")
         ),
         React.createElement("div",null,
@@ -20231,7 +20283,10 @@ function BatchAgent({onClose}){
           React.createElement("input",{type:"checkbox",checked:skipFlagged,disabled:busy,onChange:e=>setSkipFlagged(e.target.checked)}),
           "Skip photos that are too blurry/dark/blown to fix (Culling Agent)"
         ),
-        React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+(stage?" • "+STAGE_LABELS[stage]:"")+"..."):"Run batch agent"),
+        overLimit&&React.createElement("div",{style:{fontSize:11,color:"#fca5a5",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:10,padding:"8px 11px",lineHeight:1.5}},
+          files.length+" photos selected -- batches are capped at "+BATCH_PHOTO_LIMIT+" at a time to avoid exhausting memory and crashing the page (especially on iOS). Remove some photos, or run this batch in smaller groups."
+        ),
+        React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy||overLimit,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy||overLimit)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy||overLimit)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+(stage?" • "+STAGE_LABELS[stage]:"")+"..."):"Run batch agent"),
         results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
           React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"+(culledCount?", "+culledCount+" skipped":"")),
           !busy&&doneCount>0&&React.createElement("button",{onClick:downloadAll,disabled:zipping,title:"Bundles every result into one zip, organized into folders (Export/Organize Agent) -- a single reliable download instead of one-per-photo",style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping...":"Download all (.zip)")
