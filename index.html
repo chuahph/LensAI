@@ -19981,14 +19981,21 @@ function Spin(){
   return React.createElement("span",{style:{width:10,height:10,borderRadius:"50%",border:"2px solid rgba(255,255,255,0.2)",borderTopColor:"#fff",display:"inline-block",animation:"spin 0.5s linear infinite"}});
 }
 
-// Each photo in the batch is decoded to a full canvas ImageData, analyzed,
-// rendered, AND kept as a thumbnail dataURL all at once -- on iOS Safari
-// that working set (not just the JPEGs themselves) is what exhausts the
-// WebKit per-tab memory ceiling and silently kills the page, with no error
-// to catch or recover from. Capping the batch size keeps a single run
-// inside a budget that's been safe across iPhone hardware in practice;
-// large libraries still work fine, just split across more than one run.
-const BATCH_PHOTO_LIMIT = 40;
+// The per-photo PEAK working set is already bounded well below what it
+// looks like at a glance: analysisAgent downsamples to a 2400px-long-edge
+// canvas before any pixel work happens, and processPixels' internal
+// snapshot buffer (_snapshot) is a single reused scratch array, not a
+// fresh allocation per photo -- so that part doesn't accumulate across a
+// batch at all. What DOES accumulate, one entry per finished photo in
+// `results`, is just the rendered JPEG blob (roughly 1-3MB at 2400px/0.92
+// quality) plus a tiny 220px-wide thumbnail dataURL (tens of KB) -- on the
+// order of ~2-3MB/photo. Even iOS Safari's tighter per-tab budget on older
+// devices (low-RAM iPhones/iPads, often only a few hundred MB before the
+// tab gets killed) has comfortable headroom well past 40 photos' worth of
+// that; this is mostly guarding against the *peak* transient overhead
+// (decode + intermediate typed-array math) stacking with the OS and other
+// open tabs, not the cumulative result list itself.
+const BATCH_PHOTO_LIMIT = 80;
 
 // Goal-based batch agent UI: pick a goal + a pile of photos, tap Run, and
 // every photo gets analyzed/corrected (and optionally HDR-enhanced) on its
