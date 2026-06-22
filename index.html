@@ -20013,23 +20013,27 @@ function Spin(){
   return React.createElement("span",{style:{width:10,height:10,borderRadius:"50%",border:"2px solid rgba(255,255,255,0.2)",borderTopColor:"#fff",display:"inline-block",animation:"spin 0.5s linear infinite"}});
 }
 
-// Batch output now renders at the original photo's full resolution (see
-// analysisAgent) instead of a capped 2400px preview, so both halves of the
-// memory budget changed:
-//  - PEAK per-photo working set: processPixels' internal snapshot buffer
-//    (_snapshot) is a single reused scratch array, not a fresh allocation
-//    per photo, so it doesn't accumulate -- but it's now sized to the
-//    full-res image (e.g. ~200MB raw for a 48MP photo) instead of a
-//    2400px-capped one, so each photo's transient peak is meaningfully
-//    bigger than before.
-//  - CUMULATIVE growth: one entry per finished photo stays in `results`
-//    (blob + tiny thumbnail) until exported. The blob is now a full-res
-//    JPEG -- roughly 3-8MB for typical 12-24MP photos, more for very high
-//    megapixel originals -- instead of the ~1-3MB a 2400px cap produced.
-// Lowered from 80 back down to keep both numbers comfortably inside even
-// iOS Safari's tighter per-tab budget on older/low-RAM devices; large
-// libraries still work fine, just split across more than one run.
-const BATCH_PHOTO_LIMIT = 30;
+// Batch output renders at the original photo's full resolution (see
+// analysisAgent), so this is sized for the worst realistic case -- every
+// photo in the batch at 48MP (e.g. 8064x6048, current flagship phone
+// cameras) -- rather than an average mixed-resolution library:
+//  - PEAK per-photo working set: a 48MP raw buffer is ~186MB
+//    (8064*6048*4 bytes), and the pipeline holds several buffers near that
+//    size at once while one photo is mid-render (source ImageData, the
+//    processed output array, processPixels' reused despeckle scratch
+//    buffer, the output canvas) -- realistically ~600-700MB transient
+//    while the CURRENT photo is processing.
+//  - CUMULATIVE growth: one entry per already-finished photo stays in
+//    `results` (blob + tiny thumbnail) until exported. A 48MP JPEG at
+//    0.92 quality typically lands ~10-20MB.
+// Budgeting a conservative ~1.2GB usable ceiling (well under the ~1.5-2GB
+// some modern iPhones tolerate, to also cover older/low-RAM devices)
+// leaves ~500MB of headroom for already-finished photos once the current
+// photo's own peak is subtracted -- divided by a ~15MB average blob, that
+// supports a batch in the low 30s. Rounded down for margin since this is
+// a heuristic, not something profiled on real hardware; large libraries
+// of high-megapixel photos still work fine, just split across more runs.
+const BATCH_PHOTO_LIMIT = 20;
 
 // Goal-based batch agent UI: pick a goal + a pile of photos, tap Run, and
 // every photo gets analyzed/corrected (and optionally HDR-enhanced) on its
