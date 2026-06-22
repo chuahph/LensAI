@@ -17495,7 +17495,15 @@ function analyzeImage(data) {
   // pavement, and water as sky. Now requires real blue dominance (b>r*1.10
   // AND meaningful absolute blueness), with a separate carve-out for bright
   // near-neutral cloud pixels (which aren't blue but are still "sky").
-  let skyCount=0, skyR=0, skyG=0, skyB=0, skyN=0;
+  // isCloudLike alone (no blue requirement) is also exactly what a bright
+  // plate, napkin, or marble countertop near the top of a close-up food
+  // shot looks like -- lum>200, low channel spread -- so it was inflating
+  // skyRatio/hasSky on plenty of food photos with no sky at all, which then
+  // fed straight into the scene/urban rules below that gate on hasSky.
+  // blueSkyCount tracks the real-blue-dominance signal on its own so
+  // callers that specifically need "is there an actual outdoor sky here"
+  // (not just "is there a bright neutral patch") can ask for that instead.
+  let skyCount=0, skyR=0, skyG=0, skyB=0, skyN=0, blueSkyCount=0;
   for (let y=0;y<h*0.55;y++) {
     for (let x=0;x<w;x++) {
       const i=(y*w+x)*4;
@@ -17505,6 +17513,7 @@ function analyzeImage(data) {
       const blueness=b-Math.max(r,g);
       const isBlueSky = b>r*1.10 && b>=g*1.02 && blueness>12 && lum>45 && lum<245;
       const isCloudLike = lum>200 && (maxc-minc)<25;
+      if (isBlueSky) blueSkyCount++;
       if (isBlueSky || isCloudLike) {
         skyCount++; skyR+=r; skyG+=g; skyB+=b; skyN++;
       }
@@ -17512,6 +17521,7 @@ function analyzeImage(data) {
   }
   const skyRatio=skyCount/(w*h*0.55);
   const hasSky=skyRatio>0.06;
+  const blueSkyRatio=blueSkyCount/(w*h*0.55);
   const skyAvgR=skyN>0?skyR/skyN:0;
   const skyAvgB=skyN>0?skyB/skyN:0;
   // Sky quality: how blue is the sky? (B-R gap, higher=bluer)
@@ -17555,22 +17565,26 @@ function analyzeImage(data) {
   let scene='people';
   if (isNight)                                          scene='night';
   else if (gAvg>rAvg*1.06&&gAvg>bAvg*1.05&&gAvg>80&&!isStructured) scene='nature';
-  // Food's warm RGB box (rAvg>155, mid-range gAvg, low bAvg) is also exactly
-  // what a sunset/golden-hour sky looks like (warm orange, little blue) and
-  // what a warm-lit brick/terracotta building looks like -- this box used to
-  // fire before sky was even considered, so those landscape shots got tagged
-  // scene='food' outright. That wrong tag then fed straight into golden
-  // hour's own 70%-damping rule below (`scene==="food"`), crushing golden
-  // hour's score on the exact sunset photos it should win. Gated on !hasSky
-  // the same way nature's own green-dominance check above already is.
-  // NOTE: deliberately NOT gated on !isStructured -- food photography very
-  // commonly has axis-aligned structure (patterned plates, checkered cloths,
-  // cutting-board grain, tiled counters) that isn't "wrong" for food the way
-  // a brick building is. Excluding those left scene='food' unreachable for
-  // any plated/structured shot, so urban's ungated isStructured rule below
-  // won outright. Sky-less exterior brick/terracotta shots are rare and the
-  // !hasSky gate alone already excludes the common (sky-visible) case.
-  else if (!hasSky&&rAvg>155&&gAvg>95&&bAvg<95) scene='food';
+  // Food's old warm RGB box (rAvg>155, mid-range gAvg, low bAvg) only caught
+  // golden/roasted dishes -- salads, pasta, white-plated or cool-lit food
+  // never matched it, and even warm dishes were excluded outright by a
+  // single sliver of window/sky behind the table (the old !hasSky gate).
+  // Both gaps left those shots with no scene tag at all, falling straight
+  // through to urban's own isStructured rule below (which fires on the
+  // checkered tablecloth/patterned plate/tiled counter most food shots
+  // have, with no food-awareness at all) or nature's sky-gated rules.
+  // Replaced with a broader, more food-specific test: little-to-no REAL
+  // sky (blueSkyRatio<0.06, not the looser combined skyRatio/hasSky --
+  // those also count any bright neutral patch, e.g. a plate or napkin near
+  // the top of a close-up shot, as "sky", which would wrongly disqualify
+  // plenty of genuine food photos), not a cool/blue cast (food lighting
+  // skews warm-to-neutral, almost never cool), some real color (avgSat>22
+  // -- the sauces/garnish/varied ingredients real food almost always has,
+  // which plain concrete/steel/grey backgrounds don't), and no dominant
+  // face (so a warm, saturated portrait doesn't get relabeled).
+  // Deliberately still not gated on isStructured -- see the urban rule
+  // below, which now requires hasSky instead so it no longer collides here.
+  else if (blueSkyRatio<0.06&&!isCoolCast&&!hasFace&&avgSat>22&&lumAvg>70&&lumAvg<220) scene='food';
   else if (hasBigFace&&rAvg>gAvg&&rAvg>bAvg)          scene='portrait';
   else if (hasSky&&isStructured)                       scene='urban';
   else if (hasSky&&contrast>45&&!isStructured)         scene='nature';
@@ -17594,7 +17608,7 @@ function analyzeImage(data) {
     hiPct:pctBlown, shPct:pctBlocked,
     isUnderexposed, isOverexposed, isHighContrast,
     isHazy, isNight, isBlurry,
-    hasSky, skyRatio, skyBlueDepth, isWashedSky,
+    hasSky, skyRatio, blueSkyRatio, skyBlueDepth, isWashedSky,
     hasFace, hasBigFace, isWarmCast, isCoolCast, isGreenTint, isMagentaTint,
     rDev, bDev, gDev, tempAxis, tintAxis,
     wbCorrection: isCoolCast?Math.min(20,(-tempAxis)*0.5):isWarmCast?Math.max(-20,(-tempAxis)*0.5):0,
@@ -19266,6 +19280,89 @@ async function batchProcessFile(file, goalId, onStage, opts) {
   };
 }
 
+// --- EXIF date writing ---------------------------------------------------
+// canvas.toBlob() never carries metadata over from the source file -- every
+// exported JPEG (single Save, batch single-download, zip-all) comes out
+// with zero EXIF, no DateTimeOriginal/DateTimeDigitized at all. Apps that
+// expect that tag and fall back to a bogus default instead of "now" when
+// it's missing (rather than the file's actual save time) is exactly why a
+// freshly-exported photo can show the wrong date. Writing a minimal EXIF
+// block with the real save moment fixes that without touching a single
+// pixel.
+function _exifDateString(d) {
+  const p = n => String(n).padStart(2, "0");
+  return d.getFullYear() + ":" + p(d.getMonth() + 1) + ":" + p(d.getDate()) + " " +
+    p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+
+// Builds a minimal-but-valid EXIF APP1 segment: a TIFF IFD0 with a DateTime
+// tag, plus an Exif sub-IFD with DateTimeOriginal/DateTimeDigitized (the
+// tags photo apps actually read for "date taken") -- all three pointing at
+// one shared ASCII date string so the file only carries it once.
+function _buildExifApp1(date) {
+  const dateBytes = new TextEncoder().encode(_exifDateString(date) + "\0"); // 20 bytes, ASCII incl. NUL
+  const IFD0 = 8, EXIFIFD = IFD0 + 30, DATEOFF = EXIFIFD + 30;
+  const tiff = new DataView(new ArrayBuffer(DATEOFF + dateBytes.length));
+  tiff.setUint8(0, 0x49); tiff.setUint8(1, 0x49); // "II" -- little-endian
+  tiff.setUint16(2, 42, true);
+  tiff.setUint32(4, IFD0, true);
+
+  tiff.setUint16(IFD0, 2, true); // IFD0: 2 entries
+  let e = IFD0 + 2;
+  tiff.setUint16(e, 0x0132, true); tiff.setUint16(e + 2, 2, true); // DateTime, ASCII
+  tiff.setUint32(e + 4, dateBytes.length, true); tiff.setUint32(e + 8, DATEOFF, true);
+  e += 12;
+  tiff.setUint16(e, 0x8769, true); tiff.setUint16(e + 2, 4, true); // Exif IFD pointer, LONG
+  tiff.setUint32(e + 4, 1, true); tiff.setUint32(e + 8, EXIFIFD, true);
+  e += 12;
+  tiff.setUint32(e, 0, true); // IFD0 next = none
+
+  tiff.setUint16(EXIFIFD, 2, true); // Exif sub-IFD: 2 entries
+  e = EXIFIFD + 2;
+  tiff.setUint16(e, 0x9003, true); tiff.setUint16(e + 2, 2, true); // DateTimeOriginal
+  tiff.setUint32(e + 4, dateBytes.length, true); tiff.setUint32(e + 8, DATEOFF, true);
+  e += 12;
+  tiff.setUint16(e, 0x9004, true); tiff.setUint16(e + 2, 2, true); // DateTimeDigitized
+  tiff.setUint32(e + 4, dateBytes.length, true); tiff.setUint32(e + 8, DATEOFF, true);
+  e += 12;
+  tiff.setUint32(e, 0, true); // Exif IFD next = none
+
+  new Uint8Array(tiff.buffer).set(dateBytes, DATEOFF);
+
+  const exifHeader = new Uint8Array([0x45, 0x78, 0x69, 0x66, 0, 0]); // "Exif\0\0"
+  const payload = new Uint8Array(exifHeader.length + tiff.byteLength);
+  payload.set(exifHeader, 0);
+  payload.set(new Uint8Array(tiff.buffer), exifHeader.length);
+
+  const seg = new Uint8Array(4 + payload.length);
+  seg[0] = 0xFF; seg[1] = 0xE1;
+  const segLen = payload.length + 2; // length field itself counts towards its own value
+  seg[2] = (segLen >> 8) & 0xFF; seg[3] = segLen & 0xFF;
+  seg.set(payload, 4);
+  return seg;
+}
+
+// Inserts right after SOI (FFD8), ahead of whatever else the canvas
+// encoder wrote (JFIF APP0, etc.) -- the position the JPEG spec requires
+// APP markers to occupy.
+function _insertExifIntoJpeg(bytes, app1) {
+  if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return bytes; // not a JPEG we recognize -- leave untouched
+  const out = new Uint8Array(2 + app1.length + (bytes.length - 2));
+  out.set(bytes.subarray(0, 2), 0);
+  out.set(app1, 2);
+  out.set(bytes.subarray(2), 2 + app1.length);
+  return out;
+}
+
+function addExifSaveDate(bytes) {
+  return _insertExifIntoJpeg(bytes, _buildExifApp1(new Date()));
+}
+
+async function addExifDateToBlob(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return new Blob([addExifSaveDate(bytes)], { type: "image/jpeg" });
+}
+
 // --- Export/Organize Agent: bundles finished results into one zip ------
 // Store-only (no compression) since the JPEGs inside are already
 // compressed -- keeps this to plain CRC32 + the ZIP local/central-
@@ -19434,7 +19531,7 @@ async function exportOrganizeAgent(results, files, onProgress) {
       } else {
         usedPaths.set(path, 1);
       }
-      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const bytes = addExifSaveDate(new Uint8Array(await blob.arrayBuffer()));
       entries.push({ path, bytes });
       done++;
       if (onProgress) onProgress(done, usable.length);
@@ -19563,10 +19660,17 @@ function autoSelectHDR(stats) {
   // --- Urban: now driven primarily by isStructured (axis-aligned edge
   // density), the actual architectural signal, instead of contrast/sky
   // alone which overlapped heavily with nature scoring before. ---
-  if (isStructured) scores.urban += 30;
+  // isStructured alone also fires on close-up grid/checkered patterns that
+  // have nothing to do with architecture -- a patterned plate, a checkered
+  // tablecloth, a tiled kitchen counter, all common in food photography.
+  // Real architectural structure overwhelmingly co-occurs with sky/horizon
+  // in frame; requiring hasSky here, the same way every other urban rule
+  // below already does, stops a structured tabletop/food shot with no sky
+  // in view from winning urban on edge geometry alone.
+  if (isStructured && hasSky) scores.urban += 30;
   if (scene === "urban") scores.urban += 25;
   if (hasSky && isStructured && avgSat < 25) scores.urban += 12; // concrete/steel
-  if (isHazy && isStructured) scores.urban += 8; // city haze, not fog -- requires structure too
+  if (isHazy && isStructured && hasSky) scores.urban += 8; // city haze, not fog (or kitchen steam) -- requires structure + sky too
   // Every other urban rule above requires isStructured -- this one didn't,
   // so a strong single horizon-line edge (sea horizon, mountain ridge,
   // a beach/coastal nature shot) could skew edgeDirectionality toward one
@@ -19580,12 +19684,19 @@ function autoSelectHDR(stats) {
   // No-sky rules elsewhere (snow, sports, macro) all exclude hasFace for the
   // same reason: a colorful, low-contrast indoor portrait (no sky, moderate
   // saturation from clothing/background) clears this "forest/foliage" box
-  // just as easily as actual foliage. This was the one without that gate.
-  if (!hasSky && avgSat > 20 && contrast < 60 && !isStructured && !hasFace) scores.nature += 10; // forest/foliage
+  // just as easily as actual foliage. Also excludes scene==="food" now --
+  // a colorful, unstructured plated dish (soup, gravy, a simple bowl shot)
+  // clears the same low-contrast/saturated box just as easily.
+  if (!hasSky && avgSat > 20 && contrast < 60 && !isStructured && !hasFace && scene !== "food") scores.nature += 10; // forest/foliage
   if (isHazy && !isStructured) scores.nature += 6; // fog/mist in nature, not urban haze
 
-  // --- Food: warm tones, close framing, no sky ---
-  if (scene === "food" && !hasSky) scores.food += 40;
+  // --- Food: warm-to-neutral tones, close framing, little-to-no sky ---
+  // scene==="food" is now the primary, broadened signal (see analyzeImage's
+  // skyRatio<0.15/!isCoolCast/avgSat-based test) -- the old `&& !hasSky`
+  // here was redundant with, and stricter than, the scene tag's own
+  // threshold, silently zeroing the score for food shots the classifier had
+  // already correctly tagged but which still had a sliver of sky in frame.
+  if (scene === "food") scores.food += 40;
   // Same gap as nature's no-sky rule above: warm incandescent/tungsten
   // lighting on a person indoors (no sky, moderate brightness) clears this
   // box with no actual food in frame.
@@ -20252,8 +20363,9 @@ function App() {
       // plus a second copy when later re-decoded via fetch) -- meaningfully
       // less peak memory on a large full-res export, where this is the
       // single biggest avoidable allocation in the whole pipeline.
-      const blob = await new Promise(resolve => exportCv.toBlob(resolve, "image/jpeg", 0.96));
+      let blob = await new Promise(resolve => exportCv.toBlob(resolve, "image/jpeg", 0.96));
       if (!blob) throw new Error("Could not encode exported image");
+      blob = await addExifDateToBlob(blob);
 
       // Name from the original file (so it's recognisable) but always append
       // "-edited" plus a timestamp: this is a brand-new export at a different
@@ -20519,7 +20631,7 @@ function BatchAgent({onClose}){
     setDownloadingIdx(idx);
     setExportError(null);
     try {
-      const blob=await fullRenderAgent(file, r.adj, r.stats);
+      const blob=await addExifDateToBlob(await fullRenderAgent(file, r.adj, r.stats));
       const url=URL.createObjectURL(blob);
       const a=document.createElement("a");
       a.href=url;
