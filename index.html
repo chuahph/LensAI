@@ -17640,11 +17640,16 @@ function analyzeImage(data) {
   }
   // faceCompact: skin is present AND localized rather than smeared across the
   // whole frame. This is the gate that separates a genuine face/person from a
-  // warm building, and is what portrait detection keys on below instead of
-  // the colour-only ratio. The 0.72 ceiling allows tight head-and-shoulders
-  // crops (which legitimately fill most cells) while still rejecting a fully
-  // skin-toned facade (skinSpread ~0.85-1.0).
-  const faceCompact=skinSpread<0.72;
+  // frame-filling warm SURFACE -- a building facade, OR a uniform warm dish
+  // (a beige sandwich, a club sandwich, plain toast) that covers the frame in
+  // bread/meat tones. Both share skin chromaticity, but a real face leaves
+  // non-skin surroundings (hair, clothing, background) so its skin occupies
+  // well under two-thirds of the grid: measured portraits sit at ~0.25-0.42,
+  // whereas a frame-filling sandwich/facade lands ~0.7-1.0. The 0.65 ceiling
+  // sits comfortably between, so those uniform warm dishes stop reading as a
+  // big face (which had them landing on Portrait) and fall through to food's
+  // warm-tone path instead, while genuine portraits are untouched.
+  const faceCompact=skinSpread<0.65;
   const hasFace=skinRatio>0.14 && faceCompact;
   // hasFace alone just means "skin tones are present somewhere in frame" --
   // fine for scene classification/portrait scoring, but too loose to gate
