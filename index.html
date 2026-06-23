@@ -17757,7 +17757,7 @@ function analyzeImage(data) {
   // selfie under torii read as "food" instead of "people". 0.58 sits between
   // the two populations so it excludes the artificial-red scenes while keeping
   // every real dish.
-  const foodWarmCast = blueSkyRatio<0.15 && isWarmCast && rAvg>gAvg && gAvg>rAvg*0.58 && !hasBigFace && lumAvg>70 && lumAvg<240;
+  const foodWarmCast = blueSkyRatio<0.15 && isWarmCast && rAvg>gAvg && gAvg>rAvg*0.58 && avgSat>22 && !hasBigFace && lumAvg>70 && lumAvg<240;
 
   // Outdoor/indoor architecture: a structured scene with real sky/open area
   // that is NOT a sharp close-up. The sharpness floor is what separates it
