@@ -19777,68 +19777,86 @@ function crc32(bytes) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function buildZipBlob(entries) {
-  const localParts = [], centralParts = [];
-  let offset = 0;
-  const dosTime = 0, dosDate = 0x21; // fixed 1980-01-01 -- fine for a throwaway export bundle
-  entries.forEach(({ path, bytes }) => {
-    const nameBytes = new TextEncoder().encode(path);
-    const crc = crc32(bytes);
-    const size = bytes.length;
+const ZIP_DOS_TIME = 0, ZIP_DOS_DATE = 0x21; // fixed 1980-01-01 -- fine for a throwaway export bundle
 
-    const local = new DataView(new ArrayBuffer(30));
-    local.setUint32(0, 0x04034b50, true);
-    local.setUint16(4, 20, true);
-    local.setUint16(6, 0, true);
-    local.setUint16(8, 0, true);
-    local.setUint16(10, dosTime, true);
-    local.setUint16(12, dosDate, true);
-    local.setUint32(14, crc, true);
-    local.setUint32(18, size, true);
-    local.setUint32(22, size, true);
-    local.setUint16(26, nameBytes.length, true);
-    local.setUint16(28, 0, true);
-    localParts.push(new Uint8Array(local.buffer), nameBytes, bytes);
+// ZipWriter -- builds the zip as a running Blob, one entry at a time,
+// instead of collecting every entry's raw bytes into a JS array and
+// concatenating them all in one shot at the end. A 100-photo "Download
+// All" held every full-res JPEG's Uint8Array in memory simultaneously
+// (entries.push({path,bytes}) for the whole batch) and then made ONE MORE
+// full copy of all of it when finally constructing the Blob -- on iOS
+// Safari's ~1-1.5GB tab ceiling, that double-held tail end of a big batch
+// was enough to get the tab silently killed/reloaded right as the export
+// finished (looks like the app "resetting" at 100% progress). Folding each
+// entry into a growing Blob as soon as it's ready means only the CURRENT
+// photo's bytes are ever JS-heap-resident; the accumulated Blob itself is
+// typically backed by the browser's own (often disk/mmap-backed, not pure
+// JS-heap) blob storage, which is what actually relieves the peak.
+function ZipWriter() {
+  this.blob = new Blob([]);
+  this.centralParts = [];
+  this.offset = 0;
+  this.count = 0;
+}
+ZipWriter.prototype.add = function (path, bytes) {
+  const nameBytes = new TextEncoder().encode(path);
+  const crc = crc32(bytes);
+  const size = bytes.length;
 
-    const central = new DataView(new ArrayBuffer(46));
-    central.setUint32(0, 0x02014b50, true);
-    central.setUint16(4, 20, true);
-    central.setUint16(6, 20, true);
-    central.setUint16(8, 0, true);
-    central.setUint16(10, 0, true);
-    central.setUint16(12, dosTime, true);
-    central.setUint16(14, dosDate, true);
-    central.setUint32(16, crc, true);
-    central.setUint32(20, size, true);
-    central.setUint32(24, size, true);
-    central.setUint16(28, nameBytes.length, true);
-    central.setUint16(30, 0, true);
-    central.setUint16(32, 0, true);
-    central.setUint16(34, 0, true);
-    central.setUint16(36, 0, true);
-    central.setUint32(38, 0, true);
-    central.setUint32(42, offset, true);
-    centralParts.push(new Uint8Array(central.buffer), nameBytes);
+  const local = new DataView(new ArrayBuffer(30));
+  local.setUint32(0, 0x04034b50, true);
+  local.setUint16(4, 20, true);
+  local.setUint16(6, 0, true);
+  local.setUint16(8, 0, true);
+  local.setUint16(10, ZIP_DOS_TIME, true);
+  local.setUint16(12, ZIP_DOS_DATE, true);
+  local.setUint32(14, crc, true);
+  local.setUint32(18, size, true);
+  local.setUint32(22, size, true);
+  local.setUint16(26, nameBytes.length, true);
+  local.setUint16(28, 0, true);
+  this.blob = new Blob([this.blob, new Uint8Array(local.buffer), nameBytes, bytes], { type: "application/zip" });
 
-    offset += 30 + nameBytes.length + size;
-  });
+  const central = new DataView(new ArrayBuffer(46));
+  central.setUint32(0, 0x02014b50, true);
+  central.setUint16(4, 20, true);
+  central.setUint16(6, 20, true);
+  central.setUint16(8, 0, true);
+  central.setUint16(10, 0, true);
+  central.setUint16(12, ZIP_DOS_TIME, true);
+  central.setUint16(14, ZIP_DOS_DATE, true);
+  central.setUint32(16, crc, true);
+  central.setUint32(20, size, true);
+  central.setUint32(24, size, true);
+  central.setUint16(28, nameBytes.length, true);
+  central.setUint16(30, 0, true);
+  central.setUint16(32, 0, true);
+  central.setUint16(34, 0, true);
+  central.setUint16(36, 0, true);
+  central.setUint32(38, 0, true);
+  central.setUint32(42, this.offset, true);
+  this.centralParts.push(new Uint8Array(central.buffer), nameBytes);
 
-  const centralStart = offset;
+  this.offset += 30 + nameBytes.length + size;
+  this.count++;
+};
+ZipWriter.prototype.finish = function () {
+  const centralStart = this.offset;
   let centralSize = 0;
-  centralParts.forEach(p => centralSize += p.length);
+  this.centralParts.forEach(p => centralSize += p.length);
 
   const end = new DataView(new ArrayBuffer(22));
   end.setUint32(0, 0x06054b50, true);
   end.setUint16(4, 0, true);
   end.setUint16(6, 0, true);
-  end.setUint16(8, entries.length, true);
-  end.setUint16(10, entries.length, true);
+  end.setUint16(8, this.count, true);
+  end.setUint16(10, this.count, true);
   end.setUint32(12, centralSize, true);
   end.setUint32(16, centralStart, true);
   end.setUint16(20, 0, true);
 
-  return new Blob([...localParts, ...centralParts, new Uint8Array(end.buffer)], { type: "application/zip" });
-}
+  return new Blob([this.blob, ...this.centralParts, new Uint8Array(end.buffer)], { type: "application/zip" });
+};
 
 // Groups results into folder-like zip paths -- locationGroupAgent's
 // original snapshot info (EXIF GPS reverse-geocoded to a place name, then
@@ -19864,7 +19882,7 @@ async function exportOrganizeAgent(results, files, onProgress) {
     byFile.get(r.fileIndex).push(r);
   });
   const fileIndexes = [...byFile.keys()];
-  const entries = [];
+  const zip = new ZipWriter();
   // Real photo names collide constantly once origFolder falls back to
   // scene-group (no EXIF location/date, no folder picker -- the common
   // case for individually-picked phone photos): IMG_1234.jpg from two
@@ -19927,19 +19945,19 @@ async function exportOrganizeAgent(results, files, onProgress) {
         usedPaths.set(path, 1);
       }
       const bytes = addExifSaveDate(new Uint8Array(await blob.arrayBuffer()));
-      entries.push({ path, bytes });
+      zip.add(path, bytes);
       done++;
       if (onProgress) onProgress(done, usable.length);
     }
   }
   // Every full-res render is done; the scratch canvas (192MB at 48MP) and
   // processPixels' snapshot buffer (another 192MB) are no longer needed.
-  // Free them BEFORE assembling the final zip Blob, since buildZipBlob
-  // concatenates every entry's bytes into one new Blob -- briefly holding
-  // both the source byte arrays and the combined copy. Reclaiming ~384MB
-  // right at that last allocation spike keeps the peak down on iOS.
+  // Free them before finalizing the zip (appending the central directory),
+  // which makes one last small Blob -- the bulk of the data was already
+  // folded into zip.blob entry-by-entry above, not held as a separate
+  // from-scratch array of every photo's bytes.
   _releaseScratch();
-  return buildZipBlob(entries);
+  return zip.finish();
 }
 
 // Vertical keystone correction: warps the image into a trapezoid (one edge
