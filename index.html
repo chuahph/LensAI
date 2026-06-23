@@ -18993,7 +18993,7 @@ function computeHDRAdj(baseAdj, presetId, stats) {
 //   cullAgent           -- scene stats -> quality flags (blur/exposure)
 //   sceneSorterAgent    -- scene stats -> a display group ("nature","food",...)
 //   locationGroupAgent  -- original file -> EXIF GPS place name/date, or its source folder
-//   autoGoalsAgent      -- scene stats -> "smartHDR" if it scores highest, else corrections-only if a big face is in frame, else autoSelectHDR's pick
+//   autoGoalsAgent      -- scene stats -> "smartHDR" if it scores highest or a big face is in frame, else autoSelectHDR's pick
 //   goalDetectionAgent  -- goal id ("auto"/"fullAuto"/"none"/preset id) + stats -> hdrId
 //   correctionAgent     -- scene stats -> baseline correction adjustments
 //   enhancementAgent    -- baseline adj + hdrId -> final adj (HDR merged in)
@@ -19409,13 +19409,17 @@ async function locationGroupAgent(file) {
 // that general-purpose dynamic-range rescue is the safe choice. Otherwise
 // a more specific preset scored higher -- but if a big, dominant face is
 // in frame, a scene-specific preset risks the wrong look on skin tones, so
-// fall back to plain corrections instead of applying it. With no
-// dominant face, the higher-scoring preset is trusted and used as-is.
+// fall back to Smart HDR instead (its own hasFace tuning in computeHDRAdj
+// already caps saturation/dehaze and boosts warmth/shadows for skin, so
+// it's face-safe on its own -- no need for a third "corrections only"
+// outcome). With no dominant face, the higher-scoring preset is trusted
+// and used as-is. This keeps Auto Select's result strictly a choice
+// between Smart HDR and whatever Auto-Detect per Photo scored highest.
 function autoGoalsAgent(stats) {
   if (!stats) return "smartHDR";
   const best = autoSelectHDR(stats);
   if (best === "smartHDR") return "smartHDR";
-  if (stats.hasBigFace) return null;
+  if (stats.hasBigFace) return "smartHDR";
   return best;
 }
 
@@ -20969,7 +20973,7 @@ function BatchAgent({onClose}){
   const STAGE_LABELS={decode:"Reading photo",analyze:"Analyzing scene",cull:"Checking quality",goal:"Selecting goal",correct:"Computing corrections",enhance:"Applying HDR",render:"Rendering output",qa:"Reviewing result"};
 
   const GOALS=[
-    {id:"fullAuto",label:"Auto Select",desc:"Runs corrections, then checks Auto-Detect per Photo's scoring: uses Smart HDR if it scores highest, falls back to Corrections only if a big face is detected and a different preset scored higher, otherwise uses that higher-scoring preset."},
+    {id:"fullAuto",label:"Auto Select",desc:"Runs corrections, then checks Auto-Detect per Photo's scoring: uses Smart HDR if it scores highest or a big face is detected, otherwise uses Auto-Detect per Photo's higher-scoring preset."},
     {id:"auto",label:"Auto-Detect per Photo",desc:"Scores every HDR preset against this specific photo's scene, lighting, and color signals, then applies whichever preset scores highest."},
     {id:"none",label:"Corrections only",desc:"Applies the baseline Correction Agent (exposure, white balance, dehaze, etc.) without layering on any HDR preset."},
     ...HDR_PRESETS.map(h=>({id:h.id,label:h.label,desc:{
