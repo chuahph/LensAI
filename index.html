@@ -17772,7 +17772,14 @@ function analyzeImage(data) {
   // foodWarmCast, and (b) claim the scene for Urban ahead of the People
   // branches so a street shot with a few distant pedestrians isn't called
   // People.
-  const isArchitectural = hasSky && isStructured && sharpness < 52;
+  const isArchitectural = hasSky && isStructured &&
+    (sharpness < 52 ||
+    // A grid-collage of several unrelated photos (e.g. a messaging-app
+    // share-sheet export bundling multiple street shots into one frame)
+    // averages into a sky+structure signature too, but lights up far more
+    // hue bins than any single real scene -- a genuine dish or facade
+    // tops out at 4 in calibration, a multi-photo collage measured 6.
+    hueVariety >= 6);
 
   let scene='people';
   if (isNight)                                          scene='night';
@@ -20313,7 +20320,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-23 02:26";
+const APP_BUILD = "2026-06-23 02:46";
 
 function App() {
   const canvasRef    = useRef(null);
