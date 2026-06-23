@@ -19935,7 +19935,9 @@ async function exportOrganizeAgent(results, files, onProgress) {
     const huge = image.width * image.height > PREFETCH_MAX_PX;
     if (!huge && i + 1 < fileIndexes.length) nextBitmap = decodeAgent(files[fileIndexes[i + 1]]);
     const fullData = drawFullResFromBitmap(image);
-    for (const r of byFile.get(fileIndex)) {
+    const variants = byFile.get(fileIndex);
+    for (let vi = 0; vi < variants.length; vi++) {
+      const r = variants[vi];
       // renderFullFromData's processPixels step is a synchronous, unbroken
       // scan over every pixel (denoise/structure/sharpen/vignette passes) --
       // on a 48MP photo that's 20-25+ seconds with the main thread fully
@@ -19948,7 +19950,19 @@ async function exportOrganizeAgent(results, files, onProgress) {
       // real macrotask yield after every variant guarantees the browser
       // gets a turn to repaint the live "Zipping X/Y" progress and reset its
       // hang detector, even though the total wall-clock time is unchanged.
-      const blob = await renderFullFromData(fullData, r.adj, r.stats);
+      //
+      // renderFullFromData mutates its input in place (see its own comment)
+      // -- fine for the common case of one goal per photo, but a batch with
+      // more than one goal selected reuses this same decoded `fullData`
+      // across every variant of the photo, so the 2nd+ variant would
+      // otherwise get processed on top of the 1st variant's already-
+      // adjusted pixels instead of the original decode, silently compounding
+      // every adjustment. Only the LAST variant can safely consume the
+      // shared buffer in place; every earlier one renders from a clone.
+      const src = vi < variants.length - 1
+        ? new ImageData(new Uint8ClampedArray(fullData.data), fullData.width, fullData.height)
+        : fullData;
+      const blob = await renderFullFromData(src, r.adj, r.stats);
       await new Promise(res => setTimeout(res, 0));
       const stem = (r.name || "photo").replace(/\.[^/.]+$/, "");
       const folder = r.origFolder || r.group || "misc";
@@ -20458,7 +20472,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-23 18:35";
+const APP_BUILD = "2026-06-23 18:52";
 
 function App() {
   const canvasRef    = useRef(null);
