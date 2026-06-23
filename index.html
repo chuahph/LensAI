@@ -19404,27 +19404,62 @@ async function locationGroupAgent(file) {
   return null;
 }
 
-// Auto Select's confidence floor for the "Corrections only" candidate
-// below -- the same bar autoSelectHDR itself uses to decide a scene match
-// is too weak to trust (see scoreHDRPresets' bestScore<15 fallback).
-const CORRECTIONS_ONLY_SCORE = 15;
+// Each scene preset's realistic maximum raw score in scoreHDRPresets --
+// every one of its OWN contributing rules firing at once (excluding rules
+// that are mutually exclusive, e.g. nature's hasSky vs !hasSky branches
+// can't both fire), before any cross-preset damping. Computed directly
+// from the bonus values above. Without this, Auto Select's 3-way score-off
+// below compared raw scores straight across presets with very different
+// point budgets (night tops out at 85, macro at 35) -- a confidently-
+// detected macro/golden/sports/people shot could never outscore Smart
+// HDR's own dynamic-range math just because its preset has fewer/smaller
+// scoring rules, regardless of how strong its actual signal was. Dividing
+// each candidate's raw score by its own ceiling puts every candidate back
+// onto the same 0-100 scale before comparing.
+const PRESET_MAX_SCORE = {
+  nature: 61, people: 44, food: 62, urban: 83, night: 85,
+  sports: 40, portrait: 70, macro: 35, golden: 40, smartHDR: 70, snow: 63,
+};
 
-// Three-way score-off, all on the same point scale scoreHDRPresets already
-// computes: Smart HDR's own raw score, whatever preset Auto-Detect per
-// Photo scored highest (which can itself be Smart HDR), and a Corrections-
-// only baseline pinned to the same minimum-confidence floor autoSelectHDR
-// uses for its own low-confidence fallback. Highest score wins outright --
-// no special-cased face fallback needed anymore, since Smart HDR is
+// Real evidence that plain Corrections (exposure/WB/dehaze baseline, no
+// HDR preset layered on) is the right call for THIS photo -- not just "no
+// preset cleared an arbitrary floor" (the old behavior), which gave
+// Corrections-only no actual signal of its own and let incidental noise in
+// any one preset's rules beat it by default. Returns a value already on
+// the same 0-100 scale the normalized candidates below use (no further
+// division), deliberately capped low: being technically clean (well
+// exposed, no haze, no cast) is common to plenty of photos that still
+// genuinely benefit from a specific preset's *look* -- it's evidence
+// against needing a dynamic-range RESCUE or a color-cast correction
+// specifically, not evidence that no preset's content/style match is
+// real. The 15-point baseline mirrors autoSelectHDR's own minimum-
+// confidence bar for trusting a scene match; the capped 40-point ceiling
+// keeps a confidently-detected scene (which can clear 50%+ of its own,
+// much larger ceiling) free to outscore "merely technically fine."
+function correctionsOnlyScore(stats) {
+  let s = 15;
+  if (!stats.isUnderexposed && !stats.isOverexposed && stats.pctBlown < 3 && stats.pctBlocked < 8) s += 10;
+  if (!stats.isHazy && !stats.isWashedSky) s += 8;
+  if (!stats.isWarmCast && !stats.isCoolCast && !stats.isGreenTint && !stats.isMagentaTint) s += 7;
+  return s;
+}
+
+// Three-way score-off: Smart HDR's own score, whatever preset Auto-Detect
+// per Photo scored highest (which can itself be Smart HDR), and the
+// evidence-based Corrections-only score above -- each normalized to its
+// own ceiling so the comparison is fair regardless of how many/how big
+// each candidate's own scoring rules are. Highest normalized score wins
+// outright -- no special-cased face fallback needed, since Smart HDR is
 // already damped 50% on faces and Portrait/People already carry their own
 // hasBigFace bonuses, so a dominant face's safety is already baked into
-// the raw scores being compared.
+// the raw scores being normalized and compared.
 function autoGoalsAgent(stats) {
   if (!stats) return "smartHDR";
   const { scores, best, bestScore } = scoreHDRPresets(stats);
   const candidates = [
-    { id: "smartHDR", score: scores.smartHDR },
-    { id: best, score: bestScore },
-    { id: null, score: CORRECTIONS_ONLY_SCORE },
+    { id: "smartHDR", score: scores.smartHDR / PRESET_MAX_SCORE.smartHDR * 100 },
+    { id: best, score: bestScore / PRESET_MAX_SCORE[best] * 100 },
+    { id: null, score: correctionsOnlyScore(stats) },
   ];
   let winner = candidates[0];
   for (let i = 1; i < candidates.length; i++) {
