@@ -19629,28 +19629,41 @@ function qaAgent(postStats) {
   return { flagged: reasons.length > 0, reasons };
 }
 
-async function batchProcessFile(file, goalId, onStage, opts) {
-  const { skipFlagged, applyCorrections = true } = opts || {};
+// decodeAgent/analysisAgent/sceneSorterAgent/locationGroupAgent/cullAgent are
+// all goal-independent -- a batch run with multiple goals selected used to
+// repeat this whole step (including a reverse-geocode network call) once per
+// goal per photo instead of once per photo, multiplying both wait time and
+// network calls by the number of goals selected. analyzeFileForBatch does it
+// exactly once per photo; batchProcessFile below then runs only the
+// goal-dependent stages per goal, reusing the result.
+async function analyzeFileForBatch(file, onStage) {
   const note = s => onStage && onStage(s);
   note("decode");
   const image = await decodeAgent(file);
   note("analyze");
   const { previewData, stats } = analysisAgent(image);
   // analysisAgent already copied everything it needs out into
-  // `previewData`/`stats` -- nothing downstream in this function touches
-  // `image` again (the full-resolution pixels are only re-decoded later,
-  // on demand, by fullRenderAgent). An ImageBitmap (the fast path
-  // decodeAgent now prefers) holds its own large decoded pixel buffer
-  // that, unlike a plain <img>, browsers don't promise to release until
-  // close() is called explicitly -- left to GC timing, that buffer can
-  // pile up across a batch loop the same way the unreleased canvas
-  // backing stores did before. Close it the moment it's no longer needed
-  // instead of waiting on GC.
+  // `previewData`/`stats` -- nothing downstream touches `image` again (the
+  // full-resolution pixels are only re-decoded later, on demand, by
+  // fullRenderAgent). An ImageBitmap (the fast path decodeAgent now
+  // prefers) holds its own large decoded pixel buffer that, unlike a plain
+  // <img>, browsers don't promise to release until close() is called
+  // explicitly -- left to GC timing, that buffer can pile up across a
+  // batch loop the same way the unreleased canvas backing stores did
+  // before. Close it the moment it's no longer needed instead of waiting
+  // on GC.
   if (typeof image.close === "function") image.close();
   const group = sceneSorterAgent(stats);
   const origFolder = await locationGroupAgent(file);
   note("cull");
   const cull = cullAgent(stats);
+  return { previewData, stats, group, origFolder, cull };
+}
+
+async function batchProcessFile(file, goalId, onStage, opts, analyzed) {
+  const { skipFlagged, applyCorrections = true } = opts || {};
+  const note = s => onStage && onStage(s);
+  const { previewData, stats, group, origFolder, cull } = analyzed || await analyzeFileForBatch(file, onStage);
   if (cull.flagged && skipFlagged) {
     return { name: file.name, goalId, group, origFolder, culled: true, cullReasons: cull.reasons };
   }
@@ -20472,7 +20485,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-23 18:52";
+const APP_BUILD = "2026-06-23 19:11";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21138,8 +21151,18 @@ function BatchAgent({onClose}){
     let done=0;
     try {
       for(let i=0;i<files.length;i++){
+        // decodeAgent/analysisAgent/locationGroupAgent (a reverse-geocode
+        // network call) are goal-independent -- run them once per photo
+        // here instead of once per goal below, so selecting multiple goals
+        // doesn't multiply decode time and network calls by goals.length.
+        let analyzed = null, analyzeErr = null;
+        try { analyzed = await withScratchLock(()=>analyzeFileForBatch(files[i], setStage)); }
+        catch(err) { analyzeErr = err; }
         for(let j=0;j<goals.length;j++){
-          try { out.push({...await withScratchLock(()=>batchProcessFile(files[i], goals[j], setStage, {skipFlagged})), fileIndex:i}); }
+          try {
+            if (analyzeErr) throw analyzeErr;
+            out.push({...await withScratchLock(()=>batchProcessFile(files[i], goals[j], setStage, {skipFlagged}, analyzed)), fileIndex:i});
+          }
           catch(err){
             console.error("[LensAI] Batch item failed:", files[i].name, goals[j], err);
             out.push({ name: files[i].name, goalId: goals[j], fileIndex:i, error: true });
