@@ -20416,7 +20416,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-23 12:42";
+const APP_BUILD = "2026-06-23 12:57";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21230,6 +21230,9 @@ function BatchAgent({onClose}){
   // downloadOne (single explicit user click per file) is unaffected.
   const downloadAll=async()=>{
     setZipping(true); setZipProgress({done:0,total:0}); setExportError(null);
+    acquireWakeLock(); // keep the screen awake for the whole zip build -- iOS
+    // throttles JS in a backgrounded/sleeping tab, which silently slows
+    // (or stalls) the full-res render + zip-assembly loop below.
     try {
       const blob=await withScratchLock(()=>exportOrganizeAgent(results, files, (done,total)=>setZipProgress({done,total})));
       const url=URL.createObjectURL(blob);
@@ -21244,7 +21247,7 @@ function BatchAgent({onClose}){
       // or the app's global handler covers the whole UI with a reload
       // overlay over what should just be a failed export.
       setExportError("Zip export failed -- "+(err&&err.message||"try again")+". Try a smaller batch or fewer goals.");
-    } finally { setZipping(false); }
+    } finally { setZipping(false); releaseWakeLock(); }
   };
 
   const doneCount=results.filter(r=>!r.error&&!r.culled).length;
