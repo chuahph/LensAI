@@ -20458,7 +20458,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-23 18:11";
+const APP_BUILD = "2026-06-23 18:35";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21058,6 +21058,16 @@ function BatchAgent({onClose}){
   const [editPreviewFor,setEditPreviewFor]=useState(null);
   const [editBusy,setEditBusy]=useState(false);
   const [editFullUrl,setEditFullUrl]=useState(null);
+  // Reanalyze used to call full batchProcessFile (decode + analyze the
+  // whole file from scratch) AND fullRenderAgent (a second, full-resolution
+  // decode) on every single preset/correction click -- two full image
+  // decodes per click made flipping through HDR presets feel sluggish,
+  // especially on large photos, even though decode/analyze/location/cull
+  // never change across clicks on the *same* photo (only the rendered
+  // output depends on which preset/corrections are picked). Cache the
+  // decoded preview+full-res pixel data here, once per opened photo, and
+  // reuse it for every later click until a different photo is opened.
+  const editDecodeRef = useRef({ fileIndex: null, previewData: null, stats: null, fullData: null });
   // Tracks which single result (by index into `results`) is currently
   // having its full-resolution photo rendered for download -- batch
   // results only ever carry a preview-resolution thumbnail, so a single
@@ -21182,6 +21192,35 @@ function BatchAgent({onClose}){
   // demand instead (results only carry adj/stats, not a pre-rendered
   // full-res blob), so the preview (and any difference between presets)
   // is shown at real quality.
+  // Decodes `file` exactly once per photo opened in the modal (a native
+  // decode of the original, plus the full-res draw -- the two expensive
+  // steps that have nothing to do with which preset/corrections are
+  // picked), caching the result so every later preset/correction click on
+  // the *same* photo reuses it instead of redecoding from scratch. Caller
+  // must hold the scratch lock, since this draws into the shared scratch
+  // canvas like the rest of the pipeline.
+  const ensureEditDecode = async (fileIndex, file) => {
+    const cache = editDecodeRef.current;
+    if (cache.fileIndex === fileIndex && cache.previewData && cache.fullData) return cache;
+    const image = await decodeAgent(file);
+    const { previewData, stats } = analysisAgent(image);
+    // Mirrors drawFullResFromBitmap's sizing, but doesn't close `image`
+    // until after this draw -- drawFullResFromBitmap closes it
+    // immediately, which would leave nothing for analysisAgent above to
+    // have drawn from if the order were reversed.
+    const FULL_MAX = 12000;
+    let w = image.width, h = image.height;
+    if (w > FULL_MAX) { h = Math.round(h * FULL_MAX / w); w = FULL_MAX; }
+    if (h > FULL_MAX) { w = Math.round(w * FULL_MAX / h); h = FULL_MAX; }
+    const cv = _getScratch("A", w, h);
+    cv.getContext("2d").drawImage(image, 0, 0, w, h);
+    const fullData = cv.getContext("2d").getImageData(0, 0, w, h);
+    if (typeof image.close === "function") image.close();
+    const next = { fileIndex, previewData, stats, fullData };
+    editDecodeRef.current = next;
+    return next;
+  };
+
   useEffect(()=>{
     const shown = editIdx!=null ? (editPreview||results[editIdx]) : null;
     const file = shown ? files[shown.fileIndex] : null;
@@ -21197,7 +21236,15 @@ function BatchAgent({onClose}){
     // download) -- overlapping renders share the same scratch canvas/buffer
     // and corrupt or crash on large photos. Scratch is released afterward so
     // the ~192MB full-res buffers don't stay pinned across a string of edits.
-    withScratchLock(()=>fullRenderAgent(file, shown.adj, shown.stats)).then(blob=>{
+    withScratchLock(async ()=>{
+      const { fullData } = await ensureEditDecode(shown.fileIndex, file);
+      // renderFullFromData mutates its input in place (see its own
+      // comment) -- safe for a one-shot decode, but the cached fullData
+      // above is reused on every later click, so clone it here instead of
+      // handing over the shared buffer.
+      const clone = new ImageData(new Uint8ClampedArray(fullData.data), fullData.width, fullData.height);
+      return renderFullFromData(clone, shown.adj, shown.stats);
+    }).then(blob=>{
       if(cancelled) return;
       url=URL.createObjectURL(blob);
       setEditFullUrl(url);
@@ -21219,12 +21266,26 @@ function BatchAgent({onClose}){
     setEditCorrections(r.applyCorrections!==false);
     setEditPreview(null); setEditPreviewFor(null);
   };
-  const closeEdit=()=>{ if(editBusy) return; setEditIdx(null); setEditPreset(null); setEditPreview(null); setEditPreviewFor(null); };
+  const closeEdit=()=>{
+    if(editBusy) return;
+    setEditIdx(null); setEditPreset(null); setEditPreview(null); setEditPreviewFor(null);
+    // Releases the cached full-res buffer (up to ~192MB) the moment the
+    // modal closes instead of leaving it pinned until the next photo is
+    // opened overwrites it.
+    editDecodeRef.current = { fileIndex: null, previewData: null, stats: null, fullData: null };
+  };
   // Corrections (exposure/white balance/dehaze baseline) and HDR
   // enhancement are independent layers in the render pipeline -- this
   // re-renders with whichever combination of the two is currently picked,
   // so toggling either one is reflected together rather than one
   // replacing the other.
+  //
+  // Used to call full batchProcessFile (decode + analyze the whole file,
+  // re-geocode, re-cull) on every single click here -- none of those
+  // earlier stages depend on presetId/applyCorrections, only the stages
+  // below this comment do, so only those are re-run; decode/analyze is
+  // reused from ensureEditDecode's cache and the location/cull/group info
+  // is carried over unchanged from the original batch result.
   const reanalyzeEdit=async(presetId,applyCorrections)=>{
     if(editIdx==null) return;
     const r=results[editIdx];
@@ -21234,11 +21295,25 @@ function BatchAgent({onClose}){
     acquireWakeLock();
     try {
       // Serialized on the shared scratch like the preview render above --
-      // batchProcessFile's analysis/preview render draws into the same
-      // scratch canvas, so it must not run while a full-res preview render
-      // is still in flight.
-      const updated=await withScratchLock(()=>batchProcessFile(file, presetId, null, {skipFlagged:false, applyCorrections}));
-      setEditPreview({...updated, fileIndex:r.fileIndex});
+      // both draw into the same scratch canvas, so they must not overlap.
+      const { previewData, stats } = await withScratchLock(()=>ensureEditDecode(r.fileIndex, file));
+      const hdrId = goalDetectionAgent(presetId, stats);
+      const fallback = buildFallback(stats);
+      const baseAdj = applyCorrections ? correctionAgent(fallback) : blankAdj();
+      const finalAdj = enhancementAgent(baseAdj, hdrId, stats);
+      const { thumb, processed } = await withScratchLock(()=>renderAgent(previewData, finalAdj, stats));
+      const qa = qaAgent(analyzeExposureOnly(processed));
+      const preset = HDR_PRESETS.find(h => h.id === hdrId);
+      setEditPreview({
+        name: file.name, goalId: presetId, hdrId, applyCorrections,
+        group: r.group, origFolder: r.origFolder,
+        adj: finalAdj, stats, thumb,
+        hdrLabel: preset ? preset.label : null,
+        score: fallback.overallScore,
+        cullFlags: r.cullFlags,
+        qaFlags: qa.flagged ? qa.reasons : null,
+        fileIndex: r.fileIndex,
+      });
       setEditPreviewFor({preset:presetId, corrections:applyCorrections});
     } catch(err){
       console.error("[LensAI] Reanalyze failed:", file.name, presetId, err);
