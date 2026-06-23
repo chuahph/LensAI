@@ -17702,13 +17702,31 @@ function analyzeImage(data) {
   // Both require blueSkyRatio<0.06 (the real-blue-dominance signal, not the
   // looser skyRatio/hasSky that also counts a bright plate/napkin as "sky")
   // and a sane food-lighting brightness range.
-  const foodMultiHue = blueSkyRatio<0.06 && hueVariety>=3 && lumAvg>70 && lumAvg<225 && !isCoolCast;
+  // !isGreenTint: a green-foliage backdrop (a park, a tree-lined street) with
+  // a colourful foreground subject (a statue, a sign) can rack up 3+ hue
+  // bins -- foliage green, subject colour, ground/stone neutrals -- tripping
+  // this same multi-hue test despite having no food in frame at all. Real
+  // dishes never register isGreenTint (a plate is never green-dominant
+  // enough to flip the overall frame tint), so excluding it costs nothing
+  // against the food calibration set while keeping outdoor foliage scenes out.
+  // avgSat>22 (the same floor foodWarmTone/foodWarmCast already use): a sharp,
+  // narrow street/alley shot can still slip past isArchitectural's sharpness
+  // gate (built for soft, receding street scenes) when its foreground is in
+  // crisp focus, and a few scattered colourful signs/banners are then enough
+  // to clear hueVariety>=3 with no actual food in frame -- but that scene's
+  // OVERALL saturation stays low (concrete/asphalt/sky dominate the frame),
+  // unlike a real multi-hue dish which is saturated throughout.
+  const foodMultiHue = blueSkyRatio<0.06 && hueVariety>=3 && avgSat>22 && lumAvg>70 && lumAvg<225 && !isCoolCast && !isGreenTint;
   // gAvg>rAvg*0.58 (see foodWarmCast below): a frame of vivid man-made red --
   // vermilion torii gates, a wall of red signage -- is warm, saturated and
   // face-free, matching this single-warm-tone path exactly, but crushes green
   // far below any real dish. The same green-floor that protects foodWarmCast
   // keeps those out of food here too.
-  const foodWarmTone = blueSkyRatio<0.06 && !isCoolCast && !hasFace && avgSat>22 && gAvg>rAvg*0.58 && lumAvg>70 && lumAvg<220;
+  // !isGreenTint (see foodMultiHue above): the same green-foliage-backdrop
+  // false positive trips this path too, since a warm-toned foreground
+  // subject against greenery clears every other gate here as easily as a
+  // genuine warm dish.
+  const foodWarmTone = blueSkyRatio<0.06 && !isCoolCast && !hasFace && avgSat>22 && gAvg>rAvg*0.58 && lumAvg>70 && lumAvg<220 && !isGreenTint;
   // Warm/neutral dishes that FILL the frame -- noodles, rice, broth bowls,
   // stir-fries, dumplings: the bulk of Asian food -- read as skin-tone to
   // hasFace and were being stolen by the portrait branch (ramen/pho/fried
@@ -17779,7 +17797,14 @@ function analyzeImage(data) {
     // averages into a sky+structure signature too, but lights up far more
     // hue bins than any single real scene -- a genuine dish or facade
     // tops out at 4 in calibration, a multi-photo collage measured 6.
-    hueVariety >= 6);
+    hueVariety >= 6 ||
+    // A sharp, narrow street/alley shot (foreground in crisp focus) can
+    // clear the sharpness<52 gate too, but concrete/asphalt/sky still
+    // dominate the frame -- avgSat stays well below any real dish's (the
+    // food calibration set never drops below ~30) even when a few scattered
+    // colourful signs/banners push hueVariety up. avgSat<25 mirrors the same
+    // "concrete/steel" floor autoSelectHDR's own urban scoring already uses.
+    avgSat < 25);
 
   let scene='people';
   if (isNight)                                          scene='night';
