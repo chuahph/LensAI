@@ -17716,7 +17716,14 @@ function analyzeImage(data) {
   // to clear hueVariety>=3 with no actual food in frame -- but that scene's
   // OVERALL saturation stays low (concrete/asphalt/sky dominate the frame),
   // unlike a real multi-hue dish which is saturated throughout.
-  const foodMultiHue = blueSkyRatio<0.06 && hueVariety>=3 && avgSat>22 && lumAvg>70 && lumAvg<225 && !isCoolCast && !isGreenTint;
+  // gAvg>0.58*rAvg (same floor as foodWarmCast/foodWarmTone below): a frame
+  // of vivid man-made red -- vermilion torii gates, a wall of red signage --
+  // is warm, saturated, and can light up 3+ hue bins (red posts, dark
+  // lacquer/lettering, skin tones from people standing in it) just as easily
+  // as a real dish, but crushes green far below any genuine food shot. This
+  // path had no such floor, so a group photo under a torii tunnel slipped
+  // through here even though the sibling food paths already guard against it.
+  const foodMultiHue = blueSkyRatio<0.06 && hueVariety>=3 && avgSat>22 && gAvg>rAvg*0.58 && lumAvg>70 && lumAvg<225 && !isCoolCast && !isGreenTint;
   // gAvg>rAvg*0.58 (see foodWarmCast below): a frame of vivid man-made red --
   // vermilion torii gates, a wall of red signage -- is warm, saturated and
   // face-free, matching this single-warm-tone path exactly, but crushes green
