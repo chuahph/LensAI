@@ -21245,6 +21245,8 @@ function BatchAgent({onClose}){
             React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"Corrections applied"),
             (shown.hdrLabel||shown.stats&&shown.stats.scene)&&React.createElement("div",{style:{fontSize:12,color:"#a5b4fc",fontWeight:700}},
               (shown.hdrLabel?"HDR: "+shown.hdrLabel:"No HDR preset")+(shown.stats&&shown.stats.scene?" -- detected as "+shown.stats.scene+" scene":"")),
+            shown.stats&&shown.stats.scene&&React.createElement("div",{style:{fontSize:10,color:"#64748b",fontStyle:"italic"}},
+              "Scene/HDR is auto-detected from pixel analysis and may not always match the actual photo type -- pick a different HDR preset above if needed."),
             applied.length
               ? React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:6}},
                   applied.map(a=>React.createElement("span",{key:a.id,style:{fontSize:11,fontWeight:600,color:a.color,background:a.color+"18",border:"1px solid "+a.color+"44",borderRadius:8,padding:"3px 8px"}},
