@@ -21257,7 +21257,7 @@ function BatchAgent({onClose}){
         })(),
         React.createElement("label",{style:{display:"flex",alignItems:"center",gap:8,cursor:editBusy?"not-allowed":"pointer",fontSize:12,fontWeight:600,color:"#cbd5e1"}},
           React.createElement("input",{type:"checkbox",checked:editCorrections,disabled:editBusy,onChange:toggleCorrections}),
-          "Apply auto corrections (exposure, white balance, dehaze)"
+          "Apply auto corrections"
         ),
         React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"HDR enhancement"),
         React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.filter(g=>g.id!=="auto"&&g.id!=="fullAuto").map(g=>{
