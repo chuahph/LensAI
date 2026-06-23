@@ -17845,6 +17845,14 @@ function analyzeImage(data) {
   // single-non-dominant-face case, since multiple separated faces are much
   // stronger evidence of an actual group than one moderate skin region.
   else if (hasFace&&!hasBigFace&&blueSkyRatio<0.15) scene='people';
+  // A colourful foreground subject (a statue, a sign, a banner) against a
+  // green-foliage backdrop racks up 2+ incidental skin-tone clusters from
+  // the subject's own colours -- a silver/red sculpture, say -- with no real
+  // face anywhere in frame. This is the same green-foliage-backdrop signature
+  // food's classification above already excludes via isGreenTint; route it
+  // to Urban (the generic "structured, ambiguous subject" bucket) instead of
+  // People.
+  else if (skinClusters>=2&&blueSkyRatio<0.25&&isGreenTint) scene='urban';
   else if (skinClusters>=2&&blueSkyRatio<0.25)       scene='people';
   else if (hasSky&&isStructured)                       scene='urban';
   else if (hasSky&&contrast>45&&!isStructured)         scene='nature';
