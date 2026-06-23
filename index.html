@@ -19417,7 +19417,11 @@ async function renderAgent(data, adj, stats) {
   // hands back a shared scratch canvas that the next sequential batch
   // item will redraw into, so nothing from outCv can be read lazily
   // after this call returns.
-  const TW = 220;
+  // 960px (not the 220px the 96px-tall grid tile alone would need) because
+  // this same thumb is also the Reanalyze modal's interim preview, shown at
+  // width:100% there until the separate full-res fullRenderAgent decode
+  // finishes -- 220px stretched that wide looked visibly blurry.
+  const TW = 960;
   const th = Math.max(1, Math.round(TW * outCv.height / outCv.width));
   const thumbCv = document.createElement("canvas");
   thumbCv.width = TW; thumbCv.height = th;
