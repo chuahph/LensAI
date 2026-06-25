@@ -20485,7 +20485,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-25 19:46";
+const APP_BUILD = "2026-06-25 20:22";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21106,6 +21106,13 @@ function BatchAgent({onClose}){
   // stale, already-superseded run bail out almost for free instead of doing
   // the full work just to have it thrown away.
   const editFullGenRef = useRef(0);
+  // Bumped on every preset/correction pick so a superseded preview-res
+  // reanalyze (see the effect below) can bail out instead of overwriting
+  // a newer click's result -- the single-photo editor's slider drag never
+  // needs this because its background render only ever writes into a ref
+  // cache, but this modal's reanalyze writes into editPreview/editPreviewFor
+  // state that downstream UI (Save's "ready" check, the shown thumb) reads.
+  const editPreviewGenRef = useRef(0);
   // Tracks which single result (by index into `results`) is currently
   // having its full-resolution photo rendered for download -- batch
   // results only ever carry a preview-resolution thumbnail, so a single
@@ -21346,71 +21353,82 @@ function BatchAgent({onClose}){
     setEditPreview(null); setEditPreviewFor(null);
   };
   const closeEdit=()=>{
-    if(editBusy) return;
     setEditIdx(null); setEditPreset(null); setEditPreview(null); setEditPreviewFor(null);
     // Releases the cached full-res buffer (up to ~192MB) the moment the
     // modal closes instead of leaving it pinned until the next photo is
     // opened overwrites it.
     editDecodeRef.current = { fileIndex: null, previewData: null, stats: null, fullData: null };
   };
-  // Corrections (exposure/white balance/dehaze baseline) and HDR
-  // enhancement are independent layers in the render pipeline -- this
-  // re-renders with whichever combination of the two is currently picked,
-  // so toggling either one is reflected together rather than one
-  // replacing the other.
-  //
-  // Used to call full batchProcessFile (decode + analyze the whole file,
-  // re-geocode, re-cull) on every single click here -- none of those
-  // earlier stages depend on presetId/applyCorrections, only the stages
-  // below this comment do, so only those are re-run; decode/analyze is
-  // reused from ensureEditDecode's cache and the location/cull/group info
-  // is carried over unchanged from the original batch result.
-  const reanalyzeEdit=async(presetId,applyCorrections)=>{
+  // Picking a different HDR type or toggling corrections used to call
+  // reanalyzeEdit directly from the click handler and disable every preset
+  // pill (via editBusy) until it resolved -- ~600-1000ms of processPixels
+  // on a real photo, every single click, with the pills frozen the whole
+  // time. The single-photo editor never has this problem: applyHDR just
+  // sets adj and returns immediately, while a background effect (see the
+  // live-preview useEffect above, around line 20557) re-renders without
+  // ever blocking the slider. Mirror that here: selectPreset/toggleCorrections
+  // only update state synchronously (so the active pill highlight switches
+  // instantly and the next click is never blocked), and the actual
+  // decode/render work runs in this effect instead, debounced and
+  // cancellable so a burst of clicks costs one render at the end rather
+  // than queuing one full ~600-1000ms render per click behind a disabled UI.
+  const selectPreset=(presetId)=>{ setEditPreset(presetId); };
+  const toggleCorrections=()=>{ setEditCorrections(c=>!c); };
+  useEffect(()=>{
     if(editIdx==null) return;
     const r=results[editIdx];
-    const file=files[r.fileIndex];
-    if(!file) return;
-    setEditBusy(true);
-    acquireWakeLock();
-    try {
-      // Serialized on the shared scratch like the preview render above --
-      // both draw into the same scratch canvas, so they must not overlap.
-      const { previewData, stats } = await withScratchLock(()=>ensureEditDecode(r.fileIndex, file));
-      const hdrId = goalDetectionAgent(presetId, stats);
-      const fallback = buildFallback(stats);
-      const baseAdj = applyCorrections ? correctionAgent(fallback) : blankAdj();
-      const finalAdj = enhancementAgent(baseAdj, hdrId, stats);
-      const { thumb, processed } = await withScratchLock(()=>renderAgent(previewData, finalAdj, stats));
-      const qa = qaAgent(analyzeExposureOnly(processed));
-      const preset = HDR_PRESETS.find(h => h.id === hdrId);
-      setEditPreview({
-        name: file.name, goalId: presetId, hdrId, applyCorrections,
-        group: r.group, origFolder: r.origFolder,
-        adj: finalAdj, stats, thumb,
-        hdrLabel: preset ? preset.label : null,
-        score: fallback.overallScore,
-        cullFlags: r.cullFlags,
-        qaFlags: qa.flagged ? qa.reasons : null,
-        fileIndex: r.fileIndex,
+    const file=r?files[r.fileIndex]:null;
+    if(!r||!file) return;
+    const presetId=editPreset, applyCorrections=editCorrections;
+    let cancelled=false;
+    const gen=++editPreviewGenRef.current;
+    // Short debounce -- long enough to coalesce a rapid run of clicks into
+    // one render, short enough that a single deliberate tap doesn't feel
+    // delayed (the pills already responded instantly via the state update
+    // above; this only gates the background thumb refresh).
+    const PREVIEW_DEBOUNCE_MS = 150;
+    const timer = setTimeout(() => {
+      setEditBusy(true);
+      acquireWakeLock();
+      withScratchLock(async()=>{
+        // Bail before doing any real work if a newer click already
+        // superseded this one while it was waiting for its turn in the
+        // scratch queue -- avoids paying for a decode/render whose result
+        // would just be thrown away.
+        if (cancelled || gen !== editPreviewGenRef.current) return null;
+        const { previewData, stats } = await ensureEditDecode(r.fileIndex, file);
+        if (cancelled || gen !== editPreviewGenRef.current) return null;
+        const hdrId = goalDetectionAgent(presetId, stats);
+        const fallback = buildFallback(stats);
+        const baseAdj = applyCorrections ? correctionAgent(fallback) : blankAdj();
+        const finalAdj = enhancementAgent(baseAdj, hdrId, stats);
+        const { thumb, processed } = await renderAgent(previewData, finalAdj, stats);
+        if (cancelled || gen !== editPreviewGenRef.current) return null;
+        const qa = qaAgent(analyzeExposureOnly(processed));
+        return { thumb, processed, stats, hdrId, finalAdj, fallback, qa };
+      }).then(out=>{
+        if(!out || cancelled || gen !== editPreviewGenRef.current) return;
+        const preset = HDR_PRESETS.find(h => h.id === out.hdrId);
+        setEditPreview({
+          name: file.name, goalId: presetId, hdrId: out.hdrId, applyCorrections,
+          group: r.group, origFolder: r.origFolder,
+          adj: out.finalAdj, stats: out.stats, thumb: out.thumb,
+          hdrLabel: preset ? preset.label : null,
+          score: out.fallback.overallScore,
+          cullFlags: r.cullFlags,
+          qaFlags: out.qa.flagged ? out.qa.reasons : null,
+          fileIndex: r.fileIndex,
+        });
+        setEditPreviewFor({preset:presetId, corrections:applyCorrections});
+      }).catch(err=>{
+        if(!cancelled) console.error("[LensAI] Reanalyze failed:", file.name, presetId, err);
+      }).finally(()=>{
+        if (gen === editPreviewGenRef.current) setEditBusy(false);
+        releaseWakeLock();
       });
-      setEditPreviewFor({preset:presetId, corrections:applyCorrections});
-    } catch(err){
-      console.error("[LensAI] Reanalyze failed:", file.name, presetId, err);
-    } finally { setEditBusy(false); releaseWakeLock(); }
-  };
-  // Picking a different HDR type or toggling corrections re-renders and
-  // swaps the preview immediately, rather than requiring a separate
-  // "Reanalyze" click -- the selected combination should always be what's
-  // actually shown.
-  const selectPreset=(presetId)=>{
-    setEditPreset(presetId);
-    reanalyzeEdit(presetId, editCorrections);
-  };
-  const toggleCorrections=()=>{
-    const next=!editCorrections;
-    setEditCorrections(next);
-    reanalyzeEdit(editPreset, next);
-  };
+    }, PREVIEW_DEBOUNCE_MS);
+    return ()=>{ cancelled=true; clearTimeout(timer); };
+  },[editIdx,editPreset,editCorrections]);
   const saveEdit=()=>{
     if(editIdx==null||!editPreview) return;
     setResults(rs=>rs.map((r,i)=>i===editIdx?editPreview:r));
@@ -21533,11 +21551,16 @@ function BatchAgent({onClose}){
       React.createElement("div",{onClick:e=>e.stopPropagation(),style:{background:"#0f172a",border:"1px solid "+BORD,borderRadius:14,padding:16,maxWidth:380,width:"100%",maxHeight:"85vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:12}},
         React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},
           React.createElement("div",{style:{fontSize:13,fontWeight:800,color:"#fff"}},"Reanalyze: "+(results[editIdx].name||"photo")),
-          React.createElement("button",{onClick:closeEdit,disabled:editBusy,style:{background:"none",border:"none",color:"#94a3b8",fontSize:16,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit"}},"×")
+          React.createElement("button",{onClick:closeEdit,style:{background:"none",border:"none",color:"#94a3b8",fontSize:16,cursor:"pointer",fontFamily:"inherit"}},"×")
         ),
         React.createElement("div",{style:{position:"relative"}},
-          React.createElement("img",{src:editFullUrl||(editPreview||results[editIdx]).thumb,style:{width:"100%",maxHeight:"50vh",objectFit:"contain",borderRadius:10,display:"block",background:"#000",opacity:editBusy?0.5:1}}),
-          editBusy&&React.createElement("div",{style:{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:6,color:"#fff",fontSize:12,fontWeight:700}},React.createElement(Spin,null),"Reanalyzing...")
+          // No longer dims/freezes the photo or blocks the controls while a
+          // reanalyze is in flight (see the debounced effect powering
+          // selectPreset/toggleCorrections above) -- the old photo just
+          // stays fully visible until the new one is ready, exactly like
+          // the single-photo editor's slider preview never freezing the UI.
+          React.createElement("img",{src:editFullUrl||(editPreview||results[editIdx]).thumb,style:{width:"100%",maxHeight:"50vh",objectFit:"contain",borderRadius:10,display:"block",background:"#000"}}),
+          editBusy&&React.createElement("div",{style:{position:"absolute",top:8,right:8,display:"flex",alignItems:"center",gap:5,background:"rgba(0,0,0,0.6)",borderRadius:12,padding:"3px 9px",color:"#fff",fontSize:10,fontWeight:700}},React.createElement(Spin,null),"Updating...")
         ),
         // Full breakdown of every correction actually applied to this photo
         // -- previously the only feedback here was the tiny "Auto: Food"
@@ -21563,18 +21586,18 @@ function BatchAgent({onClose}){
             shown.cullFlags&&shown.cullFlags.length>0&&React.createElement("div",{style:{fontSize:11,color:"#f87171"}},"Quality flags: "+shown.cullFlags.join(", "))
           );
         })(),
-        React.createElement("label",{style:{display:"flex",alignItems:"center",gap:8,cursor:editBusy?"not-allowed":"pointer",fontSize:12,fontWeight:600,color:"#cbd5e1"}},
-          React.createElement("input",{type:"checkbox",checked:editCorrections,disabled:editBusy,onChange:toggleCorrections}),
+        React.createElement("label",{style:{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12,fontWeight:600,color:"#cbd5e1"}},
+          React.createElement("input",{type:"checkbox",checked:editCorrections,onChange:toggleCorrections}),
           "Apply auto corrections"
         ),
         React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"HDR enhancement"),
         React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},GOALS.filter(g=>g.id!=="auto"&&g.id!=="fullAuto").map(g=>{
           const active=editPreset===g.id;
           const label=g.id==="none"?"None":g.label;
-          return React.createElement("button",{key:g.id,title:g.desc,onClick:()=>selectPreset(g.id),disabled:editBusy,style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:editBusy?"not-allowed":"pointer",fontFamily:"inherit"}},label);
+          return React.createElement("button",{key:g.id,title:g.desc,onClick:()=>selectPreset(g.id),style:{padding:"6px 11px",borderRadius:16,border:"1px solid "+(active?"#6366f1":BORD),background:active?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:active?"#a5b4fc":"#94a3b8",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}},label);
         })),
         (()=>{const ready=editPreviewFor&&editPreviewFor.preset===editPreset&&editPreviewFor.corrections===editCorrections;
-        return React.createElement("button",{onClick:saveEdit,disabled:editBusy||!ready,style:{padding:"10px 14px",borderRadius:10,border:"none",background:(editBusy||!ready)?"rgba(34,197,94,0.2)":"linear-gradient(135deg,#22c55e,#16a34a)",color:"#fff",fontSize:12,fontWeight:700,cursor:(editBusy||!ready)?"not-allowed":"pointer",fontFamily:"inherit"}},"Save");})()
+        return React.createElement("button",{onClick:saveEdit,disabled:!ready,style:{padding:"10px 14px",borderRadius:10,border:"none",background:!ready?"rgba(34,197,94,0.2)":"linear-gradient(135deg,#22c55e,#16a34a)",color:"#fff",fontSize:12,fontWeight:700,cursor:!ready?"not-allowed":"pointer",fontFamily:"inherit"}},"Save");})()
       )
     )
   );
