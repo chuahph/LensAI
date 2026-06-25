@@ -18357,6 +18357,27 @@ async function processPixels(src, adj, imgStats, opts) {
   const wbBmul  = 1 - wbVal  * 0.15 - wrmVal * 0.06;  // min 0.79x at +100
   // Green: NEVER touch green for WB -- causes color cast
 
+  // Steps 5-7 below each call Math.pow/Math.exp on a per-pixel value that's
+  // always normalized to [0,1] -- same situation as the vignette pass's
+  // Math.pow, and the same fix applies: precompute each curve once into a
+  // lookup table instead of paying for a transcendental function call on
+  // every one of 24-48M pixels. Built once per processPixels call (these
+  // only depend on the slider values, not on pixel position), so the setup
+  // cost here is trivial next to what it saves in the loop below.
+  const POW_LUT_N = 8192;
+  const highlightsPowLut = new Float32Array(POW_LUT_N + 1);
+  for (let t = 0; t <= POW_LUT_N; t++) highlightsPowLut[t] = Math.pow(t / POW_LUT_N, 0.75);
+  const shadowsTier1PowLut = new Float32Array(POW_LUT_N + 1);
+  for (let t = 0; t <= POW_LUT_N; t++) shadowsTier1PowLut[t] = Math.pow(t / POW_LUT_N, 0.85);
+  const shadowsTier2PowLut = new Float32Array(POW_LUT_N + 1);
+  for (let t = 0; t <= POW_LUT_N; t++) shadowsTier2PowLut[t] = Math.pow(t / POW_LUT_N, 1.20);
+  const ambiancePowLut = new Float32Array(POW_LUT_N + 1);
+  for (let t = 0; t <= POW_LUT_N; t++) ambiancePowLut[t] = Math.pow(t / POW_LUT_N, 0.90);
+  const vibFExpLut = new Float32Array(POW_LUT_N + 1);
+  for (let t = 0; t <= POW_LUT_N; t++) vibFExpLut[t] = Math.exp(-(t / POW_LUT_N) * 9);
+  const shadowProtectPowLut = new Float32Array(POW_LUT_N + 1);
+  for (let t = 0; t <= POW_LUT_N; t++) shadowProtectPowLut[t] = Math.pow(t / POW_LUT_N, 1.2);
+
   for (let y = 0; y < h; y++) {
    if (y > 0 && y % chunkRows === 0) await _tick();
    const rowBase = y*w*4;
@@ -18426,7 +18447,8 @@ async function processPixels(src, adj, imgStats, opts) {
         // bright but tapers the lift through the highlights/sky range, so
         // skies keep their tone and colour instead of clipping.
         const highlightProtect = Math.min(1.0, (1-curLum)/0.40);
-        const shadowProtect    = Math.pow(Math.min(1.0, curLum/0.20), 1.2);
+        const spT = Math.min(1.0, curLum/0.20);
+        const shadowProtect    = shadowProtectPowLut[spT>=1?POW_LUT_N:(spT*POW_LUT_N)|0];
         protect = Math.min(highlightProtect, shadowProtect);
       }
       const bShift = bShiftBase * protect;
@@ -18470,7 +18492,7 @@ async function processPixels(src, adj, imgStats, opts) {
     if (adj.highlights !== 0) {
       // Highlight zone: smooth rise from 50% to 100% (wider range)
       const hiN   = Math.max(0,(lumN-0.50)/0.50);
-      const mask  = Math.pow(hiN, 0.75);
+      const mask  = highlightsPowLut[hiN>=1?POW_LUT_N:(hiN*POW_LUT_N)|0];
       // Extra strong recovery for near-blown (>85% lum) pixels
       const boost = lumN > 0.88 ? 1.20 : lumN > 0.75 ? 1.10 : 1.0;
       const shift = (adj.highlights/100) * mask * 45 * boost;
@@ -18485,10 +18507,10 @@ async function processPixels(src, adj, imgStats, opts) {
       // point reads as a milky/whitish veil. Also reduced from *55 to *40 so
       // the overall shadow lift is gentler.
       const blackAnchor = Math.min(1, lumN/0.05); // 0 at pure black -> 1 by ~luma 13
-      const tier1 = sv * Math.pow(nearBlack, 0.85) * 40 * blackAnchor;
+      const tier1 = sv * shadowsTier1PowLut[nearBlack>=1?POW_LUT_N:(nearBlack*POW_LUT_N)|0] * 40 * blackAnchor;
       // Tier 2: mid-dark (20-60%) - moderate lift for shadow detail
       const midDark = Math.max(0, (0.60-lumN)/0.60);
-      const tier2 = sv * Math.pow(midDark, 1.20) * 30;
+      const tier2 = sv * shadowsTier2PowLut[midDark>=1?POW_LUT_N:(midDark*POW_LUT_N)|0] * 30;
       const shift = tier1 + tier2;
       if (shift > 0.5) { r=clamp(r+shift); g=clamp(g+shift); b=clamp(b+shift); }
     }
@@ -18510,7 +18532,7 @@ async function processPixels(src, adj, imgStats, opts) {
           // decay + a higher floor now give mid/high-chroma colours a real
           // lift too (the "more lively" look), while vibrance weighting
           // still favours muted areas so saturated colours don't go gaudy.
-          let vibF = Math.max(0.30, Math.exp(-chromaN*9));
+          let vibF = Math.max(0.30, vibFExpLut[chromaN>=1?POW_LUT_N:(chromaN*POW_LUT_N)|0]);
           // Skin-tone protection: a global vibrance push drives skin orange
           // and waxy ("oompa-loompa" skin) -- the classic artefact of
           // saturating a portrait. Detect skin via the same normalized-
@@ -18548,9 +18570,11 @@ async function processPixels(src, adj, imgStats, opts) {
       const lv = (clamp(r)*0.299+clamp(g)*0.587+clamp(b)*0.114)/255;
       let push = 0;
       if (lv > 0.50) {
-        push = av * Math.pow((lv-0.50)*2.0, 0.90) * 25;
+        const t = (lv-0.50)*2.0;
+        push = av * ambiancePowLut[t>=1?POW_LUT_N:(t*POW_LUT_N)|0] * 25;
       } else if (lv > 0.12) {
-        push = av * Math.pow((0.50-lv)*1.6, 1.00) * 8 * (-1);
+        // Math.pow(x, 1.00) === x -- was a no-op exponent call.
+        push = av * ((0.50-lv)*1.6) * 8 * (-1);
         push = Math.max(push, -lv*255*0.25);
       }
       r=clamp(r+push); g=clamp(g+push); b=clamp(b+push);
@@ -18696,6 +18720,12 @@ async function processPixels(src, adj, imgStats, opts) {
     const structScale = (imgStats && imgStats.contrast>65) ? 0.55 : 1.0;
     const sfBase = (adj.structure/100)*2.0*structScale;
     const orig=_snapshot(out);
+    // Precompute luminance once per pixel (same technique as the despeckle
+    // pass above) instead of recomputing the weighted RGB->luma sum for
+    // every neighbour reference -- this loop's edge-detection step alone
+    // was redoing that sum up to 5x per pixel across overlapping windows.
+    const lumaPlane=new Float32Array(w*h);
+    for (let p=0,j=0;p<lumaPlane.length;p++,j+=4) lumaPlane[p]=orig[j]*0.299+orig[j+1]*0.587+orig[j+2]*0.114;
     const R1=4, R2=9; // local-contrast radii in pixels
     const o1=R1*4, o2=R2*4;
     const margin=R2+1;
@@ -18703,14 +18733,12 @@ async function processPixels(src, adj, imgStats, opts) {
       if (y > margin && y % chunkRows === 0) await _tick();
       for (let x=margin;x<w-margin;x++) {
         const idx=(y*w+x)*4;
+        const p0=y*w+x;
         // Compute luma edge (small radius) to gate the effect -- this just
         // detects "is there any local detail here", not the broad blur used
         // for the actual clarity boost below.
-        const lumC=orig[idx]*0.299+orig[idx+1]*0.587+orig[idx+2]*0.114;
-        const lumB=(orig[idx-4]*0.299+orig[idx-3]*0.587+orig[idx-2]*0.114+
-                    orig[idx+4]*0.299+orig[idx+5]*0.587+orig[idx+6]*0.114+
-                    orig[idx-w*4]*0.299+orig[idx-w*4+1]*0.587+orig[idx-w*4+2]*0.114+
-                    orig[idx+w*4]*0.299+orig[idx+w*4+1]*0.587+orig[idx+w*4+2]*0.114+lumC*2)/6;
+        const lumC=lumaPlane[p0];
+        const lumB=(lumaPlane[p0-1]+lumaPlane[p0+1]+lumaPlane[p0-w]+lumaPlane[p0+w]+lumC*2)/6;
         const lumaEdge=Math.abs(lumC-lumB);
         // Skip flat areas (noise) and very dark pixels
         if (lumaEdge<1.2||lumC<10) continue;
@@ -18746,16 +18774,18 @@ async function processPixels(src, adj, imgStats, opts) {
   // Only applies where edge signal is very low (flat sky, concrete walls)
   if (adj.sharpening>0 || adj.structure>0) {
     const noiseOrig=_snapshot(out);
+    // Same luma-plane precompute as the structure/despeckle passes above --
+    // avoids redoing the weighted RGB->luma sum per neighbour reference.
+    const noiseLuma=new Float32Array(w*h);
+    for (let p=0,j=0;p<noiseLuma.length;p++,j+=4) noiseLuma[p]=noiseOrig[j]*0.299+noiseOrig[j+1]*0.587+noiseOrig[j+2]*0.114;
     for (let y=1;y<h-1;y++) {
       if (y > 1 && y % chunkRows === 0) await _tick();
       for (let x=1;x<w-1;x++) {
         const idx=(y*w+x)*4;
-        const lumC=noiseOrig[idx]*0.299+noiseOrig[idx+1]*0.587+noiseOrig[idx+2]*0.114;
+        const p0=y*w+x;
+        const lumC=noiseLuma[p0];
         // Compute local luma variance (flat test)
-        const lumB=(noiseOrig[idx-4]*0.299+noiseOrig[idx-3]*0.587+noiseOrig[idx-2]*0.114+
-                    noiseOrig[idx+4]*0.299+noiseOrig[idx+5]*0.587+noiseOrig[idx+6]*0.114+
-                    noiseOrig[idx-w*4]*0.299+noiseOrig[idx-w*4+1]*0.587+noiseOrig[idx-w*4+2]*0.114+
-                    noiseOrig[idx+w*4]*0.299+noiseOrig[idx+w*4+1]*0.587+noiseOrig[idx+w*4+2]*0.114)/4;
+        const lumB=(noiseLuma[p0-1]+noiseLuma[p0+1]+noiseLuma[p0-w]+noiseLuma[p0+w])/4;
         const edgeMag=Math.abs(lumC-lumB);
         // Only smooth truly flat areas (sky, smooth walls) -- preserve edges
         if (edgeMag>2.5) continue;
@@ -18788,30 +18818,29 @@ async function processPixels(src, adj, imgStats, opts) {
     const thrFine  = 3.0;  // lower threshold catches more detail
     const thrCoarse= 8.0;  // only strong structural edges
     const orig = _snapshot(out);
+    // Precompute luminance once per pixel (same technique as despeckle/
+    // structure/noise-reduction above) -- this pass was recomputing the
+    // weighted RGB->luma sum for the same 4 radius-1 neighbours twice per
+    // pixel (once inline for lumFine, again below for the halo guard's
+    // n1-n4), on top of the usual overlapping-window redundancy.
+    const sharpLuma=new Float32Array(w*h);
+    for (let p=0,j=0;p<sharpLuma.length;p++,j+=4) sharpLuma[p]=orig[j]*0.299+orig[j+1]*0.587+orig[j+2]*0.114;
 
     for (let y=2;y<h-2;y++) {
       if (y > 2 && y % chunkRows === 0) await _tick();
       for (let x=2;x<w-2;x++) {
         const idx=(y*w+x)*4;
-        const lumC=(orig[idx]*0.299+orig[idx+1]*0.587+orig[idx+2]*0.114);
+        const p0=y*w+x;
+        const lumC=sharpLuma[p0];
         if (lumC<8) continue; // leave true blacks alone
 
         // Fine blur (radius 1)
-        const lumFine=(
-          (orig[idx-4]*0.299+orig[idx-3]*0.587+orig[idx-2]*0.114)+
-          (orig[idx+4]*0.299+orig[idx+5]*0.587+orig[idx+6]*0.114)+
-          (orig[idx-w*4]*0.299+orig[idx-w*4+1]*0.587+orig[idx-w*4+2]*0.114)+
-          (orig[idx+w*4]*0.299+orig[idx+w*4+1]*0.587+orig[idx+w*4+2]*0.114)+
-          lumC*2
-        )/6;
+        const n1=sharpLuma[p0-1], n2=sharpLuma[p0+1], n3=sharpLuma[p0-w], n4=sharpLuma[p0+w];
+        const lumFine=(n1+n2+n3+n4+lumC*2)/6;
 
         // Coarse blur (radius 2)
         const lumCoarse=(
-          (orig[idx-8]*0.299+orig[idx-7]*0.587+orig[idx-6]*0.114)+
-          (orig[idx+8]*0.299+orig[idx+9]*0.587+orig[idx+10]*0.114)+
-          (orig[idx-w*8]*0.299+orig[idx-w*8+1]*0.587+orig[idx-w*8+2]*0.114)+
-          (orig[idx+w*8]*0.299+orig[idx+w*8+1]*0.587+orig[idx+w*8+2]*0.114)+
-          lumC*2
+          sharpLuma[p0-2]+sharpLuma[p0+2]+sharpLuma[p0-2*w]+sharpLuma[p0+2*w]+lumC*2
         )/6;
 
         const edgeFine   = lumC - lumFine;
@@ -18840,10 +18869,6 @@ async function processPixels(src, adj, imgStats, opts) {
         // masking without this clamp blows past the local range on strong
         // edges, producing the bright/dark fringing ("halos") classic to
         // over-sharpened photos, especially at high slider values.
-        const n1=orig[idx-4]*0.299+orig[idx-3]*0.587+orig[idx-2]*0.114;
-        const n2=orig[idx+4]*0.299+orig[idx+5]*0.587+orig[idx+6]*0.114;
-        const n3=orig[idx-w*4]*0.299+orig[idx-w*4+1]*0.587+orig[idx-w*4+2]*0.114;
-        const n4=orig[idx+w*4]*0.299+orig[idx+w*4+1]*0.587+orig[idx+w*4+2]*0.114;
         const localMin=Math.min(lumC,n1,n2,n3,n4), localMax=Math.max(lumC,n1,n2,n3,n4);
         const headroom=10;
         const newLum = clamp(Math.max(localMin-headroom, Math.min(localMax+headroom, lumC+gain)));
@@ -20519,7 +20544,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-26 01:05";
+const APP_BUILD = "2026-06-26 06:04";
 
 function App() {
   const canvasRef    = useRef(null);
