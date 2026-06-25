@@ -17906,6 +17906,22 @@ function _snapshot(out) {
   return _scratchBuf;
 }
 
+// Same back-to-back-allocation concern as _scratchBuf above, for the
+// per-pixel luma planes used by despeckle/structure/noise-reduction/
+// sharpening: each of those passes used to allocate its own fresh
+// Float32Array(w*h) (~192MB on a 48MP photo), so a single export could
+// momentarily hold 3-4 of those alive in addition to _scratchBuf -- enough
+// to push an iOS Safari tab over its memory ceiling and get it killed.
+// One shared, reused buffer caps that to a single extra allocation.
+let _lumaScratchBuf = null;
+function _lumaPlane(orig, w, h) {
+  if (!_lumaScratchBuf || _lumaScratchBuf.length !== w * h) _lumaScratchBuf = new Float32Array(w * h);
+  for (let p = 0, j = 0; p < _lumaScratchBuf.length; p++, j += 4) {
+    _lumaScratchBuf[p] = orig[j]*0.299 + orig[j+1]*0.587 + orig[j+2]*0.114;
+  }
+  return _lumaScratchBuf;
+}
+
 // Row-band chunking for processPixels' full-image passes. Each pass below
 // (denoise, structure, sharpening, dehaze, sky enhancement, vignette, ...)
 // is individually cheap per pixel, but at full export resolution (e.g.
@@ -18653,10 +18669,7 @@ async function processPixels(src, adj, imgStats, opts) {
     // shared with up to 8 other windows) -- this was the actual hot line of
     // the pass, and unlike the global skip-gate above it speeds up every
     // photo, not just ones with negligible shadow content.
-    const luma = new Float32Array(w * h);
-    for (let p = 0, j = 0; p < luma.length; p++, j += 4) {
-      luma[p] = orig[j]*0.299 + orig[j+1]*0.587 + orig[j+2]*0.114;
-    }
+    const luma = _lumaPlane(orig, w, h);
     const L = new Float64Array(9);
     for (let y = 1; y < h-1; y++) {
       if (y > 1 && y % chunkRows === 0) await _tick();
@@ -18724,8 +18737,7 @@ async function processPixels(src, adj, imgStats, opts) {
     // pass above) instead of recomputing the weighted RGB->luma sum for
     // every neighbour reference -- this loop's edge-detection step alone
     // was redoing that sum up to 5x per pixel across overlapping windows.
-    const lumaPlane=new Float32Array(w*h);
-    for (let p=0,j=0;p<lumaPlane.length;p++,j+=4) lumaPlane[p]=orig[j]*0.299+orig[j+1]*0.587+orig[j+2]*0.114;
+    const lumaPlane=_lumaPlane(orig, w, h);
     const R1=4, R2=9; // local-contrast radii in pixels
     const o1=R1*4, o2=R2*4;
     const margin=R2+1;
@@ -18776,8 +18788,7 @@ async function processPixels(src, adj, imgStats, opts) {
     const noiseOrig=_snapshot(out);
     // Same luma-plane precompute as the structure/despeckle passes above --
     // avoids redoing the weighted RGB->luma sum per neighbour reference.
-    const noiseLuma=new Float32Array(w*h);
-    for (let p=0,j=0;p<noiseLuma.length;p++,j+=4) noiseLuma[p]=noiseOrig[j]*0.299+noiseOrig[j+1]*0.587+noiseOrig[j+2]*0.114;
+    const noiseLuma=_lumaPlane(noiseOrig, w, h);
     for (let y=1;y<h-1;y++) {
       if (y > 1 && y % chunkRows === 0) await _tick();
       for (let x=1;x<w-1;x++) {
@@ -18823,8 +18834,7 @@ async function processPixels(src, adj, imgStats, opts) {
     // weighted RGB->luma sum for the same 4 radius-1 neighbours twice per
     // pixel (once inline for lumFine, again below for the halo guard's
     // n1-n4), on top of the usual overlapping-window redundancy.
-    const sharpLuma=new Float32Array(w*h);
-    for (let p=0,j=0;p<sharpLuma.length;p++,j+=4) sharpLuma[p]=orig[j]*0.299+orig[j+1]*0.587+orig[j+2]*0.114;
+    const sharpLuma=_lumaPlane(orig, w, h);
 
     for (let y=2;y<h-2;y++) {
       if (y > 2 && y % chunkRows === 0) await _tick();
@@ -20544,7 +20554,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-26 06:04";
+const APP_BUILD = "2026-06-26 06:31";
 
 function App() {
   const canvasRef    = useRef(null);
