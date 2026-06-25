@@ -21169,6 +21169,13 @@ function BatchAgent({onClose,onCloseApp}){
   const [editPreview,setEditPreview]=useState(null);
   const [editPreviewFor,setEditPreviewFor]=useState(null);
   const [editBusy,setEditBusy]=useState(false);
+  // Mirrors the single-photo editor's Original/Correction/HDR compare
+  // buttons -- swaps which already-rendered thumb is shown, never touches
+  // editPreview (the actual save target), exactly like viewMode there
+  // never touches the live-edit adj.
+  const [editViewMode,setEditViewMode]=useState(null); // null|"original"|"corrected"
+  const [editOrigThumb,setEditOrigThumb]=useState(null);
+  const [editCorrectedThumb,setEditCorrectedThumb]=useState(null);
   // Reanalyze used to call full batchProcessFile (decode + analyze the
   // whole file from scratch) AND fullRenderAgent (a second, full-resolution
   // decode) on every single preset/correction click -- two full image
@@ -21355,9 +21362,11 @@ function BatchAgent({onClose,onCloseApp}){
     setEditIdx(idx); setEditPreset(r.hdrId||"none");
     setEditCorrections(r.applyCorrections!==false);
     setEditPreview(null); setEditPreviewFor(null);
+    setEditViewMode(null); setEditOrigThumb(null); setEditCorrectedThumb(null);
   };
   const closeEdit=()=>{
     setEditIdx(null); setEditPreset(null); setEditPreview(null); setEditPreviewFor(null);
+    setEditViewMode(null); setEditOrigThumb(null); setEditCorrectedThumb(null);
     // Releases the cached full-res buffer (up to ~192MB) the moment the
     // modal closes instead of leaving it pinned until the next photo is
     // opened overwrites it.
@@ -21409,7 +21418,15 @@ function BatchAgent({onClose,onCloseApp}){
         const { thumb, processed } = await renderAgent(previewData, finalAdj, stats);
         if (cancelled || gen !== editPreviewGenRef.current) return null;
         const qa = qaAgent(analyzeExposureOnly(processed));
-        return { thumb, processed, stats, hdrId, finalAdj, fallback, qa };
+        // Same Original/Correction compare the single-photo editor offers,
+        // rendered alongside the saved (HDR-enhanced) thumb -- display-only,
+        // neither feeds into editPreview/adj so it can never change what
+        // saveEdit actually saves.
+        const { thumb: origThumb } = await renderAgent(previewData, blankAdj(), stats);
+        if (cancelled || gen !== editPreviewGenRef.current) return null;
+        const { thumb: correctedThumb } = await renderAgent(previewData, baseAdj, stats);
+        if (cancelled || gen !== editPreviewGenRef.current) return null;
+        return { thumb, processed, stats, hdrId, finalAdj, fallback, qa, origThumb, correctedThumb };
       }).then(out=>{
         if(!out || cancelled || gen !== editPreviewGenRef.current) return;
         const preset = HDR_PRESETS.find(h => h.id === out.hdrId);
@@ -21424,6 +21441,8 @@ function BatchAgent({onClose,onCloseApp}){
           fileIndex: r.fileIndex,
         });
         setEditPreviewFor({preset:presetId, corrections:applyCorrections});
+        setEditOrigThumb(out.origThumb);
+        setEditCorrectedThumb(out.correctedThumb);
       }).catch(err=>{
         if(!cancelled) console.error("[LensAI] Reanalyze failed:", file.name, presetId, err);
       }).finally(()=>{
@@ -21566,8 +21585,13 @@ function BatchAgent({onClose,onCloseApp}){
           // selectPreset/toggleCorrections above) -- the old photo just
           // stays fully visible until the new one is ready, exactly like
           // the single-photo editor's slider preview never freezing the UI.
-          React.createElement("img",{src:(editPreview||results[editIdx]).thumb,style:{width:"100%",maxHeight:"50vh",objectFit:"contain",borderRadius:10,display:"block",background:"#000"}}),
-          editBusy&&React.createElement("div",{style:{position:"absolute",top:8,right:8,display:"flex",alignItems:"center",gap:5,background:"rgba(0,0,0,0.6)",borderRadius:12,padding:"3px 9px",color:"#fff",fontSize:10,fontWeight:700}},React.createElement(Spin,null),"Updating...")
+          React.createElement("img",{src:(editViewMode==="original"&&editOrigThumb)||(editViewMode==="corrected"&&editCorrectedThumb)||(editPreview||results[editIdx]).thumb,style:{width:"100%",maxHeight:"50vh",objectFit:"contain",borderRadius:10,display:"block",background:"#000"}}),
+          editBusy&&React.createElement("div",{style:{position:"absolute",top:8,right:8,display:"flex",alignItems:"center",gap:5,background:"rgba(0,0,0,0.6)",borderRadius:12,padding:"3px 9px",color:"#fff",fontSize:10,fontWeight:700}},React.createElement(Spin,null),"Updating..."),
+          React.createElement("div",{style:{position:"absolute",bottom:8,left:"50%",transform:"translateX(-50%)",display:"flex",gap:6}},
+            React.createElement("button",{onClick:()=>setEditViewMode(v=>v==="original"?null:"original"),disabled:!editOrigThumb,style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(editViewMode==="original"?"#a5b4fc":BORD),background:editViewMode==="original"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:editViewMode==="original"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:editOrigThumb?"pointer":"not-allowed",fontFamily:"inherit",backdropFilter:"blur(8px)",opacity:editOrigThumb?1:0.5}},"Original"),
+            React.createElement("button",{onClick:()=>setEditViewMode(v=>v==="corrected"?null:"corrected"),disabled:!editCorrectedThumb,style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(editViewMode==="corrected"?"#a5b4fc":BORD),background:editViewMode==="corrected"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:editViewMode==="corrected"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:editCorrectedThumb?"pointer":"not-allowed",fontFamily:"inherit",backdropFilter:"blur(8px)",opacity:editCorrectedThumb?1:0.5}},"Correction"),
+            React.createElement("button",{onClick:()=>setEditViewMode(null),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(editViewMode===null?"#a5b4fc":BORD),background:editViewMode===null?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:editViewMode===null?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"HDR")
+          )
         ),
         // Full breakdown of every correction actually applied to this photo
         // -- previously the only feedback here was the tiny "Auto: Food"
