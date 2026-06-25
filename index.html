@@ -18612,7 +18612,16 @@ async function processPixels(src, adj, imgStats, opts) {
   //     typical +20-40 noise spike over the background is removed.
   // Runs before dehaze/structure/sharpening so those passes work on clean
   // data instead of amplifying the specks.
-  {
+  // Skipped entirely on well-exposed, non-night photos with negligible
+  // near-black content: the per-pixel `bg>90 continue` gate below already
+  // makes this a no-op on such photos, but reaching that conclusion still
+  // costs a full w*h scan (9 neighbour reads + a sum per pixel) -- on a
+  // 24-48MP export that scan alone was ~1.5-3s wasted on photos (bright
+  // daylight/beach/snow/landscape) that were never going to have any dark
+  // region for it to act on in the first place.
+  const skipDespeckle = imgStats && !imgStats.isNight &&
+    imgStats.pctBlocked < 1 && imgStats.lumAvg > 100;
+  if (!skipDespeckle) {
     const orig = _snapshot(out);
     const L = new Float64Array(9);
     for (let y = 1; y < h-1; y++) {
@@ -18857,13 +18866,28 @@ async function processPixels(src, adj, imgStats, opts) {
 
   // 14. Vignette
   if (adj.vignette>0) {
-    const cx=w/2, cy=h/2, maxD=Math.sqrt(cx*cx+cy*cy), vf=(adj.vignette/100)*1.5;
+    const cx=w/2, cy=h/2, maxD2=cx*cx+cy*cy, vf=(adj.vignette/100)*1.5;
+    // dk only depends on (distance from center)/maxD, i.e. on the single
+    // scalar sqrt(dist2/maxD2) -- so instead of a Math.sqrt + Math.pow per
+    // pixel (the dominant cost of this otherwise-trivial radial falloff on
+    // a large photo), precompute it once into a lookup table indexed by
+    // normalized squared-distance and look it up per pixel. Vignette is a
+    // smooth, low-frequency effect, so this quantization is visually
+    // lossless. Per-column dx2 is also hoisted out of the inner loop since
+    // it doesn't depend on y.
+    const LUT_N = 2048;
+    const lut = new Float32Array(LUT_N + 1);
+    for (let i = 0; i <= LUT_N; i++) lut[i] = 1 - Math.pow(i / LUT_N, 0.9) * vf;
+    const dx2 = new Float64Array(w);
+    for (let x = 0; x < w; x++) { const dx = x - cx; dx2[x] = dx * dx; }
     for (let y=0;y<h;y++) {
       if (y > 0 && y % chunkRows === 0) await _tick();
+      const dy=y-cy, dy2=dy*dy;
+      const rowBase=y*w*4;
       for (let x=0;x<w;x++) {
-        const idx=(y*w+x)*4;
-        const d=Math.sqrt((x-cx)**2+(y-cy)**2)/maxD;
-        const dk=1-Math.pow(d,1.8)*vf;
+        const idx=rowBase+x*4;
+        const dn=(dx2[x]+dy2)/maxD2;
+        const dk=lut[dn>=1?LUT_N:(dn*LUT_N)|0];
         out[idx]=clamp(out[idx]*dk); out[idx+1]=clamp(out[idx+1]*dk); out[idx+2]=clamp(out[idx+2]*dk);
       }
     }
@@ -20485,7 +20509,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-25 20:42";
+const APP_BUILD = "2026-06-26 00:02";
 
 function App() {
   const canvasRef    = useRef(null);
