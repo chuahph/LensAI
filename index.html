@@ -20485,7 +20485,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-23 19:11";
+const APP_BUILD = "2026-06-25 19:42";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21095,6 +21095,17 @@ function BatchAgent({onClose}){
   // decoded preview+full-res pixel data here, once per opened photo, and
   // reuse it for every later click until a different photo is opened.
   const editDecodeRef = useRef({ fileIndex: null, previewData: null, stats: null, fullData: null });
+  // Bumped by the full-res preview effect below on every editPreview change.
+  // withScratchLock strictly serializes its tasks in submission order, so
+  // clicking through several presets quickly used to queue up that many
+  // full-resolution renderFullFromData passes back to back -- each one a
+  // real multi-second, main-thread-blocking pixel pass on a large photo --
+  // making every click feel like it was queued behind all the earlier ones,
+  // even though only the *last* click's result is ever shown. Checking this
+  // generation counter right before the expensive decode/render step lets a
+  // stale, already-superseded run bail out almost for free instead of doing
+  // the full work just to have it thrown away.
+  const editFullGenRef = useRef(0);
   // Tracks which single result (by index into `results`) is currently
   // having its full-resolution photo rendered for download -- batch
   // results only ever carry a preview-resolution thumbnail, so a single
@@ -21268,32 +21279,63 @@ function BatchAgent({onClose}){
     setEditFullUrl(null);
     let cancelled=false;
     let url=null;
-    // Serialized so this full-res preview render can never overlap another
-    // scratch user (a previous still-running preview render, a reanalyze, a
-    // download) -- overlapping renders share the same scratch canvas/buffer
-    // and corrupt or crash on large photos. Scratch is released afterward so
-    // the ~192MB full-res buffers don't stay pinned across a string of edits.
-    withScratchLock(async ()=>{
-      const { fullData } = await ensureEditDecode(shown.fileIndex, file);
-      // renderFullFromData mutates its input in place (see its own
-      // comment) -- safe for a one-shot decode, but the cached fullData
-      // above is reused on every later click, so clone it here instead of
-      // handing over the shared buffer.
-      const clone = new ImageData(new Uint8ClampedArray(fullData.data), fullData.width, fullData.height);
-      return renderFullFromData(clone, shown.adj, shown.stats);
-    }).then(blob=>{
-      if(cancelled) return;
-      url=URL.createObjectURL(blob);
-      setEditFullUrl(url);
-    }).catch(()=>{
-      // Same fix as downloadOne/downloadAll -- this .then had no .catch,
-      // so a failed full-res render here (e.g. mid-edit on a huge photo)
-      // was an unhandled rejection that would nuke the whole UI. Falls
-      // back to the existing small thumb instead (editFullUrl just stays
-      // null, see the <img> below).
-      if(!cancelled) setExportError("Couldn't render a full-quality preview -- showing the lower-res thumbnail instead.");
-    }).finally(()=>{ _releaseScratch(); });
-    return ()=>{ cancelled=true; if(url) URL.revokeObjectURL(url); };
+    const gen = ++editFullGenRef.current;
+    // This full-res render shares the scratch canvas with every other
+    // scratch user, including the *previous* click's own full-res render
+    // -- they're serialized through one queue (withScratchLock), so without
+    // a debounce, a click's cheap preview-res reanalyze (which sets
+    // editBusy and re-enables the preset buttons) has to wait its turn
+    // behind whatever multi-second full-res render the previous click
+    // already kicked off, even though that previous render's result is
+    // about to be thrown away anyway. That's what made flipping through
+    // presets feel sluggish compared to the single-photo editor, which
+    // never touches full-res pixels until export. Waiting for clicking to
+    // pause before even starting this means a burst of clicks costs zero
+    // full-res renders except the last one, and the preset buttons stay
+    // responsive in between since reanalyzeEdit's own scratch use never
+    // has one of these queued ahead of it.
+    // 900ms rather than a shorter gap: reanalyzeEdit's own preview-res
+    // render (processPixels + a thumbnail draw) genuinely costs several
+    // hundred ms on a real photo, so a short debounce window keeps getting
+    // outrun by that cost alone and never gets a chance to coalesce a
+    // back-to-back run of clicks -- it just ends up firing after almost
+    // every single one anyway. 900ms comfortably covers the gap between
+    // someone evaluating one preset and tapping the next, while someone
+    // genuinely flipping through several quickly still only pays for one
+    // full-res render at the end instead of one queued per click.
+    const FULL_PREVIEW_DEBOUNCE_MS = 900;
+    const timer = setTimeout(() => {
+      // Serialized so this full-res preview render can never overlap another
+      // scratch user (a previous still-running preview render, a reanalyze, a
+      // download) -- overlapping renders share the same scratch canvas/buffer
+      // and corrupt or crash on large photos. Scratch is released afterward so
+      // the ~192MB full-res buffers don't stay pinned across a string of edits.
+      withScratchLock(async ()=>{
+        // Belt-and-suspenders: a later click could still land between this
+        // timer firing and its turn in the scratch queue coming up.
+        if (cancelled || gen !== editFullGenRef.current) return null;
+        const { fullData } = await ensureEditDecode(shown.fileIndex, file);
+        if (cancelled || gen !== editFullGenRef.current) return null;
+        // renderFullFromData mutates its input in place (see its own
+        // comment) -- safe for a one-shot decode, but the cached fullData
+        // above is reused on every later click, so clone it here instead of
+        // handing over the shared buffer.
+        const clone = new ImageData(new Uint8ClampedArray(fullData.data), fullData.width, fullData.height);
+        return renderFullFromData(clone, shown.adj, shown.stats);
+      }).then(blob=>{
+        if(cancelled || !blob) return;
+        url=URL.createObjectURL(blob);
+        setEditFullUrl(url);
+      }).catch(()=>{
+        // Same fix as downloadOne/downloadAll -- this .then had no .catch,
+        // so a failed full-res render here (e.g. mid-edit on a huge photo)
+        // was an unhandled rejection that would nuke the whole UI. Falls
+        // back to the existing small thumb instead (editFullUrl just stays
+        // null, see the <img> below).
+        if(!cancelled) setExportError("Couldn't render a full-quality preview -- showing the lower-res thumbnail instead.");
+      }).finally(()=>{ _releaseScratch(); });
+    }, FULL_PREVIEW_DEBOUNCE_MS);
+    return ()=>{ cancelled=true; clearTimeout(timer); if(url) URL.revokeObjectURL(url); };
   },[editIdx,editPreview]);
 
   const openEdit=(idx)=>{
