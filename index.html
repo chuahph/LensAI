@@ -20554,7 +20554,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-26 15:36";
+const APP_BUILD = "2026-06-26 15:59";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21517,7 +21517,7 @@ function BatchAgent({onClose,onCloseApp}){
   });
   const BORD="rgba(255,255,255,0.07)";
 
-  return React.createElement("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",backdropFilter:"blur(12px)",display:"flex",alignItems:"flex-end",zIndex:60,animation:"fadeIn 0.2s",paddingBottom:"env(safe-area-inset-bottom)"},onClick:e=>{if(e.target===e.currentTarget&&!busy) onClose();}},
+  return React.createElement("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",backdropFilter:"blur(12px)",display:"flex",alignItems:"flex-end",zIndex:60,animation:"fadeIn 0.2s",paddingTop:"env(safe-area-inset-top)",paddingBottom:"env(safe-area-inset-bottom)"},onClick:e=>{if(e.target===e.currentTarget&&!busy) onClose();}},
     React.createElement("div",{style:{background:"#0d1220",borderRadius:"22px 22px 0 0",borderTop:"1px solid "+BORD,width:"100%",maxHeight:"88vh",overflowY:"auto",animation:"slideUp 0.3s ease-out"}},
       React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 16px 12px",borderBottom:"1px solid "+BORD,position:"sticky",top:0,background:"#0d1220",borderRadius:"22px 22px 0 0",zIndex:5}},
         React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:800,fontSize:18}},"Batch Agent"),
