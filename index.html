@@ -21029,7 +21029,15 @@ function App() {
       document.body.appendChild(a);
       a.click();
       a.remove();
-      URL.revokeObjectURL(objUrl);
+      // Revoking immediately races a native "Save As" picker (desktop
+      // browsers set to ask where to save, or a slow share-sheet fallback):
+      // the browser doesn't actually start reading the blob until the user
+      // finishes picking a location, and an already-revoked URL makes that
+      // read fail silently, so the download just never finishes. Give the
+      // picker time to resolve before freeing it -- it's cheap to keep
+      // around a little longer since `blob` itself, not this URL, is what
+      // holds the actual bytes.
+      setTimeout(()=>URL.revokeObjectURL(objUrl), 30000);
       showToast("Photo downloaded");
     } catch(err) {
       console.error("[LensAI] Save failed:", err);
@@ -21304,7 +21312,9 @@ function BatchAgent({onClose,onCloseApp}){
       // (one per selected goal) never collide/overwrite each other.
       a.download=stem+"-"+(r.goalId||"batch")+"-"+Date.now()+".jpg";
       document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
+      // See saveImg's matching comment -- don't revoke before a native
+      // "Save As" picker has had a chance to resolve.
+      setTimeout(()=>URL.revokeObjectURL(url), 30000);
     } catch (err) {
       // A failed full-res render (huge-canvas allocation failure, a
       // corrupt/unreadable file, etc.) must not escape as an unhandled
@@ -21476,7 +21486,11 @@ function BatchAgent({onClose,onCloseApp}){
       const a=document.createElement("a");
       a.href=url; a.download="lensai-batch-"+Date.now()+".zip";
       document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
+      // See saveImg's matching comment -- don't revoke before a native
+      // "Save As" picker has had a chance to resolve. Matters most here:
+      // the zip is the biggest of the three downloads and the most likely
+      // to have a user spend real time picking a folder for it.
+      setTimeout(()=>URL.revokeObjectURL(url), 30000);
     } catch (err) {
       // Same fix as downloadOne/saveImg -- a failed full-res render
       // partway through the zip (one bad file, a huge-canvas allocation
