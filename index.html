@@ -19359,13 +19359,17 @@ function matchesAscii(view, offset, str) {
   return true;
 }
 
-// Buckets nearby shots together at roughly city-block precision (~1.1km)
-// rather than one folder per exact coordinate, which would scatter a
-// single walk/event across dozens of near-duplicate folders. Used as the
-// reverse-geocoding cache key and as a last-resort folder name if lookup
-// fails (offline, rate-limited, etc).
+// Buckets repeat shots at the same spot together (~111m precision) rather
+// than one folder per exact coordinate, which would scatter a few photos
+// taken standing in one place across dozens of near-duplicate folders.
+// Used as the reverse-geocoding cache key and as a last-resort folder name
+// if lookup fails (offline, rate-limited, etc) -- this has to stay tight
+// enough that two distinct landmarks a few hundred metres apart (common in
+// any city center/tourist area) don't get bucketed into the same folder;
+// city-block-or-coarser precision was tried first and merged unrelated
+// nearby landmarks into one folder, which is the bug this fixes.
 function gpsCoordKey(gps) {
-  const lat = Math.abs(gps.lat).toFixed(2), lon = Math.abs(gps.lon).toFixed(2);
+  const lat = Math.abs(gps.lat).toFixed(3), lon = Math.abs(gps.lon).toFixed(3);
   return lat + (gps.lat >= 0 ? "N" : "S") + "_" + lon + (gps.lon >= 0 ? "E" : "W");
 }
 
@@ -20554,7 +20558,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-26 15:59";
+const APP_BUILD = "2026-06-26 16:16";
 
 function App() {
   const canvasRef    = useRef(null);
