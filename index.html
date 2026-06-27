@@ -19501,6 +19501,62 @@ async function locationGroupAgent(file) {
   return null;
 }
 
+// === Share-to-Facebook helpers =======================================
+// locationGroupAgent's folder value doubles as a caption location, but only
+// when it's an actual place name -- its GPS-coordinate fallback ("gps_..."),
+// capture-date fallback ("date_..."), and source-folder path aren't things
+// anyone wants in a Facebook caption, so those are dropped.
+function shareLocationName(raw) {
+  if (!raw) return null;
+  if (/^gps_/.test(raw) || /^date_/.test(raw)) return null;
+  if (raw.indexOf("/") !== -1) return null;
+  return raw;
+}
+
+// A few ready-to-post caption write-ups per detected scene, so sharing a
+// photo offers some wording instead of a blank box. The detected place name
+// (when the photo carries one) is appended so the caption is grounded in
+// where it was taken -- both are what the user asked share captions to use.
+const SHARE_SCENE_MOODS = {
+  nature:   ["Lost in nature 🌿", "Fresh air, open skies", "Touch of the great outdoors"],
+  food:     ["Good food, good mood 🍽️", "A little feast for the eyes", "Worth every bite"],
+  urban:    ["City state of mind 🏙️", "Concrete and quiet stories", "Streets worth a second look"],
+  night:    ["After dark ✨", "When the lights come alive", "Night mode: on"],
+  portrait: ["Caught in the moment 📸", "A frame worth keeping", "Just being me"],
+  people:   ["Good times, good people 💫", "Moments worth keeping", "Making memories"],
+};
+function buildShareCaptions(scene, locationName) {
+  const moods = SHARE_SCENE_MOODS[scene] || ["A moment worth sharing 📸", "Through my lens", "Captured today"];
+  return moods.map(m => locationName ? m + " — " + locationName : m);
+}
+
+// Shares an already-encoded image File to whatever the device offers
+// (Facebook shows up in the OS share sheet on iOS/Android). The caption is
+// always copied to the clipboard first: Android usually pre-fills share
+// text, but Facebook's iOS composer routinely ignores it, so a copy means
+// the user can paste it in one tap either way. Returns "shared" | "saved" |
+// "cancelled" so the caller can word its toast. Falls back to a normal
+// download (plus the clipboard copy) wherever file sharing isn't supported.
+async function shareImageWithCaption(file, caption) {
+  const text = (caption || "").trim();
+  try { if (text && navigator.clipboard) await navigator.clipboard.writeText(text); } catch (e) { /* clipboard blocked -- share text below is the fallback */ }
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], text, title: text || file.name });
+      return "shared";
+    } catch (err) {
+      if (err && err.name === "AbortError") return "cancelled";
+      // fall through to download on any other share failure
+    }
+  }
+  const url = URL.createObjectURL(file);
+  const a = document.createElement("a");
+  a.href = url; a.download = file.name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  return "saved";
+}
+
 // Each scene preset's realistic maximum raw score in scoreHDRPresets --
 // every one of its OWN contributing rules firing at once (excluding rules
 // that are mutually exclusive, e.g. nature's hasSky vs !hasSky branches
@@ -20563,7 +20619,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-27 23:45";
+const APP_BUILD = "2026-06-28 00:17";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -20575,6 +20631,7 @@ function App() {
   const statsRef     = useRef(null);
   const fullResRef   = useRef(null);   // original image at true file resolution
   const fullResStats = useRef(null);   // stats computed from full-res data
+  const srcFileRef   = useRef(null);   // the originally-opened File, kept so share can read its EXIF location
   const analyzedAdjRef = useRef(null); // adj snapshot right after Analyze (corrections only, no HDR)
   const enhancedAdjRef = useRef(null); // adj snapshot right after Enhance (corrections + HDR look)
 
@@ -20744,6 +20801,7 @@ function App() {
   const onFile=(e)=>{
     const f=e.target.files[0]; if(!f) return;
     setOrigFileName(f.name||null);
+    srcFileRef.current=f; // retained for share's EXIF-location lookup
     const r=new FileReader();
     r.onload=ev=>loadImage(ev.target.result);
     // Previously missing: without this, a file the browser fails to read
@@ -20931,18 +20989,16 @@ function App() {
     setAutoHDR(null); setHistory([]); setImgStats(null);
     setOrigFileName(null); setCrop({ x: 0, y: 0, w: 1, h: 1 });
     statsRef.current=null; fullResRef.current=null; fullResStats.current=null;
+    srcFileRef.current=null;
     analyzedAdjRef.current=null; enhancedAdjRef.current=null;
   };
-  const saveImg=async()=>{
-    if(!img) return;
-    // Everything below runs inside an async arrow fn passed straight to
-    // onClick, with nothing awaiting or catching its returned promise --
-    // any throw (canvas size limits, getContext returning null on huge
-    // full-res exports, etc.) would otherwise become an unhandled promise
-    // rejection. The app's global unhandledrejection handler treats that
-    // as fatal and covers the whole UI with a reload overlay, destroying
-    // all in-progress edits over what should just be a failed export.
-    try {
+  // Runs the full-resolution export pipeline (process -> perspective ->
+  // rotate -> crop -> JPEG encode -> EXIF date) for whatever adj is currently
+  // on screen, returning the encoded blob and a collision-proof filename.
+  // Shared by Save and Share-to-Facebook so both export pixel-identical
+  // output. The caller owns error handling and calling _releaseScratch()
+  // afterwards (this allocates the big full-res scratch buffers).
+  const buildEditedExport = async () => {
       // Use original full-resolution data for export. Export whichever
       // adj the user is currently looking at (live edit, or a frozen
       // Original/Correction/HDR preview via the view-mode buttons) --
@@ -21010,6 +21066,20 @@ function App() {
       // with -- let alone silently overwrite -- the original file.
       const stem=(origFileName||"photo").replace(/\.[^/.]+$/,"");
       const filename=stem+"-edited-"+Date.now()+".jpg";
+      return { blob, filename };
+  };
+
+  const saveImg=async()=>{
+    if(!img) return;
+    // Everything below runs inside an async arrow fn passed straight to
+    // onClick, with nothing awaiting or catching its returned promise --
+    // any throw (canvas size limits, getContext returning null on huge
+    // full-res exports, etc.) would otherwise become an unhandled promise
+    // rejection. The app's global unhandledrejection handler treats that
+    // as fatal and covers the whole UI with a reload overlay, destroying
+    // all in-progress edits over what should just be a failed export.
+    try {
+      const { blob, filename } = await buildEditedExport();
 
       // Prefer the OS share sheet (lets the user "Save Image"/"Save to
       // Photos" straight from the share UI, or send it to another app)
@@ -21061,6 +21131,62 @@ function App() {
     }
   };
 
+  // --- Share to Facebook (single-photo editor) -------------------------
+  // Builds the edited photo once, generates scene+location caption
+  // write-ups, and opens a small sheet to pick/edit one before handing the
+  // file to the OS share sheet (where Facebook appears). The caption is
+  // copied to the clipboard so it's pasteable even when Facebook ignores
+  // pre-filled share text (common on iOS).
+  const [shareOpen,setShareOpen]=useState(false);
+  const [shareBusy,setShareBusy]=useState(false);
+  const [shareCaps,setShareCaps]=useState([]);
+  const [shareText,setShareText]=useState("");
+  const [shareThumb,setShareThumb]=useState(null);
+  const shareFileRef=useRef(null);
+
+  const openShare=async()=>{
+    if(!img||shareBusy) return;
+    setShareBusy(true);
+    try{
+      const { blob, filename } = await buildEditedExport();
+      shareFileRef.current = new File([blob], filename, { type:"image/jpeg" });
+      setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return URL.createObjectURL(blob); });
+      let loc=null;
+      if(srcFileRef.current){ try{ loc=shareLocationName(await locationGroupAgent(srcFileRef.current)); }catch(e){} }
+      const scene=(analysis&&analysis.scene)||(statsRef.current&&statsRef.current.scene)||(imgStats&&imgStats.scene)||null;
+      const caps=buildShareCaptions(scene, loc);
+      setShareCaps(caps);
+      setShareText(caps[0]||"");
+      setShareOpen(true);
+    }catch(err){
+      console.error("[LensAI] Share prepare failed:", err);
+      showToast("Couldn't prepare share -- try again");
+    }finally{
+      setShareBusy(false);
+      _releaseScratch();
+    }
+  };
+
+  const closeShare=()=>{
+    setShareOpen(false);
+    setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return null; });
+    shareFileRef.current=null;
+  };
+
+  const doShare=async()=>{
+    const file=shareFileRef.current;
+    if(!file){ closeShare(); return; }
+    try{
+      const result=await shareImageWithCaption(file, shareText);
+      if(result==="cancelled") return; // keep the sheet open so they can retry
+      showToast(result==="shared"?"Caption copied -- pick Facebook to post":"Caption copied & photo saved -- open Facebook to post");
+      closeShare();
+    }catch(err){
+      console.error("[LensAI] Share failed:", err);
+      showToast("Share failed -- try again");
+    }
+  };
+
   const curAdj    = ADJUSTMENTS.find(a=>a.id===activeAdj);
   const activePre = HDR_PRESETS.find(h=>h.id===activeHDR);
   const autoPre   = HDR_PRESETS.find(h=>h.id===autoHDR);
@@ -21078,7 +21204,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
             React.createElement("span",{style:{fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:8,background:activePre.color+"22",color:activePre.color,border:"1px solid "+activePre.color+"44",flexShrink:0}},"HDR",activePre.label)
           )),React.createElement("div",{style:{display:"flex",gap:6,alignItems:"center",overflowX:"auto",overflowY:"hidden",scrollbarWidth:"none",minWidth:0,flexShrink:1,flexGrow:1}},analyzed&&analysis&&(
             React.createElement("button",{onClick:()=>{clearTimeout(modalAutoCloseRef.current);setModal(true);},title:"Show analyze & correction summary",style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(99,102,241,0.35)",background:"rgba(99,102,241,0.08)",color:"#a5b4fc",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:5}},React.createElement("span",{style:{width:5,height:5,borderRadius:"50%",background:"#a5b4fc",display:"inline-block"}}),"Summary")
-          ),React.createElement(Btn,{onClick:undo,disabled:!history.length},"Undo"),React.createElement(Btn,{onClick:reset,disabled:!img},"Reset"),false),React.createElement("div",{style:{flexShrink:0,marginLeft:"auto",display:"flex",alignItems:"center",gap:10}},img&&React.createElement("button",{onClick:backToMenu,title:"Back to menu","aria-label":"Back to menu",style:{flexShrink:0,width:34,height:34,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"←"),React.createElement(Btn,{onClick:saveImg,disabled:!img||!(analyzed||hasEnhanced),accent:true},"Save"),React.createElement("button",{onClick:closeApp,title:"Close LensAI","aria-label":"Close LensAI",style:{flexShrink:0,width:34,height:34,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:18,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×"))),React.createElement("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden",background:"#020408",cursor:!img?"pointer":"default",minHeight:0},onClick:!img?()=>fileRef.current&&fileRef.current.click():undefined},React.createElement("div",{ref:compareWrapRef,style:{position:"relative",display:img?"inline-block":"none",maxWidth:"100%",maxHeight:"100%"}},React.createElement("canvas",{ref:canvasRef,style:{maxWidth:"100%",maxHeight:"100%",height:"auto",width:"auto",display:"block",borderRadius:3}}),img&&viewMode&&React.createElement("div",{style:{position:"absolute",top:8,left:8,background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:9,fontWeight:800,letterSpacing:"0.1em",padding:"3px 8px",borderRadius:6,pointerEvents:"none"}},viewMode==="original"?"ORIGINAL":viewMode==="analyzed"?"CORRECTION":"HDR"),img&&React.createElement(TransformOverlay,{crop,setCrop,rotation:adj.rotation||0,onRotation:v=>setAdj(p=>({...p,rotation:v})),perspective:adj.perspective||0,onPerspective:v=>setAdj(p=>({...p,perspective:v})),hidden:!!viewMode}),img&&analyzed&&React.createElement("div",{style:{position:"absolute",bottom:10,left:"50%",transform:"translateX(-50%)",display:"flex",gap:6,zIndex:3}},
+          ),React.createElement(Btn,{onClick:undo,disabled:!history.length},"Undo"),React.createElement(Btn,{onClick:reset,disabled:!img},"Reset"),false),React.createElement("div",{style:{flexShrink:0,marginLeft:"auto",display:"flex",alignItems:"center",gap:10}},img&&React.createElement("button",{onClick:backToMenu,title:"Back to menu","aria-label":"Back to menu",style:{flexShrink:0,width:34,height:34,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"←"),img&&React.createElement("button",{onClick:openShare,disabled:!(analyzed||hasEnhanced)||shareBusy,title:"Share to Facebook","aria-label":"Share to Facebook",style:{flexShrink:0,width:34,height:34,borderRadius:"50%",border:"1px solid rgba(59,89,152,0.6)",background:"rgba(59,89,152,0.15)",color:(analyzed||hasEnhanced)&&!shareBusy?"#9db2e8":"#475569",fontSize:17,fontWeight:900,lineHeight:1,cursor:(analyzed||hasEnhanced)&&!shareBusy?"pointer":"not-allowed",fontFamily:"Georgia,'Times New Roman',serif",display:"flex",alignItems:"center",justifyContent:"center"}},shareBusy?React.createElement(Spin,null):"f"),React.createElement(Btn,{onClick:saveImg,disabled:!img||!(analyzed||hasEnhanced),accent:true},"Save"),React.createElement("button",{onClick:closeApp,title:"Close LensAI","aria-label":"Close LensAI",style:{flexShrink:0,width:34,height:34,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:18,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×"))),React.createElement("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden",background:"#020408",cursor:!img?"pointer":"default",minHeight:0},onClick:!img?()=>fileRef.current&&fileRef.current.click():undefined},React.createElement("div",{ref:compareWrapRef,style:{position:"relative",display:img?"inline-block":"none",maxWidth:"100%",maxHeight:"100%"}},React.createElement("canvas",{ref:canvasRef,style:{maxWidth:"100%",maxHeight:"100%",height:"auto",width:"auto",display:"block",borderRadius:3}}),img&&viewMode&&React.createElement("div",{style:{position:"absolute",top:8,left:8,background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:9,fontWeight:800,letterSpacing:"0.1em",padding:"3px 8px",borderRadius:6,pointerEvents:"none"}},viewMode==="original"?"ORIGINAL":viewMode==="analyzed"?"CORRECTION":"HDR"),img&&React.createElement(TransformOverlay,{crop,setCrop,rotation:adj.rotation||0,onRotation:v=>setAdj(p=>({...p,rotation:v})),perspective:adj.perspective||0,onPerspective:v=>setAdj(p=>({...p,perspective:v})),hidden:!!viewMode}),img&&analyzed&&React.createElement("div",{style:{position:"absolute",bottom:10,left:"50%",transform:"translateX(-50%)",display:"flex",gap:6,zIndex:3}},
             React.createElement("button",{onClick:()=>setViewMode(v=>v==="original"?null:"original"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="original"?"#a5b4fc":BORD),background:viewMode==="original"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="original"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"Original"),
             React.createElement("button",{onClick:()=>setViewMode(v=>v==="analyzed"?null:"analyzed"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="analyzed"?"#a5b4fc":BORD),background:viewMode==="analyzed"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="analyzed"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"Correction"),
             hasEnhanced&&React.createElement("button",{onClick:()=>setViewMode(v=>v==="enhanced"?null:"enhanced"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="enhanced"?"#a5b4fc":BORD),background:viewMode==="enhanced"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="enhanced"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"HDR")
@@ -21135,7 +21261,21 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
                   React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(99,102,241,0.07)",borderRadius:10,padding:"9px 12px",border:"1px solid rgba(99,102,241,0.14)"}},React.createElement("span",{style:{fontSize:12,color:"#64748b"}},"HDR detected -- tap Enhance to apply"),React.createElement("span",{style:{fontSize:12,color:hp.color,fontWeight:700}},hp.label,hp.skyBoost?" + Sky boost":""))
                 ):null;
               })(),React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,padding:"8px 12px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.18)",borderRadius:10}},React.createElement("span",{style:{fontSize:13}},"OK"),React.createElement("span",{style:{fontSize:12,color:"#86efac"}},"Corrections applied -- tap outside or swipe down to dismiss")))))
-      ),batchOpen&&React.createElement(BatchAgent,{onClose:()=>setBatchOpen(false),onCloseApp:closeApp}),toast&&React.createElement("div",{style:{position:"fixed",bottom:68,left:"50%",transform:"translateX(-50%)",background:"rgba(13,18,32,0.97)",backdropFilter:"blur(12px)",border:"1px solid "+BORD,borderRadius:20,padding:"8px 18px",fontSize:12,fontWeight:600,whiteSpace:"nowrap",zIndex:100,boxShadow:"0 6px 20px rgba(0,0,0,0.4)",animation:"slideUp 0.25s ease-out"}},toast)));
+      ),batchOpen&&React.createElement(BatchAgent,{onClose:()=>setBatchOpen(false),onCloseApp:closeApp}),shareOpen&&React.createElement("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",backdropFilter:"blur(12px)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:90,animation:"fadeIn 0.2s",paddingTop:"env(safe-area-inset-top)",paddingBottom:"env(safe-area-inset-bottom)"},onClick:e=>{if(e.target===e.currentTarget) closeShare();}},
+        React.createElement("div",{style:{background:"#0d1220",borderRadius:"22px 22px 0 0",borderTop:"1px solid "+BORD,width:"100%",maxWidth:520,maxHeight:"88vh",overflowY:"auto",animation:"slideUp 0.3s ease-out",padding:"0 16px 16px"}},
+          React.createElement("div",{onClick:closeShare,style:{width:48,height:4,borderRadius:2,background:"rgba(255,255,255,0.25)",margin:"12px auto 14px",cursor:"pointer"}}),
+          React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}},
+            React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{width:24,height:24,borderRadius:6,background:"#1877f2",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:15,fontFamily:"Georgia,'Times New Roman',serif"}},"f"),React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:800,fontSize:18}},"Share to Facebook")),
+            React.createElement("button",{onClick:closeShare,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×")),
+          shareThumb&&React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",marginBottom:12,display:"block"}}),
+          React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption"),
+          React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:3,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10}}),
+          shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to use"),
+          shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>React.createElement("button",{key:i,onClick:()=>setShareText(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(shareText===c?"#9db2e8":BORD),background:shareText===c?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:shareText===c?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}},c))),
+          React.createElement("div",{style:{fontSize:11,color:"#64748b",lineHeight:1.5,marginBottom:12}},"Tap the button, then pick Facebook in the share sheet. The caption is copied to your clipboard so you can paste it if Facebook doesn't pre-fill it."),
+          React.createElement("button",{onClick:doShare,style:{width:"100%",padding:"12px",borderRadius:12,border:"none",background:"#1877f2",color:"#fff",fontSize:14,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}},"Share to Facebook")
+        )
+      ),toast&&React.createElement("div",{style:{position:"fixed",bottom:68,left:"50%",transform:"translateX(-50%)",background:"rgba(13,18,32,0.97)",backdropFilter:"blur(12px)",border:"1px solid "+BORD,borderRadius:20,padding:"8px 18px",fontSize:12,fontWeight:600,whiteSpace:"nowrap",zIndex:100,boxShadow:"0 6px 20px rgba(0,0,0,0.4)",animation:"slideUp 0.25s ease-out"}},toast)));
 }
 
 function Flag({children,color}){
@@ -21234,6 +21374,57 @@ function BatchAgent({onClose,onCloseApp}){
   // download now renders full-res on demand (fullRenderAgent) instead of
   // it already being sitting in memory.
   const [downloadingIdx,setDownloadingIdx]=useState(null);
+
+  // Share-to-Facebook for a single batch result: which result is being
+  // prepared/shared, the generated caption write-ups, the editable text,
+  // and the rendered file/preview. Mirrors the single-photo editor's share.
+  const [shareIdx,setShareIdx]=useState(null);
+  const [sharePrepIdx,setSharePrepIdx]=useState(null);
+  const [shareCaps,setShareCaps]=useState([]);
+  const [shareText,setShareText]=useState("");
+  const [shareThumb,setShareThumb]=useState(null);
+  const shareFileRef=useRef(null);
+
+  const openShareFor=async(r)=>{
+    if(!r||!r.adj) return;
+    const file=files[r.fileIndex];
+    if(!file) return;
+    const idx=results.indexOf(r);
+    setSharePrepIdx(idx);
+    try{
+      const blob=await addExifDateToBlob(await withScratchLock(()=>fullRenderAgent(file, r.adj, r.stats)));
+      const stem=(r.name||"photo").replace(/\.[^/.]+$/,"");
+      const fname=stem+"-"+(r.goalId||"batch")+"-"+Date.now()+".jpg";
+      shareFileRef.current=new File([blob], fname, { type:"image/jpeg" });
+      setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return URL.createObjectURL(blob); });
+      const loc=shareLocationName(r.origFolder);
+      const caps=buildShareCaptions(r.stats&&r.stats.scene, loc);
+      setShareCaps(caps);
+      setShareText(caps[0]||"");
+      setShareIdx(idx);
+    }catch(err){
+      setExportError("Couldn't prepare \""+(r.name||"that photo")+"\" for sharing -- "+(err&&err.message||"try again"));
+    }finally{ setSharePrepIdx(null); _releaseScratch(); }
+  };
+
+  const closeShare=()=>{
+    setShareIdx(null);
+    setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return null; });
+    shareFileRef.current=null;
+  };
+
+  const doShare=async()=>{
+    const file=shareFileRef.current;
+    if(!file){ closeShare(); return; }
+    try{
+      const result=await shareImageWithCaption(file, shareText);
+      if(result==="cancelled") return;
+      setExportError(null);
+      closeShare();
+    }catch(err){
+      setExportError("Share failed -- try again");
+    }
+  };
 
   // Mirrors the agent names in batchProcessFile's pipeline (decodeAgent,
   // analysisAgent, ...) so the busy indicator reflects which agent is
@@ -21609,6 +21800,7 @@ function BatchAgent({onClose,onCloseApp}){
               ? React.createElement("div",{title:(r.cullReasons||[]).join(", "),style:{height:96,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#fbbf24",padding:6,textAlign:"center"}},"Skipped: "+(r.cullReasons||[]).join(", "))
               : React.createElement("img",{src:r.thumb,onClick:()=>openEdit(results.indexOf(r)),title:"Tap to reanalyze with a different HDR type",style:{width:"100%",height:96,objectFit:"cover",display:"block",cursor:"pointer"}}),
             !r.error&&!r.culled&&React.createElement("button",{onClick:()=>downloadOne(r),disabled:downloadingIdx===results.indexOf(r),title:"Download",style:{position:"absolute",bottom:4,right:4,width:22,height:22,borderRadius:"50%",border:"none",background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:11,cursor:downloadingIdx===results.indexOf(r)?"wait":"pointer",display:"flex",alignItems:"center",justifyContent:"center"}},downloadingIdx===results.indexOf(r)?React.createElement(Spin,null):"↓"),
+            !r.error&&!r.culled&&React.createElement("button",{onClick:()=>openShareFor(r),disabled:sharePrepIdx===results.indexOf(r),title:"Share to Facebook",style:{position:"absolute",bottom:4,left:4,width:22,height:22,borderRadius:"50%",border:"none",background:"rgba(24,119,242,0.85)",color:"#fff",fontSize:12,fontWeight:900,fontFamily:"Georgia,'Times New Roman',serif",cursor:sharePrepIdx===results.indexOf(r)?"wait":"pointer",display:"flex",alignItems:"center",justifyContent:"center"}},sharePrepIdx===results.indexOf(r)?React.createElement(Spin,null):"f"),
             !r.error&&!r.culled&&goalLabel(r)&&React.createElement("div",{style:{position:"absolute",top:4,left:4,background:"rgba(0,0,0,0.6)",color:"#a5b4fc",fontSize:8,fontWeight:700,padding:"2px 5px",borderRadius:5}},goalLabel(r)),
             !r.error&&!r.culled&&r.qaFlags&&React.createElement("div",{title:"QA Agent: "+r.qaFlags.join(", "),style:{position:"absolute",top:4,right:4,width:16,height:16,borderRadius:"50%",background:"rgba(251,191,36,0.85)",color:"#1c1917",fontSize:10,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}},"!")
           )))
@@ -21705,6 +21897,21 @@ function BatchAgent({onClose,onCloseApp}){
         })),
         (()=>{const ready=editPreviewFor&&editPreviewFor.preset===editPreset&&editPreviewFor.corrections===editCorrections;
         return React.createElement("button",{onClick:saveEdit,disabled:!ready,style:{padding:"10px 14px",borderRadius:10,border:"none",background:!ready?"rgba(34,197,94,0.2)":"linear-gradient(135deg,#22c55e,#16a34a)",color:"#fff",fontSize:12,fontWeight:700,cursor:!ready?"not-allowed":"pointer",fontFamily:"inherit"}},"Save");})()
+      )
+    ),
+    shareIdx!=null&&React.createElement("div",{onClick:e=>{if(e.target===e.currentTarget) closeShare();},style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",backdropFilter:"blur(12px)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:1100,animation:"fadeIn 0.2s",paddingTop:"env(safe-area-inset-top)",paddingBottom:"env(safe-area-inset-bottom)"}},
+      React.createElement("div",{style:{background:"#0d1220",borderRadius:"22px 22px 0 0",borderTop:"1px solid "+BORD,width:"100%",maxWidth:520,maxHeight:"88vh",overflowY:"auto",animation:"slideUp 0.3s ease-out",padding:"0 16px 16px"}},
+        React.createElement("div",{onClick:closeShare,style:{width:48,height:4,borderRadius:2,background:"rgba(255,255,255,0.25)",margin:"12px auto 14px",cursor:"pointer"}}),
+        React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}},
+          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{width:24,height:24,borderRadius:6,background:"#1877f2",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:15,fontFamily:"Georgia,'Times New Roman',serif"}},"f"),React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:800,fontSize:18,color:"#fff"}},"Share to Facebook")),
+          React.createElement("button",{onClick:closeShare,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×")),
+        shareThumb&&React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",marginBottom:12,display:"block"}}),
+        React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption"),
+        React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:3,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10}}),
+        shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to use"),
+        shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>React.createElement("button",{key:i,onClick:()=>setShareText(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(shareText===c?"#9db2e8":BORD),background:shareText===c?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:shareText===c?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}},c))),
+        React.createElement("div",{style:{fontSize:11,color:"#64748b",lineHeight:1.5,marginBottom:12}},"Tap the button, then pick Facebook in the share sheet. The caption is copied to your clipboard so you can paste it if Facebook doesn't pre-fill it."),
+        React.createElement("button",{onClick:doShare,style:{width:"100%",padding:"12px",borderRadius:12,border:"none",background:"#1877f2",color:"#fff",fontSize:14,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}},"Share to Facebook")
       )
     )
   );
