@@ -19553,14 +19553,18 @@ function firstSentences(text, max) {
 }
 
 // Looks up the nearest notable place to a coordinate on one Wikipedia
-// language edition: a geosearch for the closest articles, then the primary
-// article's plain-text intro extract. `sentences` controls extract length
-// and `wantNearby` whether to collect the other close-by article names.
-// Returns { title, description, lat, lon, distance, nearby } | null.
-async function _wikiLandmark(lang, gps, signal, sentences, wantNearby) {
+// language edition: a geosearch for the article AT the photo's coordinate,
+// then that article's plain-text intro extract. The radius is deliberately
+// tight (1km) and only the single closest article is taken, so the result is
+// the exact place the photo is of -- not a famous landmark kilometres away
+// that happened to be the nearest article in a wide search. `sentences`
+// controls how much description to pull. Returns { title, description, lat,
+// lon, distance } | null (null when nothing notable is right there).
+const LANDMARK_RADIUS_M = 1000;
+async function _wikiLandmark(lang, gps, signal, sentences) {
   const base = "https://" + lang + ".wikipedia.org/w/api.php";
   const geoUrl = base + "?action=query&list=geosearch&gscoord=" +
-    encodeURIComponent(gps.lat + "|" + gps.lon) + "&gsradius=8000&gslimit=6&format=json&origin=*";
+    encodeURIComponent(gps.lat + "|" + gps.lon) + "&gsradius=" + LANDMARK_RADIUS_M + "&gslimit=1&format=json&origin=*";
   const geoRes = await fetch(geoUrl, { signal });
   if (!geoRes.ok) return null;
   const list = (((await geoRes.json()).query) || {}).geosearch || [];
@@ -19575,28 +19579,22 @@ async function _wikiLandmark(lang, gps, signal, sentences, wantNearby) {
     const page = pages && Object.keys(pages).length ? pages[Object.keys(pages)[0]] : null;
     if (page && page.extract) description = page.extract.trim() || null;
   }
-  const nearby = [];
-  if (wantNearby) {
-    for (const h of list.slice(1)) {
-      if (h.title && h.title !== hit.title && nearby.indexOf(h.title) === -1) nearby.push(h.title);
-      if (nearby.length >= 3) break;
-    }
-  }
   return { title: hit.title, description, distance: hit.dist,
     lat: typeof hit.lat === "number" ? hit.lat : gps.lat,
-    lon: typeof hit.lon === "number" ? hit.lon : gps.lon, nearby };
+    lon: typeof hit.lon === "number" ? hit.lon : gps.lon };
 }
 
 const _landmarkCache = new Map();
-// Maps a photo's GPS coordinate to the nearest notable place online and a
+// Maps a photo's GPS coordinate to the exact place it was taken at and a
 // description of it, so captions can read like "Petronas Towers -- 88-storey
 // twin skyscrapers in Kuala Lumpur" instead of a bare area name. Queries the
 // English and Chinese Wikipedia editions in parallel (both free + CORS-
-// enabled) so captions can be offered in English and Mandarin. Cached by
-// coordinate bucket and time-boxed; any failure (offline, blocked, nothing
-// nearby) resolves to null so the caller silently falls back to the plain
-// reverse-geocoded place name. Returns a merged record:
-// { title, description, zhTitle, zhDescription, lat, lon, distance, nearby } | null.
+// enabled) so captions can be offered in English and Mandarin, and pulls a
+// generous intro extract so the description is about the landmark itself
+// rather than a one-liner. Cached by coordinate bucket and time-boxed; any
+// failure (offline, blocked, nothing notable right there) resolves to null so
+// the caller silently falls back to the plain reverse-geocoded place name.
+// Returns { title, description, zhTitle, zhDescription, lat, lon, distance } | null.
 async function landmarkDescribeAgent(gps) {
   if (!gps) return null;
   const key = gpsCoordKey(gps);
@@ -19606,8 +19604,8 @@ async function landmarkDescribeAgent(gps) {
   const timeout = setTimeout(() => controller.abort(), 7000);
   try {
     const [en, zh] = await Promise.all([
-      _wikiLandmark("en", gps, controller.signal, 4, true).catch(() => null),
-      _wikiLandmark("zh", gps, controller.signal, 3, false).catch(() => null),
+      _wikiLandmark("en", gps, controller.signal, 6).catch(() => null),
+      _wikiLandmark("zh", gps, controller.signal, 5).catch(() => null),
     ]);
     const primary = en || zh;
     if (primary) {
@@ -19619,7 +19617,6 @@ async function landmarkDescribeAgent(gps) {
         lat: primary.lat != null ? primary.lat : gps.lat,
         lon: primary.lon != null ? primary.lon : gps.lon,
         distance: primary.distance,
-        nearby: en ? en.nearby : [],
       };
     }
   } catch (e) { /* offline/blocked/aborted -- caller falls back to the place name */ }
@@ -19642,18 +19639,15 @@ function buildShareCaptions(scene, locationName, landmark) {
   const placeEn = enTitle || locationName;
   const placeZh = zhTitle || enTitle || locationName;
   const caps = [];
-  // English landmark paragraph (+ nearby places) -- the fullest variant.
+  // English description of the exact landmark -- the fullest variant. Kept
+  // focused on the place the photo is actually of (no "nearby" filler).
   if (enTitle && landmark.description) {
-    const longDesc = firstSentences(landmark.description, 300);
-    if (longDesc) {
-      let full = enTitle + " — " + longDesc;
-      if (landmark.nearby && landmark.nearby.length) full += " 📍 Nearby: " + landmark.nearby.slice(0, 2).join(", ");
-      caps.push(full);
-    }
+    const longDesc = firstSentences(landmark.description, 360);
+    if (longDesc) caps.push(enTitle + " — " + longDesc);
   }
-  // Mandarin landmark paragraph.
+  // Mandarin description of the exact landmark.
   if (zhTitle && landmark.zhDescription) {
-    const zhDesc = firstSentences(landmark.zhDescription, 200);
+    const zhDesc = firstSentences(landmark.zhDescription, 240);
     if (zhDesc) caps.push(zhTitle + "——" + zhDesc);
   }
   // Bilingual combined (English line + Mandarin line in one post).
@@ -20824,7 +20818,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-28 01:07";
+const APP_BUILD = "2026-06-28 05:54";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21355,6 +21349,18 @@ function App() {
     setShareCopied(ok); showToast(ok?"Caption copied -- paste it in your Facebook post":"Couldn't copy -- select the text and copy manually");
     if(ok) setTimeout(()=>setShareCopied(false),2000);
   };
+  // Suggestions are multi-select: tapping one adds it to (or removes it from)
+  // the caption box, blank-line separated, so several can be combined and
+  // copied/shared together. Selection state is derived from the box text so
+  // manual edits stay in sync.
+  const capSelected=(c)=>(shareText||"").split("\n\n").map(s=>s.trim()).indexOf((c||"").trim())>=0;
+  const toggleCaption=(c)=>setShareText(prev=>{
+    const t=(c||"").trim();
+    const parts=(prev||"").split("\n\n").map(s=>s.trim()).filter(Boolean);
+    const i=parts.indexOf(t);
+    if(i>=0) parts.splice(i,1); else parts.push(t);
+    return parts.join("\n\n");
+  });
 
   const openShare=async()=>{
     if(!img||shareBusy) return;
@@ -21494,11 +21500,11 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
           shareThumb&&React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",marginBottom:12,display:"block"}}),
           React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption"),
           React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:3,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10}}),
-          shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to use"),
-          shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>React.createElement("button",{key:i,onClick:()=>setShareText(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(shareText===c?"#9db2e8":BORD),background:shareText===c?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:shareText===c?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}},c))),
-          React.createElement("div",{style:{fontSize:11,color:"#64748b",lineHeight:1.5,marginBottom:12}},"Facebook won't auto-fill the caption into its own post box, so it's copied to your clipboard -- after picking Facebook, long-press the post and Paste. Use \"Copy caption\" first if you like."),
+          shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to add (combine several)"),
+          shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>{const sel=capSelected(c);return React.createElement("button",{key:i,onClick:()=>toggleCaption(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(sel?"#9db2e8":BORD),background:sel?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:sel?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",gap:8,alignItems:"flex-start",whiteSpace:"pre-wrap"}},React.createElement("span",{style:{flexShrink:0,width:16,height:16,borderRadius:4,border:"1px solid "+(sel?"#9db2e8":"#475569"),background:sel?"#1877f2":"transparent",color:"#fff",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}},sel?"✓":""),React.createElement("span",null,c));})),
+          React.createElement("div",{style:{fontSize:11,color:"#64748b",lineHeight:1.5,marginBottom:12}},"Tap any suggestions to combine them. Facebook won't auto-fill the caption into its own post box, so it's copied to your clipboard -- after picking Facebook, long-press the post and Paste."),
           React.createElement("div",{style:{display:"flex",gap:8}},
-            React.createElement("button",{onClick:copyCaption,style:{flexShrink:0,padding:"12px 14px",borderRadius:12,border:"1px solid "+BORD,background:shareCopied?"rgba(34,197,94,0.15)":"rgba(255,255,255,0.04)",color:shareCopied?"#86efac":"#cbd5e1",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},shareCopied?"Copied ✓":"Copy caption"),
+            React.createElement("button",{onClick:copyCaption,style:{flexShrink:0,padding:"12px 14px",borderRadius:12,border:"1px solid "+BORD,background:shareCopied?"rgba(34,197,94,0.15)":"rgba(255,255,255,0.04)",color:shareCopied?"#86efac":"#cbd5e1",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},shareCopied?"Copied ✓":((shareText||"").indexOf("\n\n")>=0?"Copy all":"Copy caption")),
             React.createElement("button",{onClick:doShare,style:{flex:1,padding:"12px",borderRadius:12,border:"none",background:"#1877f2",color:"#fff",fontSize:14,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}},"Share to Facebook"))
         )
       ),toast&&React.createElement("div",{style:{position:"fixed",bottom:68,left:"50%",transform:"translateX(-50%)",background:"rgba(13,18,32,0.97)",backdropFilter:"blur(12px)",border:"1px solid "+BORD,borderRadius:20,padding:"8px 18px",fontSize:12,fontWeight:600,whiteSpace:"nowrap",zIndex:100,boxShadow:"0 6px 20px rgba(0,0,0,0.4)",animation:"slideUp 0.25s ease-out"}},toast)));
@@ -21623,6 +21629,16 @@ function BatchAgent({onClose,onCloseApp}){
     setShareCopied(ok);
     if(ok) setTimeout(()=>setShareCopied(false),2000);
   };
+  // Multi-select suggestions -- tap to add/remove from the caption box,
+  // blank-line separated, so several can be combined and copied together.
+  const capSelected=(c)=>(shareText||"").split("\n\n").map(s=>s.trim()).indexOf((c||"").trim())>=0;
+  const toggleCaption=(c)=>setShareText(prev=>{
+    const t=(c||"").trim();
+    const parts=(prev||"").split("\n\n").map(s=>s.trim()).filter(Boolean);
+    const i=parts.indexOf(t);
+    if(i>=0) parts.splice(i,1); else parts.push(t);
+    return parts.join("\n\n");
+  });
 
   const toggleSelected=(idx)=>{
     setSelected(prev=>{ const n=new Set(prev); if(n.has(idx)) n.delete(idx); else n.add(idx); return n; });
@@ -22219,11 +22235,11 @@ function BatchAgent({onClose,onCloseApp}){
         shareThumb&&React.createElement("div",{style:{position:"relative",marginBottom:12}},React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",display:"block"}}),shareCount>1&&React.createElement("div",{style:{position:"absolute",top:8,right:8,background:"rgba(0,0,0,0.7)",color:"#fff",fontSize:11,fontWeight:700,padding:"3px 9px",borderRadius:12}},"+"+(shareCount-1)+" more")),
         React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption"),
         React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:3,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10}}),
-        shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to use"),
-        shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>React.createElement("button",{key:i,onClick:()=>setShareText(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(shareText===c?"#9db2e8":BORD),background:shareText===c?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:shareText===c?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}},c))),
-        React.createElement("div",{style:{fontSize:11,color:"#64748b",lineHeight:1.5,marginBottom:12}},"Facebook won't auto-fill the caption into its own post box, so it's copied to your clipboard -- after picking Facebook, long-press the post and Paste. Use \"Copy caption\" first if you like."),
+        shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to add (combine several)"),
+        shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>{const sel=capSelected(c);return React.createElement("button",{key:i,onClick:()=>toggleCaption(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(sel?"#9db2e8":BORD),background:sel?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:sel?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",gap:8,alignItems:"flex-start",whiteSpace:"pre-wrap"}},React.createElement("span",{style:{flexShrink:0,width:16,height:16,borderRadius:4,border:"1px solid "+(sel?"#9db2e8":"#475569"),background:sel?"#1877f2":"transparent",color:"#fff",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}},sel?"✓":""),React.createElement("span",null,c));})),
+        React.createElement("div",{style:{fontSize:11,color:"#64748b",lineHeight:1.5,marginBottom:12}},"Tap any suggestions to combine them. Facebook won't auto-fill the caption into its own post box, so it's copied to your clipboard -- after picking Facebook, long-press the post and Paste."),
         React.createElement("div",{style:{display:"flex",gap:8}},
-          React.createElement("button",{onClick:copyCaption,style:{flexShrink:0,padding:"12px 14px",borderRadius:12,border:"1px solid "+BORD,background:shareCopied?"rgba(34,197,94,0.15)":"rgba(255,255,255,0.04)",color:shareCopied?"#86efac":"#cbd5e1",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},shareCopied?"Copied ✓":"Copy caption"),
+          React.createElement("button",{onClick:copyCaption,style:{flexShrink:0,padding:"12px 14px",borderRadius:12,border:"1px solid "+BORD,background:shareCopied?"rgba(34,197,94,0.15)":"rgba(255,255,255,0.04)",color:shareCopied?"#86efac":"#cbd5e1",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},shareCopied?"Copied ✓":((shareText||"").indexOf("\n\n")>=0?"Copy all":"Copy caption")),
           React.createElement("button",{onClick:doShare,style:{flex:1,padding:"12px",borderRadius:12,border:"none",background:"#1877f2",color:"#fff",fontSize:14,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}},"Share to Facebook"))
       )
     )
