@@ -20558,7 +20558,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-26 16:16";
+const APP_BUILD = "2026-06-27 23:12";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21082,12 +21082,12 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
               React.createElement("div",{style:{background:"rgba(6,8,15,0.88)",backdropFilter:"blur(10px)",border:"1px solid "+autoPre.color+"55",borderRadius:18,padding:"5px 11px",display:"flex",alignItems:"center",gap:6}},React.createElement("div",{style:{width:6,height:6,borderRadius:"50%",background:autoPre.color}}),React.createElement("span",{style:{fontSize:11,fontWeight:700,color:autoPre.color}},"Auto: HDR",autoPre.label),analyzed&&analysis&&React.createElement("span",{onClick:()=>{clearTimeout(modalAutoCloseRef.current);setModal(true);},style:{background:"rgba(99,102,241,0.2)",color:"#a5b4fc",fontSize:10,fontWeight:700,padding:"2px 7px",borderRadius:7,cursor:"pointer"}},analysis.overallScore,"/100"))
             ),React.createElement("div",{style:{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"center"}},imgStats&&imgStats.isHazy&&React.createElement(Flag,{color:"#fbbf24"},"Haze"),imgStats&&imgStats.hasSky&&React.createElement(Flag,{color:"#60a5fa"},"Sky"),imgStats&&imgStats.isWarm&&React.createElement(Flag,{color:"#fb923c"},"Warm cast"),imgStats&&imgStats.isCool&&React.createElement(Flag,{color:"#818cf8"},"Cool cast")))
         )),React.createElement("input",{ref:fileRef,type:"file",accept:"image/*",style:{display:"none"},onChange:onFile}),React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 14px",background:SURF,borderTop:"1px solid "+BORD,flexShrink:0}},React.createElement("div",{style:{display:"flex",alignItems:"center",gap:7}},React.createElement("div",{style:{width:6,height:6,borderRadius:"50%",background:"#22c55e",boxShadow:"0 0 6px #22c55e",animation:"pulse 2s infinite"}}),React.createElement("span",{style:{fontSize:11,fontWeight:600,color:"#64748b",letterSpacing:"0.06em",textTransform:"uppercase"}},"AI Analysis")),React.createElement("div",{style:{display:"flex",gap:7,alignItems:"center"}},img&&React.createElement("button",{onClick:()=>fileRef.current&&fileRef.current.click(),style:{padding:"5px 10px",borderRadius:8,border:"1px solid "+BORD,background:"transparent",color:"#64748b",fontSize:11,cursor:"pointer",fontFamily:"inherit"}},"Change"),React.createElement("button",{onClick:analyze,disabled:!img||busy,style:{display:"flex",alignItems:"center",gap:6,padding:"7px 16px",borderRadius:20,border:"none",background:(!img||busy)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:12,fontWeight:700,cursor:(!img||busy)?"not-allowed":"pointer",fontFamily:"inherit"}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Analyzing..."):analyzed?"Re-Analyze":"Analyze"),img&&autoHDR&&autoPre&&React.createElement("button",{onClick:()=>applyHDR(autoHDR),title:"Apply the auto-detected HDR look as a separate enhancement step, on top of any Analyze corrections",style:{padding:"7px 12px",borderRadius:20,border:"1px solid "+autoPre.color+"55",background:activeHDR===autoHDR?autoPre.color+"2a":autoPre.color+"12",color:autoPre.color,fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},"Enhance"))),React.createElement("div",{style:{background:SURF,borderTop:"1px solid "+BORD,flexShrink:0,padding:"6px 0"}},React.createElement("div",{style:{display:"flex",gap:6,overflowX:"auto",padding:"0 12px",scrollbarWidth:"none"}},ADJUSTMENTS.map(a=>{
-            const val=adj[a.id],hasFix=fixes[a.id]!==undefined,isActive=activeAdj===a.id,isCorrected=val!==0;
+            const val=displayAdj[a.id],hasFix=fixes[a.id]!==undefined,isActive=activeAdj===a.id,isCorrected=val!==0;
             return(
               React.createElement("div",{key:a.id,className:"chip",onClick:()=>setActiveAdj(p=>p===a.id?null:a.id),style:{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",gap:3,padding:"8px 9px",borderRadius:13,border:"1px solid "+(hasFix&&!isActive?"rgba(251,191,36,0.45)":isActive?a.color:isCorrected?"rgba(34,197,94,0.5)":BORD),background:isActive?"rgba(99,102,241,0.1)":isCorrected&&!isActive?"rgba(34,197,94,0.04)":SURF2,cursor:"pointer",minWidth:64,position:"relative",transition:"border 0.15s,background 0.15s"}},hasFix&&React.createElement("button",{onClick:e=>{e.stopPropagation();applyFix(a.id);},style:{position:"absolute",top:-6,right:-6,width:16,height:16,borderRadius:"50%",background:"#f97316",border:"2px solid "+BG,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#fff",fontWeight:900,cursor:"pointer",zIndex:1}},"+"),React.createElement("div",{style:{width:22,height:3,borderRadius:2,background:isActive?a.color:isCorrected?"#22c55e":BORD,transition:"background 0.2s"}}),React.createElement("span",{style:{fontSize:12,fontWeight:800,fontFamily:"'Space Grotesk',system-ui",color:val!==0?(isActive?a.color:"#4ade80"):"#475569"}},val>0?"+":"",val),React.createElement("span",{style:{fontSize:9,fontWeight:600,color:isActive?"#94a3b8":"#374151",textTransform:"uppercase",letterSpacing:"0.04em",whiteSpace:"nowrap"}},a.label))
             );
           }))),activeAdj&&curAdj&&(
-        React.createElement("div",{style:{padding:"10px 14px 9px",background:SURF,borderTop:"1px solid "+BORD,flexShrink:0}},React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}},React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:curAdj.color}}),React.createElement("span",{style:{fontWeight:700,fontSize:14,fontFamily:"'Space Grotesk',system-ui"}},curAdj.label),React.createElement("span",{style:{fontWeight:800,fontSize:15,fontFamily:"'Space Grotesk',system-ui",color:adj[activeAdj]!==0?curAdj.color:"#475569",minWidth:36}},adj[activeAdj]>0?"+":"",adj[activeAdj])),React.createElement("div",{style:{display:"flex",gap:6}},fixes[activeAdj]!==undefined&&React.createElement("button",{onClick:()=>applyFix(activeAdj),style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(251,191,36,0.3)",background:"rgba(251,191,36,0.1)",color:"#fbbf24",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Auto",fixes[activeAdj]>0?"+":"",fixes[activeAdj]),React.createElement("button",{onClick:()=>{setViewMode(null);setAdj(p=>({...p,[activeAdj]:0}));},style:{padding:"5px 11px",borderRadius:9,border:"1px solid "+BORD,background:"transparent",color:"#64748b",fontSize:11,cursor:"pointer",fontFamily:"inherit"}},"Reset"))),React.createElement("input",{type:"range",min:curAdj.min,max:curAdj.max,value:adj[activeAdj],onChange:e=>{setViewMode(null);setAdj(p=>({...p,[activeAdj]:parseInt(e.target.value)}));}}),React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:10,color:"#334155",marginTop:5}},React.createElement("span",null,curAdj.min),React.createElement("span",{style:{color:"#1e293b"}},"drag to adjust"),React.createElement("span",null,"+",curAdj.max)))
+        React.createElement("div",{style:{padding:"10px 14px 9px",background:SURF,borderTop:"1px solid "+BORD,flexShrink:0}},React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}},React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:curAdj.color}}),React.createElement("span",{style:{fontWeight:700,fontSize:14,fontFamily:"'Space Grotesk',system-ui"}},curAdj.label),React.createElement("span",{style:{fontWeight:800,fontSize:15,fontFamily:"'Space Grotesk',system-ui",color:displayAdj[activeAdj]!==0?curAdj.color:"#475569",minWidth:36}},displayAdj[activeAdj]>0?"+":"",displayAdj[activeAdj])),React.createElement("div",{style:{display:"flex",gap:6}},fixes[activeAdj]!==undefined&&React.createElement("button",{onClick:()=>applyFix(activeAdj),style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(251,191,36,0.3)",background:"rgba(251,191,36,0.1)",color:"#fbbf24",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Auto",fixes[activeAdj]>0?"+":"",fixes[activeAdj]),React.createElement("button",{onClick:()=>{setViewMode(null);setAdj(p=>({...p,[activeAdj]:0}));},style:{padding:"5px 11px",borderRadius:9,border:"1px solid "+BORD,background:"transparent",color:"#64748b",fontSize:11,cursor:"pointer",fontFamily:"inherit"}},"Reset"))),React.createElement("input",{type:"range",min:curAdj.min,max:curAdj.max,value:displayAdj[activeAdj],onChange:e=>{setViewMode(null);setAdj(p=>({...p,[activeAdj]:parseInt(e.target.value)}));}}),React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:10,color:"#334155",marginTop:5}},React.createElement("span",null,curAdj.min),React.createElement("span",{style:{color:"#1e293b"}},"drag to adjust"),React.createElement("span",null,"+",curAdj.max)))
       ),React.createElement("div",{style:{background:BG,borderTop:"1px solid "+BORD,flexShrink:0}},autoHDR&&autoPre&&(
           React.createElement("div",{style:{padding:"5px 12px 0",display:"flex",alignItems:"center",gap:6}},React.createElement("span",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#22c55e"}},"Auto"),React.createElement("div",{style:{width:5,height:5,borderRadius:"50%",background:autoPre.color}}),React.createElement("span",{style:{fontSize:10,fontWeight:600,color:autoPre.color}},autoPre.label,"detected"))
         ),React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,overflowX:"auto",padding:"5px 12px 6px",scrollbarWidth:"none"}},React.createElement("span",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.12em",textTransform:"uppercase",color:"#1e293b",flexShrink:0}},"Manual"),HDR_PRESETS.map(h=>(
@@ -21188,6 +21188,11 @@ function BatchAgent({onClose,onCloseApp}){
   const [editViewMode,setEditViewMode]=useState(null); // null|"original"|"corrected"
   const [editOrigThumb,setEditOrigThumb]=useState(null);
   const [editCorrectedThumb,setEditCorrectedThumb]=useState(null);
+  // The corrections-only adj snapshot behind editCorrectedThumb, so the
+  // "Corrections applied" breakdown can mirror whichever compare view is
+  // active (original=none, corrected=this, HDR=editPreview.adj) -- matching
+  // the single-photo editor's displayAdj following its viewMode.
+  const [editCorrectedAdj,setEditCorrectedAdj]=useState(null);
   // Reanalyze used to call full batchProcessFile (decode + analyze the
   // whole file from scratch) AND fullRenderAgent (a second, full-resolution
   // decode) on every single preset/correction click -- two full image
@@ -21376,11 +21381,11 @@ function BatchAgent({onClose,onCloseApp}){
     setEditIdx(idx); setEditPreset(r.hdrId||"none");
     setEditCorrections(r.applyCorrections!==false);
     setEditPreview(null); setEditPreviewFor(null);
-    setEditViewMode(null); setEditOrigThumb(null); setEditCorrectedThumb(null);
+    setEditViewMode(null); setEditOrigThumb(null); setEditCorrectedThumb(null); setEditCorrectedAdj(null);
   };
   const closeEdit=()=>{
     setEditIdx(null); setEditPreset(null); setEditPreview(null); setEditPreviewFor(null);
-    setEditViewMode(null); setEditOrigThumb(null); setEditCorrectedThumb(null);
+    setEditViewMode(null); setEditOrigThumb(null); setEditCorrectedThumb(null); setEditCorrectedAdj(null);
     // Releases the cached full-res buffer (up to ~192MB) the moment the
     // modal closes instead of leaving it pinned until the next photo is
     // opened overwrites it.
@@ -21440,7 +21445,7 @@ function BatchAgent({onClose,onCloseApp}){
         if (cancelled || gen !== editPreviewGenRef.current) return null;
         const { thumb: correctedThumb } = await renderAgent(previewData, baseAdj, stats);
         if (cancelled || gen !== editPreviewGenRef.current) return null;
-        return { thumb, processed, stats, hdrId, finalAdj, fallback, qa, origThumb, correctedThumb };
+        return { thumb, processed, stats, hdrId, finalAdj, fallback, qa, origThumb, correctedThumb, correctedAdj: baseAdj };
       }).then(out=>{
         if(!out || cancelled || gen !== editPreviewGenRef.current) return;
         const preset = HDR_PRESETS.find(h => h.id === out.hdrId);
@@ -21457,6 +21462,7 @@ function BatchAgent({onClose,onCloseApp}){
         setEditPreviewFor({preset:presetId, corrections:applyCorrections});
         setEditOrigThumb(out.origThumb);
         setEditCorrectedThumb(out.correctedThumb);
+        setEditCorrectedAdj(out.correctedAdj);
       }).catch(err=>{
         if(!cancelled) console.error("[LensAI] Reanalyze failed:", file.name, presetId, err);
       }).finally(()=>{
@@ -21617,13 +21623,21 @@ function BatchAgent({onClose,onCloseApp}){
         // attribute), neither of which says what was actually adjusted.
         (()=>{
           const shown=editPreview||results[editIdx];
-          const adj=shown.adj||{};
+          // Mirror whichever compare view is active, exactly like the preview
+          // image above: original shows no adjustments, corrected shows the
+          // corrections-only snapshot, HDR (null) shows the full enhanced adj.
+          // Falls back to the full adj when the corrected snapshot isn't ready.
+          const adj=editViewMode==="original" ? {}
+            : editViewMode==="corrected" && editCorrectedAdj ? editCorrectedAdj
+            : (shown.adj||{});
+          const showHdr=editViewMode===null; // HDR preset only applies in the HDR view
           const applied=ADJUSTMENTS.filter(a=>Math.round(adj[a.id]||0)!==0);
+          const heading=editViewMode==="original"?"Original -- no adjustments":editViewMode==="corrected"?"Corrections applied":"Corrections + HDR applied";
           return React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:7,background:"#131b2c",border:"1px solid "+BORD,borderRadius:10,padding:"10px 12px"}},
-            React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},"Corrections applied"),
-            (shown.hdrLabel||shown.stats&&shown.stats.scene)&&React.createElement("div",{style:{fontSize:12,color:"#a5b4fc",fontWeight:700}},
+            React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},heading),
+            showHdr&&(shown.hdrLabel||shown.stats&&shown.stats.scene)&&React.createElement("div",{style:{fontSize:12,color:"#a5b4fc",fontWeight:700}},
               (shown.hdrLabel?"HDR: "+shown.hdrLabel:"No HDR preset")+(shown.stats&&shown.stats.scene?" -- detected as "+shown.stats.scene+" scene":"")),
-            shown.stats&&shown.stats.scene&&React.createElement("div",{style:{fontSize:10,color:"#64748b",fontStyle:"italic"}},
+            showHdr&&shown.stats&&shown.stats.scene&&React.createElement("div",{style:{fontSize:10,color:"#64748b",fontStyle:"italic"}},
               "Scene/HDR is auto-detected from pixel analysis and may not always match the actual photo type -- pick a different HDR preset above if needed."),
             applied.length
               ? React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:6}},
