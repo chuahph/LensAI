@@ -19525,6 +19525,16 @@ const SHARE_SCENE_MOODS = {
   portrait: ["Caught in the moment 📸", "A frame worth keeping", "Just being me"],
   people:   ["Good times, good people 💫", "Moments worth keeping", "Making memories"],
 };
+// Mandarin counterparts, so captions can be offered in Chinese as well as
+// English (the user's audience is bilingual).
+const SHARE_SCENE_MOODS_ZH = {
+  nature:   ["徜徉自然 🌿", "呼吸新鲜空气", "拥抱大自然"],
+  food:     ["美食当前，好心情 🍽️", "秀色可餐", "每一口都值得"],
+  urban:    ["城市印象 🏙️", "钢筋水泥间的故事", "值得驻足的街角"],
+  night:    ["入夜之后 ✨", "当城市亮起灯火", "夜色正好"],
+  portrait: ["定格此刻 📸", "值得收藏的画面", "做自己"],
+  people:   ["好友相聚好时光 💫", "值得珍藏的瞬间", "留住美好回忆"],
+};
 // Trims a long article extract down to a caption-friendly snippet, cutting
 // on a sentence boundary when one falls within range so it never ends
 // mid-word or mid-clause.
@@ -19533,49 +19543,84 @@ function firstSentences(text, max) {
   const clean = text.replace(/\s+/g, " ").trim();
   if (clean.length <= max) return clean;
   const cut = clean.slice(0, max);
-  const lastDot = cut.lastIndexOf(". ");
-  if (lastDot > 40) return cut.slice(0, lastDot + 1);
+  // Prefer cutting on a real sentence boundary -- English ". " or CJK
+  // "。！？" -- so Mandarin extracts end cleanly too, not mid-character.
+  const enDot = cut.lastIndexOf(". ");
+  const cjkDot = Math.max(cut.lastIndexOf("。"), cut.lastIndexOf("！"), cut.lastIndexOf("？"));
+  const boundary = Math.max(enDot > 40 ? enDot + 1 : -1, cjkDot > 20 ? cjkDot + 1 : -1);
+  if (boundary > 0) return cut.slice(0, boundary);
   return cut.replace(/[,\s]+\S*$/, "") + "…";
+}
+
+// Looks up the nearest notable place to a coordinate on one Wikipedia
+// language edition: a geosearch for the closest articles, then the primary
+// article's plain-text intro extract. `sentences` controls extract length
+// and `wantNearby` whether to collect the other close-by article names.
+// Returns { title, description, lat, lon, distance, nearby } | null.
+async function _wikiLandmark(lang, gps, signal, sentences, wantNearby) {
+  const base = "https://" + lang + ".wikipedia.org/w/api.php";
+  const geoUrl = base + "?action=query&list=geosearch&gscoord=" +
+    encodeURIComponent(gps.lat + "|" + gps.lon) + "&gsradius=8000&gslimit=6&format=json&origin=*";
+  const geoRes = await fetch(geoUrl, { signal });
+  if (!geoRes.ok) return null;
+  const list = (((await geoRes.json()).query) || {}).geosearch || [];
+  const hit = list[0];
+  if (!hit) return null;
+  const exUrl = base + "?action=query&prop=extracts&exintro=1&explaintext=1&exsentences=" + sentences +
+    "&titles=" + encodeURIComponent(hit.title) + "&format=json&origin=*";
+  let description = null;
+  const exRes = await fetch(exUrl, { signal });
+  if (exRes.ok) {
+    const pages = (((await exRes.json()).query) || {}).pages;
+    const page = pages && Object.keys(pages).length ? pages[Object.keys(pages)[0]] : null;
+    if (page && page.extract) description = page.extract.trim() || null;
+  }
+  const nearby = [];
+  if (wantNearby) {
+    for (const h of list.slice(1)) {
+      if (h.title && h.title !== hit.title && nearby.indexOf(h.title) === -1) nearby.push(h.title);
+      if (nearby.length >= 3) break;
+    }
+  }
+  return { title: hit.title, description, distance: hit.dist,
+    lat: typeof hit.lat === "number" ? hit.lat : gps.lat,
+    lon: typeof hit.lon === "number" ? hit.lon : gps.lon, nearby };
 }
 
 const _landmarkCache = new Map();
 // Maps a photo's GPS coordinate to the nearest notable place online and a
-// short description of it, so captions can read like "Petronas Towers --
-// 88-storey twin skyscrapers in Kuala Lumpur" instead of just a bare area
-// name. Uses Wikipedia's free, CORS-enabled API: a geosearch for the closest
-// article to the coordinate, then that article's intro extract. Cached by
+// description of it, so captions can read like "Petronas Towers -- 88-storey
+// twin skyscrapers in Kuala Lumpur" instead of a bare area name. Queries the
+// English and Chinese Wikipedia editions in parallel (both free + CORS-
+// enabled) so captions can be offered in English and Mandarin. Cached by
 // coordinate bucket and time-boxed; any failure (offline, blocked, nothing
 // nearby) resolves to null so the caller silently falls back to the plain
-// reverse-geocoded place name. Returns { title, description, distance } | null.
+// reverse-geocoded place name. Returns a merged record:
+// { title, description, zhTitle, zhDescription, lat, lon, distance, nearby } | null.
 async function landmarkDescribeAgent(gps) {
   if (!gps) return null;
   const key = gpsCoordKey(gps);
   if (_landmarkCache.has(key)) return _landmarkCache.get(key);
   let result = null;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
+  const timeout = setTimeout(() => controller.abort(), 7000);
   try {
-    const geoUrl = "https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=" +
-      encodeURIComponent(gps.lat + "|" + gps.lon) + "&gsradius=5000&gslimit=1&format=json&origin=*";
-    const geoRes = await fetch(geoUrl, { signal: controller.signal });
-    if (geoRes.ok) {
-      const geoJson = await geoRes.json();
-      const hit = geoJson.query && geoJson.query.geosearch && geoJson.query.geosearch[0];
-      if (hit) {
-        // exsentences keeps the extract short server-side; explaintext drops
-        // the HTML so it drops straight into a plain-text caption.
-        const exUrl = "https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&exsentences=2&titles=" +
-          encodeURIComponent(hit.title) + "&format=json&origin=*";
-        const exRes = await fetch(exUrl, { signal: controller.signal });
-        let description = null;
-        if (exRes.ok) {
-          const exJson = await exRes.json();
-          const pages = exJson.query && exJson.query.pages;
-          const page = pages && Object.keys(pages).length ? pages[Object.keys(pages)[0]] : null;
-          if (page && page.extract) description = page.extract.trim() || null;
-        }
-        result = { title: hit.title, description, distance: hit.dist };
-      }
+    const [en, zh] = await Promise.all([
+      _wikiLandmark("en", gps, controller.signal, 4, true).catch(() => null),
+      _wikiLandmark("zh", gps, controller.signal, 3, false).catch(() => null),
+    ]);
+    const primary = en || zh;
+    if (primary) {
+      result = {
+        title: en ? en.title : null,
+        description: en ? en.description : null,
+        zhTitle: zh ? zh.title : null,
+        zhDescription: zh ? zh.description : null,
+        lat: primary.lat != null ? primary.lat : gps.lat,
+        lon: primary.lon != null ? primary.lon : gps.lon,
+        distance: primary.distance,
+        nearby: en ? en.nearby : [],
+      };
     }
   } catch (e) { /* offline/blocked/aborted -- caller falls back to the place name */ }
   finally { clearTimeout(timeout); }
@@ -19583,23 +19628,52 @@ async function landmarkDescribeAgent(gps) {
   return result;
 }
 
-// Builds the caption write-ups, richest first: when an online landmark
-// description is available it leads with a descriptive, landmark-grounded
-// line (and uses the landmark's proper name as the place), then the
-// scene-mood + place variants, so there's always something to post even
-// with no location or no network at all.
+// Builds the caption write-ups, richest first and in both English and
+// Mandarin: when an online landmark description is available it leads with a
+// descriptive, landmark-grounded line in each language (plus a bilingual
+// combo and a geo-pinned variant), then the scene-mood + place variants in
+// each language, so there's always something to post even with no location
+// or no network at all.
 function buildShareCaptions(scene, locationName, landmark) {
-  const moods = SHARE_SCENE_MOODS[scene] || ["A moment worth sharing 📸", "Through my lens", "Captured today"];
-  const place = (landmark && landmark.title) || locationName;
+  const moodsEn = SHARE_SCENE_MOODS[scene] || ["A moment worth sharing 📸", "Through my lens", "Captured today"];
+  const moodsZh = SHARE_SCENE_MOODS_ZH[scene] || ["值得分享的瞬间 📸", "用镜头记录", "今日抓拍"];
+  const enTitle = landmark && landmark.title;
+  const zhTitle = landmark && landmark.zhTitle;
+  const placeEn = enTitle || locationName;
+  const placeZh = zhTitle || enTitle || locationName;
   const caps = [];
-  if (landmark && landmark.title && landmark.description) {
-    const longDesc = firstSentences(landmark.description, 190);
-    if (longDesc) caps.push(landmark.title + " — " + longDesc);
-    const shortDesc = firstSentences(landmark.description, 90);
-    if (shortDesc) caps.push(moods[0] + " at " + landmark.title + ". " + shortDesc);
+  // English landmark paragraph (+ nearby places) -- the fullest variant.
+  if (enTitle && landmark.description) {
+    const longDesc = firstSentences(landmark.description, 300);
+    if (longDesc) {
+      let full = enTitle + " — " + longDesc;
+      if (landmark.nearby && landmark.nearby.length) full += " 📍 Nearby: " + landmark.nearby.slice(0, 2).join(", ");
+      caps.push(full);
+    }
   }
-  moods.forEach(m => caps.push(place ? m + " — " + place : m));
-  return [...new Set(caps)].slice(0, 5);
+  // Mandarin landmark paragraph.
+  if (zhTitle && landmark.zhDescription) {
+    const zhDesc = firstSentences(landmark.zhDescription, 200);
+    if (zhDesc) caps.push(zhTitle + "——" + zhDesc);
+  }
+  // Bilingual combined (English line + Mandarin line in one post).
+  if (enTitle && landmark.description && zhTitle && landmark.zhDescription) {
+    caps.push(enTitle + " — " + firstSentences(landmark.description, 150) + "\n" +
+      zhTitle + "——" + firstSentences(landmark.zhDescription, 120));
+  }
+  // Mood-led blend with a short description (English).
+  if (enTitle && landmark.description) {
+    const shortDesc = firstSentences(landmark.description, 110);
+    if (shortDesc) caps.push(moodsEn[0] + " at " + enTitle + ". " + shortDesc);
+  }
+  // Geo-pinned variant carrying the landmark's own coordinate.
+  if (landmark && landmark.lat != null && landmark.lon != null && (enTitle || placeEn)) {
+    caps.push((enTitle || placeEn) + " 📍 " + landmark.lat.toFixed(4) + ", " + landmark.lon.toFixed(4));
+  }
+  // Scene-mood + place, English then Mandarin.
+  moodsEn.forEach(m => caps.push(placeEn ? m + " — " + placeEn : m));
+  moodsZh.forEach(m => caps.push(placeZh ? m + " — " + placeZh : m));
+  return [...new Set(caps.filter(Boolean))].slice(0, 9);
 }
 
 // Copies text to the clipboard as reliably as the platform allows. The
@@ -20750,7 +20824,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-28 00:58";
+const APP_BUILD = "2026-06-28 01:07";
 
 function App() {
   const canvasRef    = useRef(null);
