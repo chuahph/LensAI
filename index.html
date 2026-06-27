@@ -19573,8 +19573,13 @@ function goalDetectionAgent(goalId, stats) {
 
 function correctionAgent(fallback) {
   const adj = blankAdj();
+  // Apply every non-zero recommendation the analysis proposes, including
+  // saturation/contrast/fade -- so the auto-correction result matches the
+  // per-parameter analysis values shown in the Original view. (HDR presets
+  // still override saturation in computeHDRAdj, so this only changes the
+  // corrections-only baseline's saturation; contrast/fade flow through.)
   Object.entries(fallback.adjustments || {}).forEach(([k, v]) => {
-    if (v.rec !== 0 && k !== "saturation" && k !== "contrast" && k !== "fade") adj[k] = v.rec;
+    if (v.rec !== 0) adj[k] = v.rec;
   });
   return adj;
 }
@@ -20798,12 +20803,14 @@ function App() {
           setAdj(prevAdj => {
             const na = { ...blankAdj(), rotation: prevAdj.rotation, perspective: prevAdj.perspective,
               saturation: prevAdj.saturation, contrast: prevAdj.contrast, fade: prevAdj.fade };
-            // saturation/contrast/fade are excluded from buildFallback's
-            // recommendations (left for the user's own slider control or the
-            // Enhance step's preset tuning) -- carried over from prevAdj above
-            // so a value the user already dragged in survives Re-Analyze
-            // instead of being wiped back to 0 by blankAdj().
-            Object.entries(currentFixes).forEach(([k,v]) => { if (k!=="saturation"&&k!=="contrast"&&k!=="fade") na[k]=v; });
+            // Apply every recommended value so the auto-correction matches
+            // the per-parameter analysis values shown in the Original view,
+            // including saturation/contrast/fade. Those three start from
+            // prevAdj above so that when the analysis has no recommendation
+            // for them (rec 0, so they're absent from currentFixes) a value
+            // the user already dragged in survives Re-Analyze instead of
+            // being wiped back to 0 -- but an actual recommendation now wins.
+            Object.entries(currentFixes).forEach(([k,v]) => { na[k]=v; });
             analyzedAdjRef.current = na;
             return na;
           });
