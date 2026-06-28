@@ -22477,6 +22477,11 @@ function App() {
     setShareBusy(false);
     // Background: render the export file, then resolve location, then content AI.
     (async()=>{
+      // Keep the screen awake through the whole background prepare -- locking the
+      // phone mid-share would otherwise suspend/throttle the export render and
+      // the location lookups, stalling the "Share to Facebook" button.
+      acquireWakeLock();
+      try{
       // Yield first so React paints the just-opened sheet before the export
       // render (heavy synchronous CPU on its first, un-warmed run) ties up the
       // main thread -- otherwise the sheet wouldn't appear until the render is
@@ -22514,6 +22519,7 @@ function App() {
       }
       setLocLoading(false);
       runShareContentAI();
+      }finally{ releaseWakeLock(); }
     })();
   };
 
@@ -22946,6 +22952,7 @@ function BatchAgent({onClose,onCloseApp}){
     if(!r||!r.adj) return;
     const idx=results.indexOf(r);
     setSharePrepIdx(idx);
+    acquireWakeLock(); // keep the screen awake while the share photo renders
     try{
       const outFiles=await renderShareFiles([r]);
       if(!outFiles.length) throw new Error("nothing to share");
@@ -22956,13 +22963,14 @@ function BatchAgent({onClose,onCloseApp}){
       upgradeCaptionsWithContent(ctx);
     }catch(err){
       setExportError("Couldn't prepare \""+(r.name||"that photo")+"\" for sharing -- "+(err&&err.message||"try again"));
-    }finally{ setSharePrepIdx(null); _releaseScratch(); }
+    }finally{ setSharePrepIdx(null); _releaseScratch(); releaseWakeLock(); }
   };
 
   const shareSelected=async()=>{
     const rs=[...selected].sort((a,b)=>a-b).map(i=>results[i]).filter(r=>r&&!r.error&&!r.culled&&r.adj);
     if(!rs.length||sharePrepBusy) return;
     setSharePrepBusy(true); setSharePrepDone(0);
+    acquireWakeLock(); // keep the screen awake while the selected photos render
     try{
       const outFiles=await renderShareFiles(rs, (done)=>setSharePrepDone(done));
       if(!outFiles.length) throw new Error("nothing to share");
@@ -22973,7 +22981,7 @@ function BatchAgent({onClose,onCloseApp}){
       upgradeCaptionsWithContent(ctx);
     }catch(err){
       setExportError("Couldn't prepare the selected photos for sharing -- "+(err&&err.message||"try again"));
-    }finally{ setSharePrepBusy(false); _releaseScratch(); }
+    }finally{ setSharePrepBusy(false); _releaseScratch(); releaseWakeLock(); }
   };
 
   const closeShare=()=>{
