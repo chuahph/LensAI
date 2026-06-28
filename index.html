@@ -19505,6 +19505,64 @@ function extractVenue(address, properName, extratags) {
   const cuisine = cuisineWord(extratags && extratags.cuisine) || cuisineFromName(name);
   return { name: name ? sanitizeFolderName(name) : null, word: k.word, emoji: k.emoji, cuisine: cuisine };
 }
+// Friendly category words for the common OSM POI tag values -- the same kind of
+// one-word "what is this place" label Apple/Google Maps show under a place name
+// ("Shopping Mall", "Temple", "Scenic Viewpoint"). Used to give every named POI
+// a maps-style subtitle even when it has no Wikipedia article. Keys are the OSM
+// tag VALUE, lowercased.
+const PLACE_CATEGORY = {
+  // tourism
+  attraction:"tourist attraction", museum:"museum", gallery:"art gallery",
+  artwork:"public artwork", viewpoint:"scenic viewpoint", hotel:"hotel",
+  guest_house:"guesthouse", hostel:"hostel", motel:"motel", resort:"resort",
+  theme_park:"theme park", zoo:"zoo", aquarium:"aquarium", picnic_site:"picnic spot",
+  camp_site:"campsite", chalet:"chalet", information:"visitor centre",
+  // historic
+  monument:"monument", memorial:"memorial", castle:"castle", fort:"fort",
+  ruins:"historic ruins", archaeological_site:"historic site", tomb:"tomb",
+  city_gate:"historic gate", manor:"heritage manor", building:"heritage building",
+  // amenity (eateries are handled separately as venues)
+  marketplace:"market", theatre:"theatre", cinema:"cinema", arts_centre:"arts centre",
+  library:"library", university:"university", college:"college", school:"school",
+  townhall:"town hall", community_centre:"community hall", fountain:"fountain",
+  clock:"landmark clock", conference_centre:"convention centre", exhibition_centre:"exhibition centre",
+  // leisure
+  park:"park", garden:"garden", nature_reserve:"nature reserve", stadium:"stadium",
+  sports_centre:"sports centre", fitness_centre:"gym", marina:"marina",
+  water_park:"water park", beach_resort:"beach resort", golf_course:"golf course",
+  // shop
+  mall:"shopping mall", department_store:"department store", supermarket:"supermarket",
+  // man_made
+  tower:"tower", lighthouse:"lighthouse", bridge:"bridge", pier:"pier",
+  observatory:"observatory", windmill:"windmill", obelisk:"monument",
+  // natural
+  beach:"beach", peak:"mountain peak", waterfall:"waterfall", bay:"bay",
+  cave_entrance:"cave", hot_spring:"hot spring", volcano:"volcano", spring:"spring",
+};
+// Reads a maps-style category label off the OSM tags for a place. Resolves
+// places of worship to the specific faith ("Buddhist temple", "mosque") when
+// the religion tag is present, matching how map apps label them. Returns a short
+// category string | null.
+function placeCategory(address, extratags) {
+  const a = address || {}, ex = extratags || {};
+  if (a.amenity === "place_of_worship" || ex.amenity === "place_of_worship") {
+    const r = String(ex.religion || a.religion || "").toLowerCase();
+    if (r.indexOf("budd") >= 0) return "Buddhist temple";
+    if (r.indexOf("musl") >= 0 || r.indexOf("islam") >= 0) return "mosque";
+    if (r.indexOf("christ") >= 0) return "church";
+    if (r.indexOf("hindu") >= 0) return "Hindu temple";
+    if (r.indexOf("tao") >= 0 || r.indexOf("chinese") >= 0 || r.indexOf("confucian") >= 0) return "Chinese temple";
+    if (r.indexOf("sikh") >= 0) return "Sikh temple";
+    return "place of worship";
+  }
+  const cands = [a.tourism, a.historic, a.leisure, a.man_made, a.shop, a.natural,
+    a.amenity, ex.tourism, ex.historic, ex.leisure, a.building];
+  for (const c of cands) {
+    const k = String(c || "").toLowerCase();
+    if (k && PLACE_CATEGORY[k]) return PLACE_CATEGORY[k];
+  }
+  return null;
+}
 // Reads the cached venue for a coordinate (populated as a side effect of
 // reverseGeocodeAgent). Returns { name, word, emoji } | null.
 function venueAgent(gps) {
@@ -19588,7 +19646,18 @@ async function reverseGeocodeAgent(gps) {
     const poiNamed = properName && properName !== a.neighbourhood && properName !== a.suburb &&
       properName !== a.city && properName !== a.town &&
       (a.tourism || a.historic || a.leisure || a.man_made || a.amenity || a.shop || a.building);
-    _poiCache.set(key, poiNamed ? { name: sanitizeFolderName(properName) } : null);
+    // Stash a maps-style category, the Wikidata id (for a one-line subtitle) and
+    // a short locality so the caption can illustrate the place like a map app
+    // does, even when there's no Wikipedia article for it.
+    const ex = json.extratags || {};
+    const wikidata = /^Q\d+$/.test(String(ex.wikidata || "")) ? ex.wikidata : null;
+    const poiArea = a.suburb || a.neighbourhood || a.city_district || a.city || a.town || a.county || a.state;
+    _poiCache.set(key, poiNamed ? {
+      name: sanitizeFolderName(properName),
+      category: placeCategory(a, ex),
+      wikidata: wikidata,
+      area: poiArea ? sanitizeFolderName(poiArea) : null,
+    } : null);
     // Prefer a real proper name (even inside a building=yes), then a non-generic
     // category tag, else nothing -- never a bare area/city name as the "POI".
     const namedPoi = properName && properName !== a.neighbourhood && properName !== a.suburb &&
@@ -19792,6 +19861,25 @@ async function _wikiSearchByName(lang, name, regionHint, signal, sentences) {
   return { title: hit.title, description, distance: null,
     lat: co ? co.lat : null, lon: co ? co.lon : null };
 }
+// Fetches Wikidata's one-line description for an entity (e.g. Q12345 ->
+// "Buddhist temple in George Town, Penang, Malaysia") in English and Chinese.
+// This is the single most "map-like" illustration available for free: it's the
+// exact concise subtitle Apple/Google Maps show under a place, and the Wikidata
+// query API is CORS-enabled (origin=*). Returns { en, zh } | null.
+async function wikidataDescribeAgent(qid, signal) {
+  if (!qid) return null;
+  const url = "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=" +
+    encodeURIComponent(qid) + "&props=descriptions&languages=en|zh|zh-hans|zh-hant&format=json&origin=*";
+  const res = await fetch(url, { signal });
+  if (!res.ok) return null;
+  const ent = (((await res.json()).entities) || {})[qid];
+  const d = ent && ent.descriptions;
+  if (!d) return null;
+  const pick = (...ks) => { for (const k of ks) { if (d[k] && d[k].value) return d[k].value; } return null; };
+  const en = pick("en");
+  const zh = pick("zh", "zh-hans", "zh-hant");
+  return (en || zh) ? { en, zh } : null;
+}
 
 const _landmarkCache = new Map();
 // Maps a photo's GPS coordinate to the exact place it was taken at and a
@@ -19850,6 +19938,24 @@ async function landmarkDescribeAgent(gps, nameHint, regionHint) {
         _wikiSearchByName("zh", nameHint, regionHint, controller.signal, 5).catch(() => null),
       ]);
       if (en2 || zh2) result = pack(en2, zh2, false);
+    }
+    // Tier 4 -- maps-style subtitle: no encyclopaedia article anywhere, but the
+    // spot is a named POI. Give it the same concise "what is this place" line a
+    // map app shows -- from Wikidata's one-liner when the POI is linked, else
+    // the OSM category ("temple in George Town", "shopping mall in Gurney"). This
+    // is the place you're AT, so it's not flagged "nearby".
+    const poi = poiInfoAgent(gps);
+    if (!result && poi && poi.name) {
+      let en = null, zh = null;
+      if (poi.wikidata) {
+        const wd = await wikidataDescribeAgent(poi.wikidata, controller.signal).catch(() => null);
+        if (wd) { en = wd.en; zh = wd.zh; }
+      }
+      if (!en && poi.category) en = poi.category + (poi.area ? " in " + poi.area : "");
+      if (en || zh) {
+        result = { title: poi.name, description: en, zhTitle: poi.name, zhDescription: zh,
+          lat: gps.lat, lon: gps.lon, distance: 0, nearby: false, mapsStyle: true };
+      }
     }
   } catch (e) { /* offline/blocked/aborted -- caller falls back to the place name */ }
   finally { clearTimeout(timeout); }
