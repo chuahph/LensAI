@@ -19377,22 +19377,6 @@ function gpsCoordKey(gps) {
 function gpsFolderName(gps) {
   return "gps_" + gpsCoordKey(gps);
 }
-// Clusters coordinates that have no place name (geocode offline/blocked) so GPS
-// drift across shots at one spot still groups into a single folder. A fixed grid
-// would split two close points that straddle a cell boundary, so instead the
-// FIRST point in an area defines a cluster and any later point within ~150m
-// reuses its name -- boundary-safe, and enough for the rare no-network case.
-const _gpsClusters = []; // [{ lat, lon, name }]
-function gpsClusterName(gps) {
-  const CLUSTER_RADIUS_M = 150;
-  for (const c of _gpsClusters) {
-    if (_haversineM(gps.lat, gps.lon, c.lat, c.lon) <= CLUSTER_RADIUS_M) return c.name;
-  }
-  const lat = Math.abs(gps.lat).toFixed(3), lon = Math.abs(gps.lon).toFixed(3);
-  const name = "gps_" + lat + (gps.lat >= 0 ? "N" : "S") + "_" + lon + (gps.lon >= 0 ? "E" : "W");
-  _gpsClusters.push({ lat: gps.lat, lon: gps.lon, name: name });
-  return name;
-}
 
 // Folder names can't contain "/" and look bad with most other punctuation
 // place names carry (commas, periods, quotes).
@@ -19403,7 +19387,6 @@ function sanitizeFolderName(name) {
 const _geocodeCache = new Map();
 const _venueCache = new Map(); // coord key -> { name, kind } | null (the named eatery/shop at the spot)
 const _poiCache = new Map();   // coord key -> { name } | null (the named POI/attraction/building at the spot)
-const _groupCache = new Map(); // coord key -> coarse area-level name for grouping a whole outing together
 let _lastGeocodeAt = 0;
 
 // Eatery/drink amenity types (and food-ish shops) worth naming in a caption
@@ -19695,23 +19678,11 @@ async function reverseGeocodeAgent(gps) {
     name = sanitizeFolderName(name);
     const result = name || fallback;
     _geocodeCache.set(key, result);
-    // Coarser, stable bucket for GROUPING -- drops the hyper-specific POI/venue
-    // level so every shot around one area/outing shares a folder (an
-    // area+city/city+region name) instead of fragmenting into a folder per shop
-    // or per GPS-drifted point. Captions keep the specific `result` above.
-    const gArea = a.suburb || a.neighbourhood || a.quarter || a.city_district || a.village || a.hamlet;
-    const gCity = a.city || a.town || a.municipality || a.county;
-    let gname;
-    if (gArea && gCity && gArea !== gCity) gname = gArea + ", " + gCity;
-    else gname = gCity || gArea || region;
-    if (gname && region && gname !== region && !gname.endsWith(", " + region)) gname += ", " + region;
-    _groupCache.set(key, sanitizeFolderName(gname || name));
     return result;
   } catch (e) {
     _geocodeCache.set(key, fallback);
     if (!_venueCache.has(key)) _venueCache.set(key, null);
     if (!_poiCache.has(key)) _poiCache.set(key, null);
-    if (!_groupCache.has(key)) _groupCache.set(key, gpsClusterName(gps));
     return fallback;
   }
 }
@@ -19734,36 +19705,25 @@ function dateFolderName(dateTaken) {
 // that is available (e.g. a screenshot with no EXIF, picked individually
 // via the iOS Photos picker), the one case scene grouping should still
 // apply.
-// Reads the coarse area-level grouping bucket for a coordinate (populated as a
-// side effect of reverseGeocodeAgent). Returns a place string | null.
-function locationGroupNameAgent(gps) {
-  if (!gps) return null;
-  const key = gpsCoordKey(gps);
-  return _groupCache.has(key) ? _groupCache.get(key) : null;
-}
-// Resolves where a photo was taken, returning BOTH a specific caption name and a
-// coarser grouping bucket: `caption` is the exact reverse-geocoded place (POI/
-// venue level -- great in a caption), while `group` is an area-level name that
-// clusters a whole outing into one export folder instead of fragmenting per
-// shop/POI/GPS-drifted point. For non-GPS sources (embedded location, date,
-// source folder) the two are the same. Returns { caption, group }.
+// Resolves the specific place a photo was taken at, used BOTH to caption it and
+// to group it -- so the export zip's folders match the on-screen analyze groups
+// exactly. Priority: an embedded location tag, then EXIF GPS reverse-geocoded to
+// a place name (POI/venue level), then capture date, then the source folder.
+// Returns a place string | null.
 async function locationGroupAgent(file) {
   const exif = await readExifGpsAndDate(file);
   if (exif) {
-    if (exif.embeddedLocation) { const n = sanitizeFolderName(exif.embeddedLocation); return { caption: n, group: n }; }
-    if (exif.gps) {
-      const caption = await reverseGeocodeAgent(exif.gps);
-      return { caption: caption, group: locationGroupNameAgent(exif.gps) || caption };
-    }
+    if (exif.embeddedLocation) return sanitizeFolderName(exif.embeddedLocation);
+    if (exif.gps) return await reverseGeocodeAgent(exif.gps);
     const d = dateFolderName(exif.dateTaken);
-    if (d) return { caption: d, group: d };
+    if (d) return d;
   }
   const rel = file.webkitRelativePath || "";
   if (rel) {
     const parts = rel.split("/").slice(0, -1);
-    if (parts.length) { const p = parts.join("/"); return { caption: p, group: p }; }
+    if (parts.length) return parts.join("/");
   }
-  return { caption: null, group: null };
+  return null;
 }
 
 // === Share-to-Facebook helpers =======================================
@@ -20844,20 +20804,18 @@ async function analyzeFileForBatch(file, onStage) {
   // on GC.
   if (typeof image.close === "function") image.close();
   const group = sceneSorterAgent(stats);
-  const loc = await locationGroupAgent(file);
-  const origFolder = loc.caption;   // specific place name (for captions)
-  const locGroup = loc.group;       // coarse area bucket (for export grouping)
+  const origFolder = await locationGroupAgent(file);
   note("cull");
   const cull = cullAgent(stats);
-  return { previewData, stats, group, origFolder, locGroup, cull };
+  return { previewData, stats, group, origFolder, cull };
 }
 
 async function batchProcessFile(file, goalId, onStage, opts, analyzed) {
   const { skipFlagged, applyCorrections = true } = opts || {};
   const note = s => onStage && onStage(s);
-  const { previewData, stats, group, origFolder, locGroup, cull } = analyzed || await analyzeFileForBatch(file, onStage);
+  const { previewData, stats, group, origFolder, cull } = analyzed || await analyzeFileForBatch(file, onStage);
   if (cull.flagged && skipFlagged) {
-    return { name: file.name, goalId, group, origFolder, locGroup, culled: true, cullReasons: cull.reasons };
+    return { name: file.name, goalId, group, origFolder, culled: true, cullReasons: cull.reasons };
   }
   note("goal");
   const hdrId = goalDetectionAgent(goalId, stats);
@@ -20882,7 +20840,6 @@ async function batchProcessFile(file, goalId, onStage, opts, analyzed) {
     applyCorrections,
     group,
     origFolder,
-    locGroup,
     // Kept so a full-resolution render can be produced later, on demand,
     // by fullRenderAgent -- only when this specific result is actually
     // downloaded (single download, edit-preview, or zip-all), instead of
@@ -21171,7 +21128,7 @@ async function exportOrganizeAgent(results, files, onProgress) {
       const blob = await renderFullFromData(src, r.adj, r.stats, r.crop);
       await new Promise(res => setTimeout(res, 0));
       const stem = (r.name || "photo").replace(/\.[^/.]+$/, "");
-      const folder = r.locGroup || r.origFolder || r.group || "misc";
+      const folder = r.origFolder || r.group || "misc";
       let path = folder + "/" + stem + "-" + (r.goalId || "batch") + ".jpg";
       if (usedPaths.has(path)) {
         const n = usedPaths.get(path) + 1;
@@ -21711,7 +21668,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-29 00:41";
+const APP_BUILD = "2026-06-29 00:52";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -23089,7 +23046,7 @@ function BatchAgent({onClose,onCloseApp}){
         const preset = HDR_PRESETS.find(h => h.id === out.hdrId);
         setEditPreview({
           name: file.name, goalId: presetId, hdrId: out.hdrId, applyCorrections,
-          group: r.group, origFolder: r.origFolder, locGroup: r.locGroup,
+          group: r.group, origFolder: r.origFolder,
           adj: out.finalAdj, stats: out.stats, thumb: out.thumb,
           hdrLabel: preset ? preset.label : null,
           score: out.fallback.overallScore,
@@ -23200,10 +23157,9 @@ function BatchAgent({onClose,onCloseApp}){
   // classification -- grouping by where/when a photo was actually taken
   // beats re-sorting by scene. Falls back to scene only when a photo has
   // none of that info at all (e.g. a screenshot picked individually).
-  // The on-screen analyze view groups by the SPECIFIC place (origFolder) so
-  // distinct spots stay visible as separate groups -- the coarse locGroup is for
-  // the EXPORT zip folders only (fewer folders on disk), and using it here would
-  // collapse a whole outing into one group and hide the location grouping.
+  // Group by the SPECIFIC place (origFolder), then scene -- the exact same key
+  // the export zip uses for its folders, so the downloaded folder structure
+  // matches the groups shown here.
   const groups=[];
   results.forEach(r=>{
     const key=r.origFolder||r.group||"other";
