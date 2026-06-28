@@ -19637,15 +19637,39 @@ function firstSentences(text, max) {
 // description, lat, lon, distance } | null (null when nothing notable is
 // right there).
 const LANDMARK_RADIUS_M = 50;
-async function _wikiLandmark(lang, gps, signal, sentences) {
+// Wikipedia titles that aren't an on-the-ground landmark/POI -- so a caption
+// never names a list, a disambiguation/name page, or a bare year.
+function _isJunkWikiTitle(t) {
+  return !t || /^(List|Lists) of\b/i.test(t)
+    || /\((disambiguation|surname|given name|name)\)/i.test(t)
+    || /^\d{3,4}(\sBC)?$/.test(t);
+}
+// Loose normalization for matching a reverse-geocoded POI name against a
+// Wikipedia title (drop punctuation/case; keep CJK).
+function _normName(s) { return (s || "").toLowerCase().replace(/[^a-z0-9一-鿿]+/g, " ").trim(); }
+// Does a Wikipedia title and a reverse-geocoded POI name refer to the same
+// place? Containment either way, but only for reasonably specific names so a
+// generic word ("park", "cafe") doesn't false-match.
+function _nameMatches(title, hint) {
+  const t = _normName(title), h = _normName(hint);
+  if (!t || !h || h.length < 4) return false;
+  return t === h || (t.length >= 4 && h.indexOf(t) >= 0) || (h.length >= 4 && t.indexOf(h) >= 0);
+}
+async function _wikiLandmark(lang, gps, signal, sentences, nameHint) {
   const base = "https://" + lang + ".wikipedia.org/w/api.php";
+  // Pull several nearby candidates (API returns them distance-sorted) so we can
+  // pick the one that actually matches the POI rather than blindly taking the
+  // single nearest article (which is often an unrelated street/area/river).
   const geoUrl = base + "?action=query&list=geosearch&gscoord=" +
-    encodeURIComponent(gps.lat + "|" + gps.lon) + "&gsradius=" + LANDMARK_RADIUS_M + "&gslimit=1&format=json&origin=*";
+    encodeURIComponent(gps.lat + "|" + gps.lon) + "&gsradius=" + LANDMARK_RADIUS_M + "&gslimit=10&format=json&origin=*";
   const geoRes = await fetch(geoUrl, { signal });
   if (!geoRes.ok) return null;
-  const list = (((await geoRes.json()).query) || {}).geosearch || [];
-  const hit = list[0];
-  if (!hit) return null;
+  let list = (((await geoRes.json()).query) || {}).geosearch || [];
+  list = list.filter(h => h && h.title && !_isJunkWikiTitle(h.title));
+  if (!list.length) return null;
+  // Prefer a candidate whose title matches the reverse-geocoded POI/venue name
+  // (a strong signal it's the right place); otherwise the nearest candidate.
+  let hit = (nameHint && list.find(h => _nameMatches(h.title, nameHint))) || list[0];
   const exUrl = base + "?action=query&prop=extracts&exintro=1&explaintext=1&exsentences=" + sentences +
     "&titles=" + encodeURIComponent(hit.title) + "&format=json&origin=*";
   let description = null;
@@ -19671,7 +19695,7 @@ const _landmarkCache = new Map();
 // failure (offline, blocked, nothing notable right there) resolves to null so
 // the caller silently falls back to the plain reverse-geocoded place name.
 // Returns { title, description, zhTitle, zhDescription, lat, lon, distance } | null.
-async function landmarkDescribeAgent(gps) {
+async function landmarkDescribeAgent(gps, nameHint) {
   if (!gps) return null;
   const key = gpsCoordKey(gps);
   if (_landmarkCache.has(key)) return _landmarkCache.get(key);
@@ -19680,8 +19704,8 @@ async function landmarkDescribeAgent(gps) {
   const timeout = setTimeout(() => controller.abort(), 7000);
   try {
     const [en, zh] = await Promise.all([
-      _wikiLandmark("en", gps, controller.signal, 6).catch(() => null),
-      _wikiLandmark("zh", gps, controller.signal, 5).catch(() => null),
+      _wikiLandmark("en", gps, controller.signal, 6, nameHint).catch(() => null),
+      _wikiLandmark("zh", gps, controller.signal, 5, nameHint).catch(() => null),
     ]);
     const primary = en || zh;
     if (primary) {
@@ -21200,7 +21224,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-28 17:19";
+const APP_BUILD = "2026-06-28 17:27";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21802,7 +21826,7 @@ function App() {
           if(exif&&exif.gps){
             loc=shareLocationName(await reverseGeocodeAgent(exif.gps));
             venue=venueAgent(exif.gps);
-            landmark=await landmarkDescribeAgent(exif.gps);
+            landmark=await landmarkDescribeAgent(exif.gps, (venue&&venue.name)||(loc&&loc.split(",")[0].trim()));
           } else if(exif&&exif.embeddedLocation){
             loc=shareLocationName(sanitizeFolderName(exif.embeddedLocation));
           }
@@ -22161,7 +22185,7 @@ function BatchAgent({onClose,onCloseApp}){
       const file=files[r.fileIndex]; if(!file) continue;
       try{
         const exif=await readExifGpsAndDate(file);
-        if(exif&&exif.gps){ loc=shareLocationName(await reverseGeocodeAgent(exif.gps)); venue=venueAgent(exif.gps); landmark=await landmarkDescribeAgent(exif.gps); break; }
+        if(exif&&exif.gps){ loc=shareLocationName(await reverseGeocodeAgent(exif.gps)); venue=venueAgent(exif.gps); landmark=await landmarkDescribeAgent(exif.gps, (venue&&venue.name)||(loc&&loc.split(",")[0].trim())); break; }
         if(exif&&exif.embeddedLocation&&!loc){ loc=shareLocationName(sanitizeFolderName(exif.embeddedLocation)); }
       }catch(e){ /* keep going -- caption still works without it */ }
     }
