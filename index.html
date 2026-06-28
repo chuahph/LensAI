@@ -19804,6 +19804,124 @@ function _nameMatches(title, hint) {
   if (!t || !h || h.length < 4) return false;
   return t === h || (t.length >= 4 && h.indexOf(t) >= 0) || (h.length >= 4 && t.indexOf(h) >= 0);
 }
+// Great-circle distance in metres between two coordinates.
+function _haversineM(lat1, lon1, lat2, lon2) {
+  const R = 6371000, rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad, dLon = (lon2 - lon1) * rad;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+// How far out to look for a notable landmark when discovering POIs via Overpass.
+const LANDMARK_DISCOVER_RADIUS_M = 300;
+const _overpassCache = new Map();
+// Overpass mirrors (fair-use, no key, CORS-enabled); tried in turn so one being
+// down/throttled doesn't kill the lookup.
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
+// Finds the most notable named landmark/POI around a coordinate straight from
+// OpenStreetMap via the Overpass API -- far richer than Nominatim's single
+// point result. Returns the candidate's full tag set, so the caller can build a
+// description from an exact wikipedia/wikidata link or the OSM `description` tag
+// (none of which Nominatim exposes), and can find a notable place the photo was
+// taken BESIDE even when the exact point resolves to a plain building/street.
+// Keyless + CORS; any failure resolves to null (caller falls back). Returns
+// { name, lat, lon, distance, category, wikidata, wp:{lang,title}|null,
+//   wpZh:{lang,title}|null, osmDescription, nameHint } | null.
+async function overpassPoiAgent(gps, signal, nameHint, radius) {
+  if (!gps) return null;
+  const key = gpsCoordKey(gps);
+  if (_overpassCache.has(key)) return _overpassCache.get(key);
+  const r = radius || LANDMARK_DISCOVER_RADIUS_M;
+  const ll = gps.lat + "," + gps.lon;
+  // Named things tagged with a notability signal within the radius. `nwr` =
+  // node|way|relation; `out tags center` returns each element's tags plus a
+  // representative coordinate (so ways/relations have a position too).
+  const q = "[out:json][timeout:12];(" +
+    'nwr(around:' + r + ',' + ll + ')["wikidata"]["name"];' +
+    'nwr(around:' + r + ',' + ll + ')["wikipedia"]["name"];' +
+    'nwr(around:' + r + ',' + ll + ')["tourism"]["name"];' +
+    'nwr(around:' + r + ',' + ll + ')["historic"]["name"];' +
+    'nwr(around:' + r + ',' + ll + ')["amenity"="place_of_worship"]["name"];' +
+    'nwr(around:' + r + ',' + ll + ')["leisure"~"park|garden|nature_reserve"]["name"];' +
+    'nwr(around:' + r + ',' + ll + ')["man_made"~"tower|lighthouse|bridge|pier|obelisk"]["name"];' +
+    ");out tags center 60;";
+  let json = null;
+  for (const ep of OVERPASS_ENDPOINTS) {
+    try {
+      const res = await fetch(ep, { method: "POST", body: "data=" + encodeURIComponent(q), signal });
+      if (!res.ok) continue;
+      json = await res.json();
+      break;
+    } catch (e) { /* try next mirror */ }
+  }
+  const els = (json && json.elements) || [];
+  let best = null, bestScore = -1;
+  for (const el of els) {
+    const tags = el.tags || {};
+    const name = tags.name || tags["name:en"];
+    if (!name || _isJunkWikiTitle(name)) continue;
+    const lat = el.lat != null ? el.lat : (el.center && el.center.lat);
+    const lon = el.lon != null ? el.lon : (el.center && el.center.lon);
+    if (lat == null || lon == null) continue;
+    const dist = _haversineM(gps.lat, gps.lon, lat, lon);
+    if (dist > LANDMARK_NEARBY_RADIUS_M + 60) continue; // too far to honestly caption
+    // Notability score: an exact name match dominates, then encyclopaedic links,
+    // a contributor description, attraction/heritage category, then proximity.
+    let score = 0;
+    if (nameHint && _nameMatches(name, nameHint)) score += 300;
+    if (tags.wikipedia || tags["wikipedia:en"] || tags["wikipedia:zh"]) score += 120;
+    if (tags.wikidata) score += 60;
+    if (tags.description || tags["description:en"]) score += 40;
+    if (tags.tourism === "attraction" || tags.historic || tags.heritage) score += 25;
+    if (tags.tourism || tags.leisure || tags.man_made) score += 10;
+    score -= dist / 20; // gentle proximity preference
+    if (score > bestScore) { bestScore = score; best = { tags, name, lat, lon, dist }; }
+  }
+  let result = null;
+  if (best) {
+    const t = best.tags;
+    // Parse OSM's wikipedia tags into {lang,title}. Forms: "en:Kek Lok Si"
+    // (lang-prefixed) or a plain title under wikipedia:en / wikipedia:zh.
+    const parseWp = (val, fallbackLang) => {
+      if (!val) return null;
+      const m = /^([a-z-]{2,5}):(.+)$/.exec(val);
+      if (m) return { lang: m[1], title: m[2] };
+      return fallbackLang ? { lang: fallbackLang, title: val } : null;
+    };
+    let wp = parseWp(t["wikipedia:en"], "en") || parseWp(t.wikipedia, null);
+    if (wp && wp.lang !== "en") { /* keep primary even if not en */ }
+    const wpZh = parseWp(t["wikipedia:zh"], "zh") ||
+      (parseWp(t.wikipedia, null) && /^zh/.test(parseWp(t.wikipedia, null).lang) ? parseWp(t.wikipedia, null) : null);
+    result = {
+      name: sanitizeFolderName(best.name), lat: best.lat, lon: best.lon, distance: Math.round(best.dist),
+      category: placeCategory(t, t),
+      wikidata: /^Q\d+$/.test(String(t.wikidata || "")) ? t.wikidata : null,
+      wp: wp, wpZh: wpZh,
+      osmDescription: t["description:en"] || t.description || null,
+      osmDescriptionZh: t["description:zh"] || null,
+    };
+  }
+  _overpassCache.set(key, result);
+  return result;
+}
+// Fetches a Wikipedia intro extract for an EXACT title (no fuzzy search), used
+// when OSM already told us the precise article via its wikipedia tag.
+async function _wikiExtractByTitle(lang, title, signal, sentences) {
+  if (!title) return null;
+  const url = "https://" + lang + ".wikipedia.org/w/api.php?action=query&prop=extracts|coordinates" +
+    "&exintro=1&explaintext=1&exsentences=" + (sentences || 5) +
+    "&titles=" + encodeURIComponent(title) + "&redirects=1&format=json&origin=*";
+  const res = await fetch(url, { signal });
+  if (!res.ok) return null;
+  const pages = (((await res.json()).query) || {}).pages;
+  const page = pages && Object.keys(pages).length ? pages[Object.keys(pages)[0]] : null;
+  const description = page && page.extract ? (page.extract.trim() || null) : null;
+  if (!description) return null;
+  const co = page && page.coordinates && page.coordinates[0];
+  return { title: page.title || title, description, lat: co ? co.lat : null, lon: co ? co.lon : null };
+}
 async function _wikiLandmark(lang, gps, signal, sentences, nameHint, radius) {
   const base = "https://" + lang + ".wikipedia.org/w/api.php";
   // Pull several nearby candidates (API returns them distance-sorted) so we can
@@ -19898,7 +20016,10 @@ async function landmarkDescribeAgent(gps, nameHint, regionHint) {
   if (_landmarkCache.has(key)) return _landmarkCache.get(key);
   let result = null;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 7000);
+  // Generous cap: the Wikipedia tiers are quick, but the Overpass discovery tier
+  // (only reached when those miss) can be slower. This whole agent runs in the
+  // background after the share sheet is already open, so it never blocks the UI.
+  const timeout = setTimeout(() => controller.abort(), 13000);
   const pack = (en, zh, nearby) => ({
     title: en ? en.title : null,
     description: en ? en.description : null,
@@ -19939,12 +20060,47 @@ async function landmarkDescribeAgent(gps, nameHint, regionHint) {
       ]);
       if (en2 || zh2) result = pack(en2, zh2, false);
     }
-    // Tier 4 -- maps-style subtitle: no encyclopaedia article anywhere, but the
-    // spot is a named POI. Give it the same concise "what is this place" line a
-    // map app shows -- from Wikidata's one-liner when the POI is linked, else
-    // the OSM category ("temple in George Town", "shopping mall in Gurney"). This
-    // is the place you're AT, so it's not flagged "nearby".
     const poi = poiInfoAgent(gps);
+    // Tier 4 -- Overpass discovery: no geo-tagged Wikipedia article was found,
+    // so go straight to OpenStreetMap (keyless) for the most notable named
+    // landmark/POI around the point and build a description from its own tags --
+    // an exact wikipedia article link (richest), a wikidata one-liner, the
+    // contributor-written `description` tag, or finally the category. This finds
+    // notable places Nominatim's single point-result misses and reads their tags
+    // Nominatim never exposes.
+    if (!result) {
+      const op = await overpassPoiAgent(gps, controller.signal, nameHint, LANDMARK_DISCOVER_RADIUS_M).catch(() => null);
+      if (op) {
+        const nearby = op.distance > LANDMARK_RADIUS_M; // beside, not at
+        let enDesc = null, zhDesc = null, lat = op.lat, lon = op.lon, rich = false;
+        // Richest: pull the exact Wikipedia article OSM points to (no guessing).
+        if (op.wp) {
+          const ex = await _wikiExtractByTitle(op.wp.lang, op.wp.title, controller.signal, 6).catch(() => null);
+          if (ex) { enDesc = ex.description; rich = true; if (ex.lat != null) { lat = ex.lat; lon = ex.lon; } }
+        }
+        if (op.wpZh) {
+          const exz = await _wikiExtractByTitle("zh", op.wpZh.title, controller.signal, 5).catch(() => null);
+          if (exz) { zhDesc = exz.description; rich = true; }
+        }
+        // Fill any missing language from the Wikidata one-liner.
+        if ((!enDesc || !zhDesc) && op.wikidata) {
+          const wd = await wikidataDescribeAgent(op.wikidata, controller.signal).catch(() => null);
+          if (wd) { if (!enDesc) enDesc = wd.en; if (!zhDesc) zhDesc = wd.zh; }
+        }
+        // Then the OSM-contributor description, then the maps-style category.
+        if (!enDesc) enDesc = op.osmDescription;
+        if (!zhDesc) zhDesc = op.osmDescriptionZh;
+        const area = (poi && poi.area) || (regionHint ? regionHint.split(",")[0].trim() : null);
+        if (!enDesc && op.category) enDesc = op.category + (area ? " in " + area : "");
+        if (enDesc || zhDesc) {
+          result = { title: op.name, description: enDesc, zhTitle: op.name, zhDescription: zhDesc,
+            lat: lat, lon: lon, distance: op.distance, nearby: nearby, mapsStyle: !rich };
+        }
+      }
+    }
+    // Tier 5 -- maps-style fallback from the Nominatim-cached POI when Overpass
+    // found nothing (blocked/offline/no tagged OSM POI): a Wikidata one-liner or
+    // the OSM category. The place you're AT, so not "nearby".
     if (!result && poi && poi.name) {
       let en = null, zh = null;
       if (poi.wikidata) {
@@ -21490,7 +21646,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-28 22:20";
+const APP_BUILD = "2026-06-28 22:36";
 
 function App() {
   const canvasRef    = useRef(null);
