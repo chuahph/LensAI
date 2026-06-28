@@ -19428,6 +19428,17 @@ const CUISINE_WORDS = {
   asian: "Asian food", seafood: "seafood", grill: "grilled food", bbq: "BBQ", barbecue: "BBQ",
   steak_house: "steak", burger: "burgers", pizza: "pizza", italian: "Italian food",
   french: "French food", mexican: "Mexican food", coffee_shop: "coffee", breakfast: "breakfast",
+  // More tags common on South-East / East Asian eateries in OSM.
+  taiwanese: "Taiwanese food", hongkong: "Hong Kong food", hong_kong: "Hong Kong food",
+  teochew: "Teochew food", hokkien: "Hokkien food", hainanese: "Hainanese food",
+  bak_kut_teh: "bak kut teh", chicken_rice: "chicken rice", nasi_lemak: "nasi lemak",
+  nasi_kandar: "nasi kandar", char_kway_teow: "char kway teow", laksa: "laksa",
+  satay: "satay", roti: "roti canai", biryani: "biryani", tandoori: "Indian food",
+  kopitiam: "kopitiam fare", dim_sum_house: "dim sum", congee: "congee", porridge: "congee",
+  wonton: "wonton noodles", bubble_tea: "bubble tea", bubble_milk_tea: "bubble tea",
+  dessert: "desserts", cake: "cakes", western: "Western food", fusion: "fusion food",
+  fish_and_chips: "fish & chips", halal: "halal food", vegetarian: "vegetarian food",
+  vegan: "vegan food", kaiseki: "kaiseki", fried_chicken: "fried chicken",
 };
 // Maps an OSM cuisine tag value (possibly multi-valued) to a friendly phrase.
 function cuisineWord(cuisine) {
@@ -19439,6 +19450,47 @@ function cuisineWord(cuisine) {
   }
   return null;
 }
+// Many small Asian eateries are NOT tagged with an OSM cuisine value, but their
+// own name almost always states the dish/cuisine ("Sushi Zanmai", "Restoran
+// Nasi Kandar Pelita", "Pho Vietz", "Bak Kut Teh 168", "Din Tai Fung Dim Sum").
+// When the cuisine tag is missing this reads the cuisine straight off the venue
+// name -- the second-most reliable food signal we have, and the one that finally
+// covers the long tail of un-tagged hawker/kopitiam shops the on-device
+// classifier can never name. Ordered most-specific first; a venue name is only
+// passed here once we already know the place IS an eatery, so these tokens are
+// safe (we're not guessing that an arbitrary place serves food).
+const NAME_CUISINE = [
+  [/nasi\s*kandar/, "nasi kandar"], [/nasi\s*lemak/, "nasi lemak"],
+  [/char\s*(kway|koay|kuey|kuay)\s*teow|炒粿條/, "char kway teow"],
+  [/bak\s*kut\s*teh|肉骨茶/, "bak kut teh"],
+  [/(hainan(ese)?\s*)?chicken\s*rice|海南鸡饭|鸡饭/, "chicken rice"],
+  [/dim\s*sum|点心|點心/, "dim sum"], [/hot\s*pot|hotpot|steamboat|火锅|火鍋/, "hotpot"],
+  [/banana\s*leaf/, "banana-leaf rice"], [/roti\s*(canai|prata)/, "roti canai"],
+  [/tom\s*y[au]m/, "Thai food"], [/\bpho\b|河粉/, "pho"], [/ramen|拉面|拉麵/, "ramen"],
+  [/sushi|寿司|壽司/, "sushi"], [/yakiniku|焼肉/, "yakiniku (Japanese BBQ)"],
+  [/izakaya|居酒屋/, "izakaya fare"],
+  [/udon|soba|tempura|donburi|gyudon|teppanyaki|sukiyaki|shabu/, "Japanese food"],
+  [/\blaksa\b/, "laksa"], [/sat[ae]y|沙爹/, "satay"], [/bir[iy]ani/, "biryani"],
+  [/tandoori|\bnaan\b|thali/, "Indian food"],
+  [/kimchi|bibimbap|bulgogi|gangnam|seoul/, "Korean food"],
+  [/wonton|wantan|云吞|雲吞/, "wonton noodles"], [/congee|porridge|\b粥\b/, "congee"],
+  [/dumpling|饺子|餃子|gyoza|jiaozi/, "dumplings"], [/peranakan|nyonya|nonya/, "Nyonya food"],
+  [/kopitiam|kopi\s*tiam/, "kopitiam fare"], [/pizz/, "pizza"],
+  [/trattoria|ristorante|pasta|pizzeria/, "Italian food"], [/burger/, "burgers"],
+  [/steak/, "steak"], [/seafood|海鲜|海鮮/, "seafood"], [/bubble\s*tea|boba|珍珠奶茶/, "bubble tea"],
+  // Broad nationality words last (least specific).
+  [/japanese|和食/, "Japanese food"], [/korean|韩国|韓國/, "Korean food"],
+  [/vietnam(ese)?|越南/, "Vietnamese food"], [/\bthai\b|泰国|泰國/, "Thai food"],
+  [/chinese|cantonese|sichuan|szechuan|teochew|hokkien|中餐|中華/, "Chinese food"],
+  [/\bindian\b|mamak/, "Indian food"], [/malay(sian)?\b/, "Malaysian food"],
+];
+// Infers a cuisine phrase from an eatery's own name. Returns a phrase | null.
+function cuisineFromName(name) {
+  if (!name) return null;
+  const s = String(name).toLowerCase();
+  for (const [re, phrase] of NAME_CUISINE) { if (re.test(s)) return phrase; }
+  return null;
+}
 // Pulls the named eatery/shop at a coordinate out of an already-fetched
 // Nominatim address, so a food/people photo can be captioned "at <name>".
 // extratags (when requested) carries the OSM cuisine tag, the most reliable
@@ -19448,7 +19500,9 @@ function extractVenue(address, properName, extratags) {
   const k = (a.amenity && VENUE_KINDS[a.amenity]) || (a.shop && FOOD_SHOP_KINDS[a.shop]) || null;
   if (!k) return null;
   const name = properName || a.name || null;
-  const cuisine = cuisineWord(extratags && extratags.cuisine);
+  // Prefer the explicit OSM cuisine tag; fall back to reading it off the name
+  // (covers the many hawker/kopitiam eateries OSM doesn't tag).
+  const cuisine = cuisineWord(extratags && extratags.cuisine) || cuisineFromName(name);
   return { name: name ? sanitizeFolderName(name) : null, word: k.word, emoji: k.emoji, cuisine: cuisine };
 }
 // Reads the cached venue for a coordinate (populated as a side effect of
@@ -19519,8 +19573,13 @@ async function reverseGeocodeAgent(gps) {
     // too coarse for grouping -- "San Francisco" covers the whole city --
     // so fall back through neighbourhood/suburb/district, then
     // city/county/state, in order of specificity.
-    const poiCategory = a.tourism || a.historic || a.leisure || a.man_made ||
+    // Generic OSM tag values (building=yes, amenity=yes, shop=yes, entrance...)
+    // carry no real place identity -- they'd produce nonsense like "yes, Bayan
+    // Lepas" -- so they don't count as a usable POI label.
+    const isGenericTag = v => { const t = String(v || "").toLowerCase(); return !v || t === "yes" || t === "entrance" || t === "building"; };
+    const rawPoiCat = a.tourism || a.historic || a.leisure || a.man_made ||
       a.shop || a.amenity || a.office || a.building;
+    const poiCategory = isGenericTag(rawPoiCat) ? null : rawPoiCat;
     const properName = (json.namedetails && json.namedetails.name) || a.name;
     _venueCache.set(key, extractVenue(a, properName, json.extratags));
     // Remember the named POI/attraction/building here (not a bare area/city) so
@@ -19530,9 +19589,11 @@ async function reverseGeocodeAgent(gps) {
       properName !== a.city && properName !== a.town &&
       (a.tourism || a.historic || a.leisure || a.man_made || a.amenity || a.shop || a.building);
     _poiCache.set(key, poiNamed ? { name: sanitizeFolderName(properName) } : null);
-    const poi = poiCategory
-      ? (properName && properName !== a.neighbourhood && properName !== a.suburb ? properName : poiCategory)
-      : null;
+    // Prefer a real proper name (even inside a building=yes), then a non-generic
+    // category tag, else nothing -- never a bare area/city name as the "POI".
+    const namedPoi = properName && properName !== a.neighbourhood && properName !== a.suburb &&
+      properName !== a.city && properName !== a.town ? properName : null;
+    const poi = namedPoi || poiCategory;
     const area = a.neighbourhood || a.quarter || a.suburb || a.city_district ||
       a.hamlet || a.village;
     const city = a.city || a.town || a.municipality || a.county;
@@ -19872,7 +19933,8 @@ const CONTENT_LABELS = {
   "french loaf":"bread","bagel":"bagel","pretzel":"pretzel","espresso":"coffee",
   "red wine":"wine","guacamole":"guacamole","burrito":"burrito","carbonara":"pasta",
   "pizza":"pizza","cheeseburger":"burger","hotdog":"hot dog","potpie":"pie",
-  "dough":"dumplings",
+  "dough":"dumplings","eggnog":"drinks","beer glass":"beer","beer bottle":"beer",
+  "wine bottle":"wine","coffee mug":"coffee","cocktail shaker":"cocktails","waffle iron":"waffles",
   // Produce (fresh-market / ingredient shots). Tropical fruit ImageNet has no
   // class for -- durian, etc. -- gets guessed as a yellow squash; mapping the
   // whole squash/gourd family to the plain category word "fruit" (botanically
@@ -19888,6 +19950,13 @@ const CONTENT_LABELS = {
   "seashore":"by the sea","sandbar":"the beach","lakeside":"by the lake","cliff":"cliffs",
   "promontory":"the coast","alp":"the mountains","volcano":"a volcano","valley":"a valley",
   "geyser":"a geyser","coral reef":"a coral reef","lighthouse":"a lighthouse","fountain":"a fountain",
+  // Distinctive built landmarks ImageNet recognizes well -- good for travel
+  // shots. (Ambiguous building classes like "cinema"/"church" are deliberately
+  // left out: they misfire on ordinary storefronts.)
+  "castle":"a castle","palace":"a palace","monastery":"a historic building","stupa":"a temple",
+  "obelisk":"a monument","triumphal arch":"a historic arch","suspension bridge":"a bridge",
+  "steel arch bridge":"a bridge","viaduct":"a viaduct","pier":"the pier","dock":"the waterfront",
+  "boathouse":"the waterfront","water tower":"a water tower","windmill":"a windmill",
 };
 async function photoContentAgent(imageEl) {
   if (!imageEl) return null;
@@ -20033,7 +20102,8 @@ function buildShareCaptions(scene, locationName, landmark, extra) {
   // geocoding didn't return an explicit amenity tag at the exact point.
   let venue = extra && extra.venue;
   if ((!venue || !venue.name) && scene === "food" && placeEn) {
-    venue = { name: placeEn.split(",")[0].trim(), word: "spot", emoji: "🍽️" };
+    const vn = placeEn.split(",")[0].trim();
+    venue = { name: vn, word: "spot", emoji: "🍽️", cuisine: cuisineFromName(vn) };
   }
   // Basic photo recognition (scene heuristic + the venue's OSM cuisine tag) is
   // always on. The heavier on-device TensorFlow analysis (specific objects,
@@ -21314,7 +21384,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-28 18:20";
+const APP_BUILD = "2026-06-28 21:24";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21834,6 +21904,8 @@ function App() {
   // pre-filled share text (common on iOS).
   const [shareOpen,setShareOpen]=useState(false);
   const [shareBusy,setShareBusy]=useState(false);
+  const [sharePreparing,setSharePreparing]=useState(false); // export file still rendering in the background after the sheet opened
+  const [locLoading,setLocLoading]=useState(false); // background location/landmark resolution for the open share sheet
   const [shareCaps,setShareCaps]=useState([]);
   const [shareText,setShareText]=useState("");
   const [shareThumb,setShareThumb]=useState(null);
@@ -21903,13 +21975,40 @@ function App() {
     if(!img||shareBusy) return;
     setDetailedAnalysisEnabled(false); // detailed (TensorFlow) is off by default each share; enable manually per need
     setShareBusy(true);
-    try{
-      const { blob, filename } = await buildEditedExport();
-      shareFileRef.current = new File([blob], filename, { type:"image/jpeg" });
-      setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return URL.createObjectURL(blob); });
-      // Map the photo to a place + an online landmark description from its
-      // EXIF GPS (falling back to an embedded location tag, then nothing),
-      // and the named eatery/shop at that spot for venue captions.
+    const stats=statsRef.current||imgStats||null;
+    const scene=(analysis&&analysis.scene)||(stats&&stats.scene)||null;
+    // Open the sheet INSTANTLY: show the on-screen preview as a placeholder
+    // thumb and the scene caption right away, then do the slow work (export
+    // render, then reverse-geocode + Wikipedia) in the background. The press no
+    // longer waits on the first-time render warmup or the network; the
+    // "Share to Facebook" action is held until the export file is ready.
+    shareFileRef.current=null;
+    shareCtxRef.current={scene, loc:null, landmark:null, venue:null, stats};
+    const caps0=buildShareCaptions(scene, null, null, {venue:null, content:null, stats});
+    setShareCaps(caps0);
+    setShareText(caps0[0]||"");
+    shareAutoRef.current=caps0[0]||"";
+    setAiStatus(null);
+    try{ const c=canvasRef.current; if(c) setShareThumb(prev=>{ if(prev&&prev.indexOf("blob:")===0) URL.revokeObjectURL(prev); return c.toDataURL("image/jpeg",0.6); }); }catch(e){}
+    setSharePreparing(true);
+    setLocLoading(true);
+    setShareOpen(true);
+    setShareBusy(false);
+    // Background: render the export file, then resolve location, then content AI.
+    (async()=>{
+      // Yield first so React paints the just-opened sheet before the export
+      // render (heavy synchronous CPU on its first, un-warmed run) ties up the
+      // main thread -- otherwise the sheet wouldn't appear until the render is
+      // done, which is the lag this fix removes.
+      await new Promise(r=>setTimeout(r,30));
+      try{
+        const { blob, filename } = await buildEditedExport();
+        shareFileRef.current = new File([blob], filename, { type:"image/jpeg" });
+        setShareThumb(prev=>{ if(prev&&prev.indexOf("blob:")===0) URL.revokeObjectURL(prev); return URL.createObjectURL(blob); });
+      }catch(err){
+        console.error("[LensAI] Share render failed:", err);
+        showToast("Couldn't prepare the photo -- try again");
+      }finally{ setSharePreparing(false); _releaseScratch(); }
       let loc=null, landmark=null, venue=null;
       if(srcFileRef.current){
         try{
@@ -21924,36 +22023,30 @@ function App() {
           }
         }catch(e){ /* keep going with whatever resolved -- caption still works */ }
       }
-      const stats=statsRef.current||imgStats||null;
-      const scene=(analysis&&analysis.scene)||(stats&&stats.scene)||null;
-      // Open immediately with location/scene captions. If the user has switched
-      // content recognition on, the heavier on-device analysis then runs in the
-      // background and upgrades the suggestions in place; off by default.
       shareCtxRef.current={scene, loc, landmark, venue, stats};
-      const caps0=buildShareCaptions(scene, loc, landmark, {venue, content:null, stats});
-      setShareCaps(caps0);
-      setShareText(caps0[0]||"");
-      shareAutoRef.current=caps0[0]||"";
-      setAiStatus(null);
-      setShareOpen(true);
+      if(loc||landmark||venue){
+        const up=buildShareCaptions(scene, loc, landmark, {venue, content:null, stats});
+        setShareCaps(up);
+        const prevAuto=shareAutoRef.current;
+        setShareText(prev=>prev===prevAuto?(up[0]||prev):prev);
+        shareAutoRef.current=up[0]||shareAutoRef.current;
+      }
+      setLocLoading(false);
       runShareContentAI();
-    }catch(err){
-      console.error("[LensAI] Share prepare failed:", err);
-      showToast("Couldn't prepare share -- try again");
-    }finally{
-      setShareBusy(false);
-      _releaseScratch();
-    }
+    })();
   };
 
   const closeShare=()=>{
     setShareOpen(false);
-    setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return null; });
+    setShareThumb(prev=>{ if(prev&&prev.indexOf("blob:")===0) URL.revokeObjectURL(prev); return null; });
     shareFileRef.current=null;
     setAiStatus(null);
+    setLocLoading(false);
+    setSharePreparing(false);
   };
 
   const doShare=async()=>{
+    if(sharePreparing){ showToast("Preparing the photo -- one moment…"); return; }
     const file=shareFileRef.current;
     if(!file){ closeShare(); return; }
     try{
@@ -22050,6 +22143,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
           shareThumb&&React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",marginBottom:12,display:"block"}}),
           React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption — for reference, review & edit before posting"),
           React.createElement(ContentAIBar,{onToggle:onToggleContentAI}),
+          locLoading&&React.createElement("div",{style:{fontSize:10,marginBottom:8,lineHeight:1.4,color:"#94a3b8",display:"flex",alignItems:"center",gap:6}},React.createElement(Spin,null),"Finding location & landmark…"),
           aiStatus&&aiStatus!=="ok"&&React.createElement("div",{style:{fontSize:10,marginBottom:8,lineHeight:1.4,color:aiStatus==="loading"?"#94a3b8":"#fbbf24",display:"flex",alignItems:"center",gap:6}},aiStatus==="loading"?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Analyzing photo content (food, objects)…"):aiStatus==="failed"?"Photo-content AI couldn't load on this network/CDN -- captions use basic tags. Location/landmark still works.":aiStatus==="inferfail"?"Photo-content AI loaded but couldn't analyze on this device -- using basic tags.":"Photo AI found no specific items in this photo -- using basic tags."),React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:6,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,lineHeight:1.5,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10,maxHeight:"40vh",overflowY:"auto"}}),
           shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to add (combine several)"),
           shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>{const sel=capSelected(c);return React.createElement("button",{key:i,onClick:()=>toggleCaption(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(sel?"#9db2e8":BORD),background:sel?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:sel?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",gap:8,alignItems:"flex-start",whiteSpace:"pre-wrap"}},React.createElement("span",{style:{flexShrink:0,width:16,height:16,borderRadius:4,border:"1px solid "+(sel?"#9db2e8":"#475569"),background:sel?"#1877f2":"transparent",color:"#fff",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}},sel?"✓":""),React.createElement("span",null,c));})),
@@ -22057,7 +22151,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
           React.createElement("div",{style:{fontSize:10,color:"#64748b",lineHeight:1.5,marginBottom:12,fontStyle:"italic",background:"rgba(251,191,36,0.08)",border:"1px solid rgba(251,191,36,0.25)",borderRadius:8,padding:"7px 9px"}},"Note: captions are auto-generated for reference (from location, landmark data and on-device photo analysis) and may not exactly match the actual photo -- please review and edit before posting."),
           React.createElement("div",{style:{display:"flex",gap:8}},
             React.createElement("button",{onClick:copyCaption,style:{flexShrink:0,padding:"12px 14px",borderRadius:12,border:"1px solid "+BORD,background:shareCopied?"rgba(34,197,94,0.15)":"rgba(255,255,255,0.04)",color:shareCopied?"#86efac":"#cbd5e1",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},shareCopied?"Copied ✓":((shareText||"").indexOf("\n\n")>=0?"Copy all":"Copy caption")),
-            React.createElement("button",{onClick:doShare,style:{flex:1,padding:"12px",borderRadius:12,border:"none",background:"#1877f2",color:"#fff",fontSize:14,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}},"Share to Facebook"))
+            React.createElement("button",{onClick:doShare,disabled:sharePreparing,style:{flex:1,padding:"12px",borderRadius:12,border:"none",background:sharePreparing?"rgba(24,119,242,0.4)":"#1877f2",color:"#fff",fontSize:14,fontWeight:800,cursor:sharePreparing?"wait":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},sharePreparing?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Preparing…"):"Share to Facebook"))
         )
       ),toast&&React.createElement("div",{style:{position:"fixed",bottom:68,left:"50%",transform:"translateX(-50%)",background:"rgba(13,18,32,0.97)",backdropFilter:"blur(12px)",border:"1px solid "+BORD,borderRadius:20,padding:"8px 18px",fontSize:12,fontWeight:600,whiteSpace:"nowrap",zIndex:100,boxShadow:"0 6px 20px rgba(0,0,0,0.4)",animation:"slideUp 0.25s ease-out"}},toast)));
 }
@@ -22201,6 +22295,8 @@ function BatchAgent({onClose,onCloseApp}){
   const [aiStatus,setAiStatus]=useState(null); // null|"loading"|"ok"|"failed"|"none" -- content-AI state for the share sheet
   const [shareCopied,setShareCopied]=useState(false);
   const shareFileRef=useRef(null);                       // always an array of File
+  const [locLoading]=useState(false); // batch resolves location before opening, so this stays false (shared caption UI symbol)
+  const [sharePreparing]=useState(false); // batch renders files before opening, so this stays false (shared share-button symbol)
   // Context + last auto-prefilled caption for the open share sheet, so toggling
   // content recognition can rebuild captions without re-rendering the photos.
   const shareCtxRef=useRef(null);
@@ -22957,7 +23053,7 @@ function BatchAgent({onClose,onCloseApp}){
         React.createElement("div",{style:{fontSize:11,color:"#64748b",lineHeight:1.5,marginBottom:12}},"Tap any suggestions to combine them. Facebook won't auto-fill the caption into its own post box, so it's copied to your clipboard -- after picking Facebook, long-press the post and Paste."),
         React.createElement("div",{style:{display:"flex",gap:8}},
           React.createElement("button",{onClick:copyCaption,style:{flexShrink:0,padding:"12px 14px",borderRadius:12,border:"1px solid "+BORD,background:shareCopied?"rgba(34,197,94,0.15)":"rgba(255,255,255,0.04)",color:shareCopied?"#86efac":"#cbd5e1",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},shareCopied?"Copied ✓":((shareText||"").indexOf("\n\n")>=0?"Copy all":"Copy caption")),
-          React.createElement("button",{onClick:doShare,style:{flex:1,padding:"12px",borderRadius:12,border:"none",background:"#1877f2",color:"#fff",fontSize:14,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}},"Share to Facebook"))
+          React.createElement("button",{onClick:doShare,disabled:sharePreparing,style:{flex:1,padding:"12px",borderRadius:12,border:"none",background:sharePreparing?"rgba(24,119,242,0.4)":"#1877f2",color:"#fff",fontSize:14,fontWeight:800,cursor:sharePreparing?"wait":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},sharePreparing?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Preparing…"):"Share to Facebook"))
       )
     )
   );
