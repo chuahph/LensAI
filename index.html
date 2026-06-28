@@ -19428,6 +19428,17 @@ const CUISINE_WORDS = {
   asian: "Asian food", seafood: "seafood", grill: "grilled food", bbq: "BBQ", barbecue: "BBQ",
   steak_house: "steak", burger: "burgers", pizza: "pizza", italian: "Italian food",
   french: "French food", mexican: "Mexican food", coffee_shop: "coffee", breakfast: "breakfast",
+  // More tags common on South-East / East Asian eateries in OSM.
+  taiwanese: "Taiwanese food", hongkong: "Hong Kong food", hong_kong: "Hong Kong food",
+  teochew: "Teochew food", hokkien: "Hokkien food", hainanese: "Hainanese food",
+  bak_kut_teh: "bak kut teh", chicken_rice: "chicken rice", nasi_lemak: "nasi lemak",
+  nasi_kandar: "nasi kandar", char_kway_teow: "char kway teow", laksa: "laksa",
+  satay: "satay", roti: "roti canai", biryani: "biryani", tandoori: "Indian food",
+  kopitiam: "kopitiam fare", dim_sum_house: "dim sum", congee: "congee", porridge: "congee",
+  wonton: "wonton noodles", bubble_tea: "bubble tea", bubble_milk_tea: "bubble tea",
+  dessert: "desserts", cake: "cakes", western: "Western food", fusion: "fusion food",
+  fish_and_chips: "fish & chips", halal: "halal food", vegetarian: "vegetarian food",
+  vegan: "vegan food", kaiseki: "kaiseki", fried_chicken: "fried chicken",
 };
 // Maps an OSM cuisine tag value (possibly multi-valued) to a friendly phrase.
 function cuisineWord(cuisine) {
@@ -19439,6 +19450,47 @@ function cuisineWord(cuisine) {
   }
   return null;
 }
+// Many small Asian eateries are NOT tagged with an OSM cuisine value, but their
+// own name almost always states the dish/cuisine ("Sushi Zanmai", "Restoran
+// Nasi Kandar Pelita", "Pho Vietz", "Bak Kut Teh 168", "Din Tai Fung Dim Sum").
+// When the cuisine tag is missing this reads the cuisine straight off the venue
+// name -- the second-most reliable food signal we have, and the one that finally
+// covers the long tail of un-tagged hawker/kopitiam shops the on-device
+// classifier can never name. Ordered most-specific first; a venue name is only
+// passed here once we already know the place IS an eatery, so these tokens are
+// safe (we're not guessing that an arbitrary place serves food).
+const NAME_CUISINE = [
+  [/nasi\s*kandar/, "nasi kandar"], [/nasi\s*lemak/, "nasi lemak"],
+  [/char\s*(kway|koay|kuey|kuay)\s*teow|炒粿條/, "char kway teow"],
+  [/bak\s*kut\s*teh|肉骨茶/, "bak kut teh"],
+  [/(hainan(ese)?\s*)?chicken\s*rice|海南鸡饭|鸡饭/, "chicken rice"],
+  [/dim\s*sum|点心|點心/, "dim sum"], [/hot\s*pot|hotpot|steamboat|火锅|火鍋/, "hotpot"],
+  [/banana\s*leaf/, "banana-leaf rice"], [/roti\s*(canai|prata)/, "roti canai"],
+  [/tom\s*y[au]m/, "Thai food"], [/\bpho\b|河粉/, "pho"], [/ramen|拉面|拉麵/, "ramen"],
+  [/sushi|寿司|壽司/, "sushi"], [/yakiniku|焼肉/, "yakiniku (Japanese BBQ)"],
+  [/izakaya|居酒屋/, "izakaya fare"],
+  [/udon|soba|tempura|donburi|gyudon|teppanyaki|sukiyaki|shabu/, "Japanese food"],
+  [/\blaksa\b/, "laksa"], [/sat[ae]y|沙爹/, "satay"], [/bir[iy]ani/, "biryani"],
+  [/tandoori|\bnaan\b|thali/, "Indian food"],
+  [/kimchi|bibimbap|bulgogi|gangnam|seoul/, "Korean food"],
+  [/wonton|wantan|云吞|雲吞/, "wonton noodles"], [/congee|porridge|\b粥\b/, "congee"],
+  [/dumpling|饺子|餃子|gyoza|jiaozi/, "dumplings"], [/peranakan|nyonya|nonya/, "Nyonya food"],
+  [/kopitiam|kopi\s*tiam/, "kopitiam fare"], [/pizz/, "pizza"],
+  [/trattoria|ristorante|pasta|pizzeria/, "Italian food"], [/burger/, "burgers"],
+  [/steak/, "steak"], [/seafood|海鲜|海鮮/, "seafood"], [/bubble\s*tea|boba|珍珠奶茶/, "bubble tea"],
+  // Broad nationality words last (least specific).
+  [/japanese|和食/, "Japanese food"], [/korean|韩国|韓國/, "Korean food"],
+  [/vietnam(ese)?|越南/, "Vietnamese food"], [/\bthai\b|泰国|泰國/, "Thai food"],
+  [/chinese|cantonese|sichuan|szechuan|teochew|hokkien|中餐|中華/, "Chinese food"],
+  [/\bindian\b|mamak/, "Indian food"], [/malay(sian)?\b/, "Malaysian food"],
+];
+// Infers a cuisine phrase from an eatery's own name. Returns a phrase | null.
+function cuisineFromName(name) {
+  if (!name) return null;
+  const s = String(name).toLowerCase();
+  for (const [re, phrase] of NAME_CUISINE) { if (re.test(s)) return phrase; }
+  return null;
+}
 // Pulls the named eatery/shop at a coordinate out of an already-fetched
 // Nominatim address, so a food/people photo can be captioned "at <name>".
 // extratags (when requested) carries the OSM cuisine tag, the most reliable
@@ -19448,7 +19500,9 @@ function extractVenue(address, properName, extratags) {
   const k = (a.amenity && VENUE_KINDS[a.amenity]) || (a.shop && FOOD_SHOP_KINDS[a.shop]) || null;
   if (!k) return null;
   const name = properName || a.name || null;
-  const cuisine = cuisineWord(extratags && extratags.cuisine);
+  // Prefer the explicit OSM cuisine tag; fall back to reading it off the name
+  // (covers the many hawker/kopitiam eateries OSM doesn't tag).
+  const cuisine = cuisineWord(extratags && extratags.cuisine) || cuisineFromName(name);
   return { name: name ? sanitizeFolderName(name) : null, word: k.word, emoji: k.emoji, cuisine: cuisine };
 }
 // Reads the cached venue for a coordinate (populated as a side effect of
@@ -19519,8 +19573,13 @@ async function reverseGeocodeAgent(gps) {
     // too coarse for grouping -- "San Francisco" covers the whole city --
     // so fall back through neighbourhood/suburb/district, then
     // city/county/state, in order of specificity.
-    const poiCategory = a.tourism || a.historic || a.leisure || a.man_made ||
+    // Generic OSM tag values (building=yes, amenity=yes, shop=yes, entrance...)
+    // carry no real place identity -- they'd produce nonsense like "yes, Bayan
+    // Lepas" -- so they don't count as a usable POI label.
+    const isGenericTag = v => { const t = String(v || "").toLowerCase(); return !v || t === "yes" || t === "entrance" || t === "building"; };
+    const rawPoiCat = a.tourism || a.historic || a.leisure || a.man_made ||
       a.shop || a.amenity || a.office || a.building;
+    const poiCategory = isGenericTag(rawPoiCat) ? null : rawPoiCat;
     const properName = (json.namedetails && json.namedetails.name) || a.name;
     _venueCache.set(key, extractVenue(a, properName, json.extratags));
     // Remember the named POI/attraction/building here (not a bare area/city) so
@@ -19530,9 +19589,11 @@ async function reverseGeocodeAgent(gps) {
       properName !== a.city && properName !== a.town &&
       (a.tourism || a.historic || a.leisure || a.man_made || a.amenity || a.shop || a.building);
     _poiCache.set(key, poiNamed ? { name: sanitizeFolderName(properName) } : null);
-    const poi = poiCategory
-      ? (properName && properName !== a.neighbourhood && properName !== a.suburb ? properName : poiCategory)
-      : null;
+    // Prefer a real proper name (even inside a building=yes), then a non-generic
+    // category tag, else nothing -- never a bare area/city name as the "POI".
+    const namedPoi = properName && properName !== a.neighbourhood && properName !== a.suburb &&
+      properName !== a.city && properName !== a.town ? properName : null;
+    const poi = namedPoi || poiCategory;
     const area = a.neighbourhood || a.quarter || a.suburb || a.city_district ||
       a.hamlet || a.village;
     const city = a.city || a.town || a.municipality || a.county;
@@ -19872,7 +19933,8 @@ const CONTENT_LABELS = {
   "french loaf":"bread","bagel":"bagel","pretzel":"pretzel","espresso":"coffee",
   "red wine":"wine","guacamole":"guacamole","burrito":"burrito","carbonara":"pasta",
   "pizza":"pizza","cheeseburger":"burger","hotdog":"hot dog","potpie":"pie",
-  "dough":"dumplings",
+  "dough":"dumplings","eggnog":"drinks","beer glass":"beer","beer bottle":"beer",
+  "wine bottle":"wine","coffee mug":"coffee","cocktail shaker":"cocktails","waffle iron":"waffles",
   // Produce (fresh-market / ingredient shots). Tropical fruit ImageNet has no
   // class for -- durian, etc. -- gets guessed as a yellow squash; mapping the
   // whole squash/gourd family to the plain category word "fruit" (botanically
@@ -19888,6 +19950,13 @@ const CONTENT_LABELS = {
   "seashore":"by the sea","sandbar":"the beach","lakeside":"by the lake","cliff":"cliffs",
   "promontory":"the coast","alp":"the mountains","volcano":"a volcano","valley":"a valley",
   "geyser":"a geyser","coral reef":"a coral reef","lighthouse":"a lighthouse","fountain":"a fountain",
+  // Distinctive built landmarks ImageNet recognizes well -- good for travel
+  // shots. (Ambiguous building classes like "cinema"/"church" are deliberately
+  // left out: they misfire on ordinary storefronts.)
+  "castle":"a castle","palace":"a palace","monastery":"a historic building","stupa":"a temple",
+  "obelisk":"a monument","triumphal arch":"a historic arch","suspension bridge":"a bridge",
+  "steel arch bridge":"a bridge","viaduct":"a viaduct","pier":"the pier","dock":"the waterfront",
+  "boathouse":"the waterfront","water tower":"a water tower","windmill":"a windmill",
 };
 async function photoContentAgent(imageEl) {
   if (!imageEl) return null;
@@ -20033,7 +20102,8 @@ function buildShareCaptions(scene, locationName, landmark, extra) {
   // geocoding didn't return an explicit amenity tag at the exact point.
   let venue = extra && extra.venue;
   if ((!venue || !venue.name) && scene === "food" && placeEn) {
-    venue = { name: placeEn.split(",")[0].trim(), word: "spot", emoji: "🍽️" };
+    const vn = placeEn.split(",")[0].trim();
+    venue = { name: vn, word: "spot", emoji: "🍽️", cuisine: cuisineFromName(vn) };
   }
   // Basic photo recognition (scene heuristic + the venue's OSM cuisine tag) is
   // always on. The heavier on-device TensorFlow analysis (specific objects,
