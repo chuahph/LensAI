@@ -19592,14 +19592,14 @@ function firstSentences(text, max) {
 // Looks up the nearest notable place to a coordinate on one Wikipedia
 // language edition: a geosearch for the article AT the photo's coordinate,
 // then that article's plain-text intro extract. The radius is deliberately
-// tight (100m) and only the single closest article is taken, so the result is
+// tight (150m) and only the single closest article is taken, so the result is
 // the exact place the photo is at -- not a notable spot down the street that
 // happened to be the nearest article in a wider search -- while still
 // allowing for normal GPS jitter and a landmark's centre point.
 // `sentences` controls how much description to pull. Returns { title,
 // description, lat, lon, distance } | null (null when nothing notable is
 // right there).
-const LANDMARK_RADIUS_M = 100;
+const LANDMARK_RADIUS_M = 150;
 async function _wikiLandmark(lang, gps, signal, sentences) {
   const base = "https://" + lang + ".wikipedia.org/w/api.php";
   const geoUrl = base + "?action=query&list=geosearch&gscoord=" +
@@ -21697,7 +21697,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
             React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{width:24,height:24,borderRadius:6,background:"#1877f2",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:15,fontFamily:"Georgia,'Times New Roman',serif"}},"f"),React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:800,fontSize:18}},"Share to Facebook")),
             React.createElement("button",{onClick:closeShare,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×")),
           shareThumb&&React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",marginBottom:12,display:"block"}}),
-          React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption"),
+          React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption — for reference, review & edit before posting"),
           React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:6,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,lineHeight:1.5,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10,maxHeight:"40vh",overflowY:"auto"}}),
           shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to add (combine several)"),
           shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>{const sel=capSelected(c);return React.createElement("button",{key:i,onClick:()=>toggleCaption(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(sel?"#9db2e8":BORD),background:sel?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:sel?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",gap:8,alignItems:"flex-start",whiteSpace:"pre-wrap"}},React.createElement("span",{style:{flexShrink:0,width:16,height:16,borderRadius:4,border:"1px solid "+(sel?"#9db2e8":"#475569"),background:sel?"#1877f2":"transparent",color:"#fff",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}},sel?"✓":""),React.createElement("span",null,c));})),
@@ -22012,6 +22012,9 @@ function BatchAgent({onClose,onCloseApp}){
     // images only so a folder of mixed assets doesn't choke the pipeline.
     const list=Array.from(e.target.files||[]).filter(f=>f.type.startsWith("image/"));
     setFiles(list); setResults([]);
+    // A fresh batch invalidates any previous share selection -- the old
+    // indices point at results that no longer exist.
+    exitSelect();
     e.target.value="";
   };
 
@@ -22020,6 +22023,7 @@ function BatchAgent({onClose,onCloseApp}){
   const run=async()=>{
     if(!files.length||!goals.length||busy||overLimit) return;
     setBusy(true); setProgress(0); setResults([]); setStage(null);
+    exitSelect(); // re-running rebuilds results -- drop any stale share selection
     acquireWakeLock(); // keep the screen (and so the tab) awake for the whole batch
     const total=files.length*goals.length;
     setProgressTotal(total);
@@ -22528,7 +22532,7 @@ function BatchAgent({onClose,onCloseApp}){
           React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{width:24,height:24,borderRadius:6,background:"#1877f2",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:15,fontFamily:"Georgia,'Times New Roman',serif"}},"f"),React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:800,fontSize:18,color:"#fff"}},shareCount>1?"Share "+shareCount+" photos":"Share to Facebook")),
           React.createElement("button",{onClick:closeShare,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×")),
         shareThumb&&React.createElement("div",{style:{position:"relative",marginBottom:12}},React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",display:"block"}}),shareCount>1&&React.createElement("div",{style:{position:"absolute",top:8,right:8,background:"rgba(0,0,0,0.7)",color:"#fff",fontSize:11,fontWeight:700,padding:"3px 9px",borderRadius:12}},"+"+(shareCount-1)+" more")),
-        React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption"),
+        React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption — for reference, review & edit before posting"),
         React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:6,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,lineHeight:1.5,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10,maxHeight:"40vh",overflowY:"auto"}}),
         shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to add (combine several)"),
         shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>{const sel=capSelected(c);return React.createElement("button",{key:i,onClick:()=>toggleCaption(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(sel?"#9db2e8":BORD),background:sel?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:sel?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",gap:8,alignItems:"flex-start",whiteSpace:"pre-wrap"}},React.createElement("span",{style:{flexShrink:0,width:16,height:16,borderRadius:4,border:"1px solid "+(sel?"#9db2e8":"#475569"),background:sel?"#1877f2":"transparent",color:"#fff",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}},sel?"✓":""),React.createElement("span",null,c));})),
