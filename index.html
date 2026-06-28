@@ -21811,6 +21811,7 @@ function App() {
 
   const openShare=async()=>{
     if(!img||shareBusy) return;
+    setDetailedAnalysisEnabled(false); // detailed (TensorFlow) is off by default each share; enable manually per need
     setShareBusy(true);
     try{
       const { blob, filename } = await buildEditedExport();
@@ -22229,6 +22230,7 @@ function BatchAgent({onClose,onCloseApp}){
   };
 
   const presentShare=async(outFiles, caps)=>{
+    setDetailedAnalysisEnabled(false); // detailed (TensorFlow) is off by default each share; enable manually per need
     shareFileRef.current=outFiles;
     setShareCount(outFiles.length);
     setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return URL.createObjectURL(outFiles[0]); });
