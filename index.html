@@ -19673,14 +19673,27 @@ async function landmarkDescribeAgent(gps) {
 // counts people + 80 common object classes; MobileNet adds fine ImageNet
 // labels (specific dish/breed/item names).
 let _visionModels = null, _visionLoadPromise = null, _visionFailed = false;
-function _loadScript(src) {
+// Loads a script trying each URL in turn, so one blocked/slow CDN (jsdelivr
+// is throttled/blocked on some mobile networks, notably in parts of Asia)
+// falls back to the next (unpkg) instead of failing outright.
+function _loadScriptFrom(urls) {
   return new Promise((resolve, reject) => {
-    const s = document.createElement("script");
-    s.src = src; s.async = true;
-    s.onload = () => resolve(); s.onerror = () => reject(new Error("load " + src));
-    document.head.appendChild(s);
+    let i = 0;
+    const tryNext = () => {
+      if (i >= urls.length) { reject(new Error("all CDNs failed")); return; }
+      const s = document.createElement("script");
+      s.src = urls[i++]; s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => { s.remove(); tryNext(); };
+      document.head.appendChild(s);
+    };
+    tryNext();
   });
 }
+const _cdn = (pkg, ver, file) => [
+  "https://cdn.jsdelivr.net/npm/" + pkg + "@" + ver + "/dist/" + file,
+  "https://unpkg.com/" + pkg + "@" + ver + "/dist/" + file,
+];
 async function loadVisionModels() {
   if (_visionModels) return _visionModels;
   if (_visionFailed) return null;
@@ -19689,9 +19702,9 @@ async function loadVisionModels() {
   if (typeof navigator !== "undefined" && navigator.onLine === false) return null;
   if (!_visionLoadPromise) {
     _visionLoadPromise = (async () => {
-      if (typeof tf === "undefined") await _loadScript("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
-      if (typeof cocoSsd === "undefined") await _loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js");
-      if (typeof mobilenet === "undefined") await _loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js");
+      if (typeof tf === "undefined") await _loadScriptFrom(_cdn("@tensorflow/tfjs", "4.22.0", "tf.min.js"));
+      if (typeof cocoSsd === "undefined") await _loadScriptFrom(_cdn("@tensorflow-models/coco-ssd", "2.2.3", "coco-ssd.min.js"));
+      if (typeof mobilenet === "undefined") await _loadScriptFrom(_cdn("@tensorflow-models/mobilenet", "2.1.1", "mobilenet.min.js"));
       const [coco, mn] = await Promise.all([cocoSsd.load(), mobilenet.load()]);
       _visionModels = { coco: coco, mobilenet: mn };
       return _visionModels;
@@ -19699,6 +19712,8 @@ async function loadVisionModels() {
   }
   return _visionLoadPromise;
 }
+// Lets the UI tell the user whether content AI is loading / failed.
+function visionState() { return _visionModels ? "ok" : (_visionFailed ? "failed" : "loading"); }
 // COCO classes that read as animals / as food, for caption phrasing.
 const COCO_ANIMALS = ["bird","cat","dog","horse","sheep","cow","elephant","bear","zebra","giraffe"];
 const COCO_FOODS = ["banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake"];
@@ -19708,7 +19723,7 @@ const COCO_FOODS = ["banana","apple","sandwich","orange","broccoli","carrot","ho
 async function photoContentAgent(imageEl) {
   if (!imageEl) return null;
   let models;
-  try { models = await Promise.race([loadVisionModels(), new Promise(r => setTimeout(() => r(null), 12000))]); }
+  try { models = await Promise.race([loadVisionModels(), new Promise(r => setTimeout(() => r(null), 25000))]); }
   catch (e) { models = null; }
   if (!models) return null;
   try {
@@ -21003,7 +21018,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-28 09:21";
+const APP_BUILD = "2026-06-28 09:32";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21527,6 +21542,7 @@ function App() {
   const [shareText,setShareText]=useState("");
   const [shareThumb,setShareThumb]=useState(null);
   const [shareCopied,setShareCopied]=useState(false);
+  const [aiStatus,setAiStatus]=useState(null); // null|"loading"|"ok"|"failed"|"none" -- content-AI state for the share sheet
   const shareFileRef=useRef(null);
 
   const copyCaption=async()=>{
@@ -21578,6 +21594,7 @@ function App() {
       const caps0=buildShareCaptions(scene, loc, landmark, {venue, content:null, stats});
       setShareCaps(caps0);
       setShareText(caps0[0]||"");
+      setAiStatus("loading");
       setShareOpen(true);
       (async()=>{
         try{
@@ -21585,7 +21602,8 @@ function App() {
           cv.getContext("2d").putImageData(img,0,0);
           const content=await photoContentAgent(cv);
           if(content) setShareCaps(buildShareCaptions(scene, loc, landmark, {venue, content, stats}));
-        }catch(e){ /* heuristic captions already shown */ }
+          setAiStatus(content?"ok":(visionState()==="failed"?"failed":"none"));
+        }catch(e){ setAiStatus("failed"); /* heuristic captions already shown */ }
       })();
     }catch(err){
       console.error("[LensAI] Share prepare failed:", err);
@@ -21600,6 +21618,7 @@ function App() {
     setShareOpen(false);
     setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return null; });
     shareFileRef.current=null;
+    setAiStatus(null);
   };
 
   const doShare=async()=>{
@@ -21698,7 +21717,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
             React.createElement("button",{onClick:closeShare,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×")),
           shareThumb&&React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",marginBottom:12,display:"block"}}),
           React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption — for reference, review & edit before posting"),
-          React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:6,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,lineHeight:1.5,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10,maxHeight:"40vh",overflowY:"auto"}}),
+          (aiStatus==="loading"||aiStatus==="failed")&&React.createElement("div",{style:{fontSize:10,marginBottom:8,lineHeight:1.4,color:aiStatus==="failed"?"#fbbf24":"#94a3b8",display:"flex",alignItems:"center",gap:6}},aiStatus==="loading"?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Analyzing photo content (food, objects)…"):"Photo-content AI couldn't load on this network/CDN -- captions use basic content tags. Location/landmark still works."),React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:6,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,lineHeight:1.5,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10,maxHeight:"40vh",overflowY:"auto"}}),
           shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to add (combine several)"),
           shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>{const sel=capSelected(c);return React.createElement("button",{key:i,onClick:()=>toggleCaption(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(sel?"#9db2e8":BORD),background:sel?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:sel?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",gap:8,alignItems:"flex-start",whiteSpace:"pre-wrap"}},React.createElement("span",{style:{flexShrink:0,width:16,height:16,borderRadius:4,border:"1px solid "+(sel?"#9db2e8":"#475569"),background:sel?"#1877f2":"transparent",color:"#fff",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}},sel?"✓":""),React.createElement("span",null,c));})),
           React.createElement("div",{style:{fontSize:11,color:"#64748b",lineHeight:1.5,marginBottom:8}},"Tap any suggestions to combine them. Facebook can't auto-fill the caption into its own post box, so you'll need to manually copy and paste it: tap Copy (or use the share sheet), pick Facebook, then long-press the post and Paste."),
@@ -21829,6 +21848,7 @@ function BatchAgent({onClose,onCloseApp}){
   const [shareText,setShareText]=useState("");
   const [shareThumb,setShareThumb]=useState(null);
   const [shareCount,setShareCount]=useState(0);
+  const [aiStatus,setAiStatus]=useState(null); // null|"loading"|"ok"|"failed"|"none" -- content-AI state for the share sheet
   const [shareCopied,setShareCopied]=useState(false);
   const shareFileRef=useRef(null);                       // always an array of File
   const [selectMode,setSelectMode]=useState(false);
@@ -21904,7 +21924,8 @@ function BatchAgent({onClose,onCloseApp}){
   // background and, if it produces anything, upgrades the suggestions in
   // place. Never blocks the sheet; silent on any failure.
   const upgradeCaptionsWithContent=(ctx)=>{
-    if(!ctx||!ctx.file) return;
+    if(!ctx||!ctx.file){ setAiStatus(null); return; }
+    setAiStatus("loading");
     (async()=>{
       try{
         const img=await decodeAgent(ctx.file);
@@ -21915,7 +21936,8 @@ function BatchAgent({onClose,onCloseApp}){
         if(typeof img.close==="function") img.close();
         const content=await photoContentAgent(cv);
         if(content) setShareCaps(buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content, stats:ctx.stats}));
-      }catch(e){ /* heuristic captions already shown */ }
+        setAiStatus(content?"ok":(visionState()==="failed"?"failed":"none"));
+      }catch(e){ setAiStatus("failed"); /* heuristic captions already shown */ }
     })();
   };
 
@@ -21962,6 +21984,7 @@ function BatchAgent({onClose,onCloseApp}){
     setShareOpen(false);
     setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return null; });
     shareFileRef.current=null;
+    setAiStatus(null);
   };
 
   const doShare=async()=>{
@@ -22533,7 +22556,7 @@ function BatchAgent({onClose,onCloseApp}){
           React.createElement("button",{onClick:closeShare,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×")),
         shareThumb&&React.createElement("div",{style:{position:"relative",marginBottom:12}},React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",display:"block"}}),shareCount>1&&React.createElement("div",{style:{position:"absolute",top:8,right:8,background:"rgba(0,0,0,0.7)",color:"#fff",fontSize:11,fontWeight:700,padding:"3px 9px",borderRadius:12}},"+"+(shareCount-1)+" more")),
         React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption — for reference, review & edit before posting"),
-        React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:6,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,lineHeight:1.5,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10,maxHeight:"40vh",overflowY:"auto"}}),
+        (aiStatus==="loading"||aiStatus==="failed")&&React.createElement("div",{style:{fontSize:10,marginBottom:8,lineHeight:1.4,color:aiStatus==="failed"?"#fbbf24":"#94a3b8",display:"flex",alignItems:"center",gap:6}},aiStatus==="loading"?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Analyzing photo content (food, objects)…"):"Photo-content AI couldn't load on this network/CDN -- captions use basic content tags. Location/landmark still works."),React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:6,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,lineHeight:1.5,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10,maxHeight:"40vh",overflowY:"auto"}}),
         shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to add (combine several)"),
         shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>{const sel=capSelected(c);return React.createElement("button",{key:i,onClick:()=>toggleCaption(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(sel?"#9db2e8":BORD),background:sel?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:sel?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",gap:8,alignItems:"flex-start",whiteSpace:"pre-wrap"}},React.createElement("span",{style:{flexShrink:0,width:16,height:16,borderRadius:4,border:"1px solid "+(sel?"#9db2e8":"#475569"),background:sel?"#1877f2":"transparent",color:"#fff",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}},sel?"✓":""),React.createElement("span",null,c));})),
         React.createElement("div",{style:{fontSize:11,color:"#64748b",lineHeight:1.5,marginBottom:12}},"Tap any suggestions to combine them. Facebook won't auto-fill the caption into its own post box, so it's copied to your clipboard -- after picking Facebook, long-press the post and Paste."),
