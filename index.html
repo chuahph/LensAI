@@ -19403,15 +19403,48 @@ const FOOD_SHOP_KINDS = {
   deli: { word: "deli", emoji: "🥪" }, chocolate: { word: "chocolatier", emoji: "🍫" },
   ice_cream: { word: "ice cream shop", emoji: "🍦" }, tea: { word: "tea house", emoji: "🍵" },
 };
+// OpenStreetMap cuisine tags -> a plain caption phrase. This is the single
+// most reliable food signal we have for Asian dishes: ImageNet (the on-device
+// classifier) has no class for nasi lemak, char kway teow, pho, biryani, dim
+// sum, etc. and only ever guesses a Western near-miss, but a restaurant tagged
+// cuisine=malaysian/chinese/indian/vietnamese tells us the actual cuisine for
+// certain. Values can be semicolon-separated (cuisine=chinese;dim_sum); we map
+// the first one we recognize. Keys are matched lowercased with spaces/dashes
+// normalized to underscores.
+const CUISINE_WORDS = {
+  chinese: "Chinese food", cantonese: "Cantonese food", sichuan: "Sichuan food",
+  szechuan: "Sichuan food", hunan: "Hunan food", dim_sum: "dim sum", dumpling: "dumplings",
+  hotpot: "hotpot", hot_pot: "hotpot", noodle: "noodles", noodles: "noodles",
+  malaysian: "Malaysian food", malay: "Malay food", nyonya: "Nyonya food",
+  peranakan: "Nyonya food", indian: "Indian food", north_indian: "North Indian food",
+  south_indian: "South Indian food", mamak: "mamak food", banana_leaf: "banana-leaf rice",
+  vietnamese: "Vietnamese food", pho: "pho", thai: "Thai food", indonesian: "Indonesian food",
+  japanese: "Japanese food", sushi: "sushi", ramen: "ramen", korean: "Korean food",
+  asian: "Asian food", seafood: "seafood", bbq: "BBQ", barbecue: "BBQ",
+  steak_house: "steak", burger: "burgers", pizza: "pizza", italian: "Italian food",
+  french: "French food", mexican: "Mexican food", coffee_shop: "coffee", breakfast: "breakfast",
+};
+// Maps an OSM cuisine tag value (possibly multi-valued) to a friendly phrase.
+function cuisineWord(cuisine) {
+  if (!cuisine) return null;
+  const parts = String(cuisine).toLowerCase().split(/[;,]/);
+  for (const p of parts) {
+    const key = p.trim().replace(/[\s-]+/g, "_");
+    if (CUISINE_WORDS[key]) return CUISINE_WORDS[key];
+  }
+  return null;
+}
 // Pulls the named eatery/shop at a coordinate out of an already-fetched
 // Nominatim address, so a food/people photo can be captioned "at <name>".
-// Returns { name, word, emoji } | null.
-function extractVenue(address, properName) {
+// extratags (when requested) carries the OSM cuisine tag, the most reliable
+// hint for what the food actually is. Returns { name, word, emoji, cuisine } | null.
+function extractVenue(address, properName, extratags) {
   const a = address || {};
   const k = (a.amenity && VENUE_KINDS[a.amenity]) || (a.shop && FOOD_SHOP_KINDS[a.shop]) || null;
   if (!k) return null;
   const name = properName || a.name || null;
-  return { name: name ? sanitizeFolderName(name) : null, word: k.word, emoji: k.emoji };
+  const cuisine = cuisineWord(extratags && extratags.cuisine);
+  return { name: name ? sanitizeFolderName(name) : null, word: k.word, emoji: k.emoji, cuisine: cuisine };
 }
 // Reads the cached venue for a coordinate (populated as a side effect of
 // reverseGeocodeAgent). Returns { name, word, emoji } | null.
@@ -19442,7 +19475,7 @@ async function reverseGeocodeAgent(gps) {
     // hierarchy above it (neighbourhood, city, town or village all
     // included) -- a lower zoom would skip straight past any named place
     // and resolve to its containing street/city instead.
-    const url = "https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&addressdetails=1&namedetails=1&lat=" +
+    const url = "https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&addressdetails=1&namedetails=1&extratags=1&lat=" +
       encodeURIComponent(gps.lat) + "&lon=" + encodeURIComponent(gps.lon);
     // Hard timeout: this fetch sits directly in batchProcessFile's
     // sequential per-photo pipeline (between analyze and correct/enhance),
@@ -19477,7 +19510,7 @@ async function reverseGeocodeAgent(gps) {
     const poiCategory = a.tourism || a.historic || a.leisure || a.man_made ||
       a.shop || a.amenity || a.office || a.building;
     const properName = (json.namedetails && json.namedetails.name) || a.name;
-    _venueCache.set(key, extractVenue(a, properName));
+    _venueCache.set(key, extractVenue(a, properName, json.extratags));
     const poi = poiCategory
       ? (properName && properName !== a.neighbourhood && properName !== a.suburb ? properName : poiCategory)
       : null;
@@ -19737,6 +19770,17 @@ const LABEL_FRIENDLY = {
   "drumstick":"fried chicken","french loaf":"bread","bagel":"bagel","pretzel":"pretzel",
   "espresso":"coffee","cup":"a drink","red wine":"wine","eggnog":"a drink",
   "guacamole":"guacamole","burrito":"burrito","carbonara":"pasta","pizza":"pizza",
+  // Asian dishes spread ImageNet probability onto these near-miss classes;
+  // map them to the closest plain dish word instead of the jargon class name.
+  "spaghetti squash":"noodles","potpie":"pie","cheeseburger":"burger","hotdog":"hot dog",
+  "dough":"dumplings",
+  // Produce (fresh-market / ingredient shots) -> simple group words.
+  "head cabbage":"vegetables","cabbage":"vegetables","broccoli":"vegetables",
+  "cauliflower":"vegetables","cucumber":"vegetables","bell pepper":"vegetables",
+  "zucchini":"vegetables","artichoke":"vegetables","mushroom":"mushrooms","corn":"corn",
+  "granny smith":"fruit","fig":"fruit","pineapple":"fruit","banana":"fruit","orange":"fruit",
+  "lemon":"fruit","pomegranate":"fruit","jackfruit":"fruit","custard apple":"fruit",
+  "strawberry":"fruit","mango":"fruit",
 };
 async function photoContentAgent(imageEl) {
   if (!imageEl) return null;
@@ -19807,9 +19851,13 @@ async function analyzePhotosContent(fileList, cap) {
 // Turns the content summary (or, failing that, the scene/face stats) into a
 // short list of human descriptors for captions: people count, animals, food,
 // and the fine ML labels. Always returns something usable.
-function buildContentTags(content, stats) {
+function buildContentTags(content, stats, leadTag) {
   const s = stats || {};
   const tags = [];
+  // A known cuisine (from the venue's OSM tag) is the most reliable food
+  // descriptor, so it leads and -- being real content -- suppresses the vague
+  // scene-heuristic fallback below.
+  if (leadTag) tags.push(leadTag);
   if (content) {
     if (content.peopleCount >= 2) tags.push("Group photo of " + content.peopleCount);
     else if (content.peopleCount === 1 && s.scene !== "food") tags.push("Portrait");
@@ -19817,7 +19865,7 @@ function buildContentTags(content, stats) {
       if (COCO_ANIMALS.indexOf(o) !== -1) tags.push(content.objects[o] > 1 ? content.objects[o] + " " + o + "s" : "a " + o);
       else if (COCO_FOODS.indexOf(o) !== -1) tags.push(o);
     });
-    (content.labels || []).forEach(l => tags.push(l));
+    (content.labels || []).forEach(l => { if (!leadTag || l.toLowerCase() !== leadTag.toLowerCase()) tags.push(l); });
   }
   if (tags.length === 0) {
     // Heuristic fallback from the statistical scene analysis.
@@ -19854,9 +19902,28 @@ function buildShareCaptions(scene, locationName, landmark, extra) {
   if ((!venue || !venue.name) && scene === "food" && placeEn) {
     venue = { name: placeEn.split(",")[0].trim(), word: "spot", emoji: "🍽️" };
   }
-  const tags = buildContentTags(extra && extra.content, extra && extra.stats);
+  // The venue's OSM cuisine is the most reliable food descriptor we have for
+  // Asian dishes the on-device classifier can't name, so lead the content tags
+  // with it (e.g. "Malaysian food, fried chicken at <restaurant>").
+  const cuisine = venue && venue.cuisine;
+  const tags = buildContentTags(extra && extra.content, extra && extra.stats, cuisine);
   const tagStr = tags.join(", ");
+  // A known cuisine is itself caption-worthy content (it lets a food photo lead
+  // with the combined "<cuisine> at <place>" line even if the classifier found
+  // nothing nameable).
+  const contentFound = !!(extra && extra.content && extra.content.found) || !!cuisine;
   const caps = [];
+  // COMBINED lead: the photo's content (e.g. the food) + the shop/landmark
+  // it's at + a short description of that place -- everything in one caption.
+  // Leads whenever there's real content to combine (a food photo, or ML-
+  // detected items); a pure landmark photo with nothing in it still leads
+  // with the plain landmark description below instead.
+  const comboPlace = (venue && venue.name) || enTitle || (locationName ? locationName.split(",")[0].trim() : null);
+  const comboEmoji = (venue && venue.emoji) || "📍";
+  if (tagStr && comboPlace && (contentFound || scene === "food")) {
+    const lmShort = (enTitle && landmark.description) ? firstSentences(landmark.description, 140) : null;
+    caps.push(tagStr + " at " + comboPlace + " " + comboEmoji + (lmShort ? " — " + lmShort : ""));
+  }
   // English description of the exact landmark -- the fullest variant, and the
   // lead for an actual landmark photo. Kept focused on the place the photo is
   // of (no "nearby" filler).
