@@ -19637,6 +19637,9 @@ function firstSentences(text, max) {
 // description, lat, lon, distance } | null (null when nothing notable is
 // right there).
 const LANDMARK_RADIUS_M = 50;
+// Wider fallback radius for a notable building/landmark the photo was taken
+// BESIDE (captioned "near X") when nothing notable is exactly at the spot.
+const LANDMARK_NEARBY_RADIUS_M = 250;
 // Wikipedia titles that aren't an on-the-ground landmark/POI -- so a caption
 // never names a list, a disambiguation/name page, or a bare year.
 function _isJunkWikiTitle(t) {
@@ -19655,13 +19658,13 @@ function _nameMatches(title, hint) {
   if (!t || !h || h.length < 4) return false;
   return t === h || (t.length >= 4 && h.indexOf(t) >= 0) || (h.length >= 4 && t.indexOf(h) >= 0);
 }
-async function _wikiLandmark(lang, gps, signal, sentences, nameHint) {
+async function _wikiLandmark(lang, gps, signal, sentences, nameHint, radius) {
   const base = "https://" + lang + ".wikipedia.org/w/api.php";
   // Pull several nearby candidates (API returns them distance-sorted) so we can
   // pick the one that actually matches the POI rather than blindly taking the
   // single nearest article (which is often an unrelated street/area/river).
   const geoUrl = base + "?action=query&list=geosearch&gscoord=" +
-    encodeURIComponent(gps.lat + "|" + gps.lon) + "&gsradius=" + LANDMARK_RADIUS_M + "&gslimit=10&format=json&origin=*";
+    encodeURIComponent(gps.lat + "|" + gps.lon) + "&gsradius=" + (radius || LANDMARK_RADIUS_M) + "&gslimit=10&format=json&origin=*";
   const geoRes = await fetch(geoUrl, { signal });
   if (!geoRes.ok) return null;
   let list = (((await geoRes.json()).query) || {}).geosearch || [];
@@ -19702,22 +19705,34 @@ async function landmarkDescribeAgent(gps, nameHint) {
   let result = null;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 7000);
+  const pack = (en, zh, nearby) => ({
+    title: en ? en.title : null,
+    description: en ? en.description : null,
+    zhTitle: zh ? zh.title : null,
+    zhDescription: zh ? zh.description : null,
+    lat: (en || zh).lat != null ? (en || zh).lat : gps.lat,
+    lon: (en || zh).lon != null ? (en || zh).lon : gps.lon,
+    distance: (en || zh).distance,
+    nearby: !!nearby,
+  });
   try {
-    const [en, zh] = await Promise.all([
-      _wikiLandmark("en", gps, controller.signal, 6, nameHint).catch(() => null),
-      _wikiLandmark("zh", gps, controller.signal, 5, nameHint).catch(() => null),
+    // Tier 1 -- exact: a landmark right where the photo was taken (<=50m) =>
+    // captioned as the place you're AT.
+    let [en, zh] = await Promise.all([
+      _wikiLandmark("en", gps, controller.signal, 6, nameHint, LANDMARK_RADIUS_M).catch(() => null),
+      _wikiLandmark("zh", gps, controller.signal, 5, nameHint, LANDMARK_RADIUS_M).catch(() => null),
     ]);
-    const primary = en || zh;
-    if (primary) {
-      result = {
-        title: en ? en.title : null,
-        description: en ? en.description : null,
-        zhTitle: zh ? zh.title : null,
-        zhDescription: zh ? zh.description : null,
-        lat: primary.lat != null ? primary.lat : gps.lat,
-        lon: primary.lon != null ? primary.lon : gps.lon,
-        distance: primary.distance,
-      };
+    if (en || zh) {
+      result = pack(en, zh, false);
+    } else {
+      // Tier 2 -- nearby: nothing exactly here, so look a bit wider for a
+      // notable building/landmark the photo was taken BESIDE, captioned "near X"
+      // (honest -- it doesn't claim you were at it).
+      [en, zh] = await Promise.all([
+        _wikiLandmark("en", gps, controller.signal, 5, nameHint, LANDMARK_NEARBY_RADIUS_M).catch(() => null),
+        _wikiLandmark("zh", gps, controller.signal, 4, nameHint, LANDMARK_NEARBY_RADIUS_M).catch(() => null),
+      ]);
+      if (en || zh) result = pack(en, zh, true);
     }
   } catch (e) { /* offline/blocked/aborted -- caller falls back to the place name */ }
   finally { clearTimeout(timeout); }
@@ -19947,6 +19962,11 @@ function buildContentTags(content, stats, leadTag) {
 function buildShareCaptions(scene, locationName, landmark, extra) {
   const moodsEn = SHARE_SCENE_MOODS[scene] || ["A moment worth sharing 📸", "Through my lens", "Captured today"];
   const moodsZh = SHARE_SCENE_MOODS_ZH[scene] || ["值得分享的瞬间 📸", "用镜头记录", "今日抓拍"];
+  // A "nearby" landmark is one the photo was taken BESIDE (not on) -- keep it
+  // out of the "at <place>" identity logic and describe it as "near X" instead,
+  // so a caption never claims you were at a place you only passed by.
+  let nearLandmark = null;
+  if (landmark && landmark.nearby) { nearLandmark = landmark; landmark = null; }
   const enTitle = landmark && landmark.title;
   const zhTitle = landmark && landmark.zhTitle;
   const placeEn = enTitle || locationName;
@@ -19995,6 +20015,20 @@ function buildShareCaptions(scene, locationName, landmark, extra) {
   if (tagStr && comboPlace) {
     const lmShort = (enTitle && landmark.description) ? firstSentences(landmark.description, 300) : null;
     caps.push(tagStr + " at " + comboPlace + " " + comboEmoji + (lmShort ? " — " + lmShort : ""));
+  }
+  // BESIDE a building/landmark: nothing notable exactly here, but a notable
+  // place is close by -- describe it as "near X" (honest about the proximity).
+  // When there's no specific venue to lead with, this is the most informative
+  // caption, so it leads; otherwise it's offered as a secondary suggestion.
+  if (nearLandmark && nearLandmark.title) {
+    const nt = nearLandmark.title;
+    const nd = nearLandmark.description ? firstSentences(nearLandmark.description, 300) : null;
+    const nearCap = (tagStr ? tagStr + " near " : "Near ") + nt + " 📍" + (nd ? " — " + nd : "");
+    if (venue && venue.name) caps.push(nearCap); else caps.unshift(nearCap);
+    if (nd && tagStr) caps.push("Near " + nt + " — " + nd);
+    if (nearLandmark.zhTitle && nearLandmark.zhDescription) {
+      caps.push(nearLandmark.zhTitle + "附近 📍——" + firstSentences(nearLandmark.zhDescription, 200));
+    }
   }
   // English description of the exact landmark -- the fullest variant, and the
   // lead for an actual landmark photo. Kept focused on the place the photo is
