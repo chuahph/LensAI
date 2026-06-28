@@ -19359,17 +19359,18 @@ function matchesAscii(view, offset, str) {
   return true;
 }
 
-// Buckets repeat shots at the same spot together (~111m precision) rather
-// than one folder per exact coordinate, which would scatter a few photos
-// taken standing in one place across dozens of near-duplicate folders.
-// Used as the reverse-geocoding cache key and as a last-resort folder name
-// if lookup fails (offline, rate-limited, etc) -- this has to stay tight
-// enough that two distinct landmarks a few hundred metres apart (common in
-// any city center/tourist area) don't get bucketed into the same folder;
-// city-block-or-coarser precision was tried first and merged unrelated
-// nearby landmarks into one folder, which is the bug this fixes.
+// Buckets repeat shots at the same spot together so a few photos taken
+// standing in one place share one reverse-geocode / landmark / venue lookup
+// (and one fallback folder name when lookup fails offline). 4 decimal places
+// is ~11m precision -- this MUST stay finer than the landmark lookup radius
+// (LANDMARK_RADIUS_M, 50m): an earlier ~111m bucket was coarser than that
+// radius, so a photo could reuse a *different* nearby photo's cached landmark/
+// place that was actually 60-110m away, naming the wrong place in the caption.
+// ~11m only collapses genuine GPS jitter at a single standing spot; anything
+// the 50m landmark lookup would treat as a different location now gets its
+// own (correct) lookup instead of bleeding a neighbour's result.
 function gpsCoordKey(gps) {
-  const lat = Math.abs(gps.lat).toFixed(3), lon = Math.abs(gps.lon).toFixed(3);
+  const lat = Math.abs(gps.lat).toFixed(4), lon = Math.abs(gps.lon).toFixed(4);
   return lat + (gps.lat >= 0 ? "N" : "S") + "_" + lon + (gps.lon >= 0 ? "E" : "W");
 }
 
@@ -21185,7 +21186,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-28 16:15";
+const APP_BUILD = "2026-06-28 16:25";
 
 function App() {
   const canvasRef    = useRef(null);
