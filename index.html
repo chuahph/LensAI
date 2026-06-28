@@ -19592,12 +19592,13 @@ function firstSentences(text, max) {
 // Looks up the nearest notable place to a coordinate on one Wikipedia
 // language edition: a geosearch for the article AT the photo's coordinate,
 // then that article's plain-text intro extract. The radius is deliberately
-// tight (1km) and only the single closest article is taken, so the result is
-// the exact place the photo is of -- not a famous landmark kilometres away
-// that happened to be the nearest article in a wide search. `sentences`
-// controls how much description to pull. Returns { title, description, lat,
-// lon, distance } | null (null when nothing notable is right there).
-const LANDMARK_RADIUS_M = 1000;
+// tight (300m) and only the single closest article is taken, so the result is
+// the exact place the photo is of -- not a famous landmark a few hundred
+// metres+ away that happened to be the nearest article in a wider search.
+// `sentences` controls how much description to pull. Returns { title,
+// description, lat, lon, distance } | null (null when nothing notable is
+// right there).
+const LANDMARK_RADIUS_M = 300;
 async function _wikiLandmark(lang, gps, signal, sentences) {
   const base = "https://" + lang + ".wikipedia.org/w/api.php";
   const geoUrl = base + "?action=query&list=geosearch&gscoord=" +
