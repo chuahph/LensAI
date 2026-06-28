@@ -19720,9 +19720,24 @@ const COCO_FOODS = ["banana","apple","sandwich","orange","broccoli","carrot","ho
 // Runs both models on a canvas/image and returns a compact content summary,
 // or null if the models aren't available. Time-boxed so a stalled CDN never
 // hangs the share sheet.
-// Uninformative ImageNet labels that read badly in a food/place caption.
+// Uninformative ImageNet labels (and cookware/tableware) that read badly in a
+// food/place caption -- dropped so only dish-like labels remain.
 const CONTENT_GENERIC = ["plate","dining table","tray","table","menu","plate rack",
-  "web site","comic book","tile roof","wok","crate","carton","packet","grocery store"];
+  "web site","comic book","tile roof","wok","crate","carton","packet","grocery store",
+  "frying pan","spatula","ladle","mixing bowl","dutch oven","caldron","cauldron",
+  "measuring cup","mortar","espresso maker","coffee mug","beer glass","goblet",
+  "water jug","pitcher","saltshaker","wooden spoon","spindle","restaurant","bib"];
+// ImageNet is Western-biased and only coarsely covers Asian food, so its top
+// guess for many dishes is a jargon/near-miss class. Map the common ones to
+// plain, caption-friendly food words (empty string = drop).
+const LABEL_FRIENDLY = {
+  "consomme":"soup","soup bowl":"soup","hot pot":"hotpot","hotpot":"hotpot",
+  "mashed potato":"comfort food","ice lolly":"ice cream","trifle":"dessert",
+  "chocolate sauce":"dessert","meat loaf":"roast","rotisserie":"roast meat",
+  "drumstick":"fried chicken","french loaf":"bread","bagel":"bagel","pretzel":"pretzel",
+  "espresso":"coffee","cup":"a drink","red wine":"wine","eggnog":"a drink",
+  "guacamole":"guacamole","burrito":"burrito","carbonara":"pasta","pizza":"pizza",
+};
 async function photoContentAgent(imageEl) {
   if (!imageEl) return null;
   let models;
@@ -19736,10 +19751,13 @@ async function photoContentAgent(imageEl) {
   dets.forEach(d => { if (d && d.score >= 0.5) objects[d.class] = (objects[d.class] || 0) + 1; });
   // Lower confidence bar than a strict classifier: food/animal shots spread
   // probability across similar ImageNet classes, so the right label often sits
-  // at 0.1-0.3. Take the top few above 0.12, dropping generic/uninformative ones.
-  const labels = preds.filter(p => p && p.probability >= 0.12)
-    .map(p => p.className.split(",")[0].trim())
-    .filter(l => CONTENT_GENERIC.indexOf(l.toLowerCase()) === -1)
+  // at 0.1-0.3. Take the top few above 0.10, map jargon to plain words, and
+  // drop generic/uninformative ones.
+  const labels = preds.filter(p => p && p.probability >= 0.10)
+    .map(p => p.className.split(",")[0].trim().toLowerCase())
+    .map(l => LABEL_FRIENDLY[l] !== undefined ? LABEL_FRIENDLY[l] : l)
+    .filter(l => l && CONTENT_GENERIC.indexOf(l) === -1)
+    .filter((l, i, a) => a.indexOf(l) === i)
     .slice(0, 3);
   // "found" = something that actually becomes caption text (a fine label, a
   // person count, or an animal/food object) -- not bare context objects like
@@ -19747,6 +19765,44 @@ async function photoContentAgent(imageEl) {
   const usefulObj = Object.keys(objects).some(o => o === "person" || COCO_ANIMALS.indexOf(o) !== -1 || COCO_FOODS.indexOf(o) !== -1);
   const found = labels.length > 0 || usefulObj;
   return { objects, labels, peopleCount: objects.person || 0, found, inferErr: inferErr >= 2 };
+}
+// Decodes a File to a downscaled canvas and runs photoContentAgent on it.
+async function photoContentForFile(file) {
+  if (!file) return null;
+  try {
+    const img = await decodeAgent(file);
+    const MAX = 1024; let w = img.width, h = img.height;
+    if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
+    if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; }
+    const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+    cv.getContext("2d").drawImage(img, 0, 0, w, h);
+    if (typeof img.close === "function") img.close();
+    return await photoContentAgent(cv);
+  } catch (e) { return null; }
+}
+// Recognizes content across SEVERAL photos and merges it into one summary, so
+// a multi-photo share caption reflects every shot (e.g. all the dishes in a
+// meal), not just the first. Capped so a big selection stays bounded in time.
+// Returns null only when the models couldn't run on any photo.
+async function analyzePhotosContent(fileList, cap) {
+  const list = (fileList || []).filter(Boolean).slice(0, cap || 6);
+  const merged = { objects: {}, labels: [], peopleCount: 0 };
+  let loadedOk = false, anyFound = false, allInferErr = true;
+  for (const f of list) {
+    const c = await photoContentForFile(f);
+    if (!c) continue;
+    loadedOk = true;
+    if (!c.inferErr) allInferErr = false;
+    Object.keys(c.objects || {}).forEach(o => { merged.objects[o] = Math.max(merged.objects[o] || 0, c.objects[o]); });
+    (c.labels || []).forEach(l => { if (merged.labels.indexOf(l) === -1) merged.labels.push(l); });
+    merged.peopleCount = Math.max(merged.peopleCount, c.peopleCount || 0);
+    if (c.found) anyFound = true;
+  }
+  if (!loadedOk) return null;
+  merged.labels = merged.labels.slice(0, 6);
+  merged.found = anyFound;
+  merged.inferErr = allInferErr;
+  return merged;
 }
 // Turns the content summary (or, failing that, the scene/face stats) into a
 // short list of human descriptors for captions: people count, animals, food,
@@ -19770,10 +19826,11 @@ function buildContentTags(content, stats) {
     if (map[s.scene]) tags.push(map[s.scene]);
     if (s.hasBigFace && s.scene !== "portrait") tags.push("Portrait");
   }
-  // De-dupe case-insensitively, keep first casing, cap the list.
+  // De-dupe case-insensitively, keep first casing, cap the list (a few more
+  // for multi-photo albums, which legitimately have several dishes/items).
   const seen = {}, out = [];
   tags.forEach(t => { const k = t.toLowerCase(); if (!seen[k]) { seen[k] = 1; out.push(t); } });
-  return out.slice(0, 4);
+  return out.slice(0, 6);
 }
 
 // Builds the caption write-ups, richest first and in both English and
@@ -21863,6 +21920,7 @@ function BatchAgent({onClose,onCloseApp}){
   const [shareCaps,setShareCaps]=useState([]);
   const [shareText,setShareText]=useState("");
   const [shareThumb,setShareThumb]=useState(null);
+  const [shareThumbs,setShareThumbs]=useState([]); // every selected photo's preview URL, for the scrollable strip
   const [shareCount,setShareCount]=useState(0);
   const [aiStatus,setAiStatus]=useState(null); // null|"loading"|"ok"|"failed"|"none" -- content-AI state for the share sheet
   const [shareCopied,setShareCopied]=useState(false);
@@ -21933,24 +21991,19 @@ function BatchAgent({onClose,onCloseApp}){
       }catch(e){ /* keep going -- caption still works without it */ }
     }
     if(!loc){ const fold=rs.map(r=>shareLocationName(r.origFolder)).find(Boolean); if(fold) loc=fold; }
-    return { scene, loc, landmark, venue, stats: rs[0]&&rs[0].stats, file: files[rs[0]&&rs[0].fileIndex] };
+    return { scene, loc, landmark, venue, stats: rs[0]&&rs[0].stats, files: rs.map(r=>files[r.fileIndex]).filter(Boolean) };
   };
 
-  // Runs on-device content recognition on the representative photo in the
-  // background and, if it produces anything, upgrades the suggestions in
-  // place. Never blocks the sheet; silent on any failure.
+  // Recognizes the content of EVERY shared photo in the background and merges
+  // it, then upgrades the suggestions (and the unedited caption) to reflect
+  // all of them -- e.g. all the dishes across a meal, not just the first shot.
+  // Never blocks the sheet; silent on any failure.
   const upgradeCaptionsWithContent=(ctx, baseCaps)=>{
-    if(!ctx||!ctx.file){ setAiStatus(null); return; }
+    if(!ctx||!ctx.files||!ctx.files.length){ setAiStatus(null); return; }
     setAiStatus("loading");
     (async()=>{
       try{
-        const img=await decodeAgent(ctx.file);
-        const MAX=1024; let w=img.width,h=img.height;
-        if(w>MAX){h=Math.round(h*MAX/w);w=MAX;} if(h>MAX){w=Math.round(w*MAX/h);h=MAX;}
-        const cv=document.createElement("canvas"); cv.width=w; cv.height=h;
-        cv.getContext("2d").drawImage(img,0,0,w,h);
-        if(typeof img.close==="function") img.close();
-        const content=await photoContentAgent(cv);
+        const content=await analyzePhotosContent(ctx.files, 6);
         if(content&&content.found){
           const up=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content, stats:ctx.stats});
           setShareCaps(up);
@@ -21966,6 +22019,8 @@ function BatchAgent({onClose,onCloseApp}){
     shareFileRef.current=outFiles;
     setShareCount(outFiles.length);
     setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return URL.createObjectURL(outFiles[0]); });
+    // One preview URL per photo, for the scrollable strip.
+    setShareThumbs(prev=>{ prev.forEach(u=>URL.revokeObjectURL(u)); return outFiles.map(f=>URL.createObjectURL(f)); });
     setShareCaps(caps);
     setShareText(caps[0]||"");
     setShareOpen(true);
@@ -22006,6 +22061,7 @@ function BatchAgent({onClose,onCloseApp}){
   const closeShare=()=>{
     setShareOpen(false);
     setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return null; });
+    setShareThumbs(prev=>{ prev.forEach(u=>URL.revokeObjectURL(u)); return []; });
     shareFileRef.current=null;
     setAiStatus(null);
   };
@@ -22577,7 +22633,12 @@ function BatchAgent({onClose,onCloseApp}){
         React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}},
           React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{width:24,height:24,borderRadius:6,background:"#1877f2",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:15,fontFamily:"Georgia,'Times New Roman',serif"}},"f"),React.createElement("div",{style:{fontFamily:"'Space Grotesk',system-ui",fontWeight:800,fontSize:18,color:"#fff"}},shareCount>1?"Share "+shareCount+" photos":"Share to Facebook")),
           React.createElement("button",{onClick:closeShare,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×")),
-        shareThumb&&React.createElement("div",{style:{position:"relative",marginBottom:12}},React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",display:"block"}}),shareCount>1&&React.createElement("div",{style:{position:"absolute",top:8,right:8,background:"rgba(0,0,0,0.7)",color:"#fff",fontSize:11,fontWeight:700,padding:"3px 9px",borderRadius:12}},"+"+(shareCount-1)+" more")),
+        shareThumbs.length>1
+          ? React.createElement("div",{style:{position:"relative",marginBottom:12}},
+              React.createElement("div",{style:{display:"flex",gap:8,overflowX:"auto",scrollSnapType:"x mandatory",WebkitOverflowScrolling:"touch",paddingBottom:4}},
+                shareThumbs.map((u,i)=>React.createElement("img",{key:i,src:u,style:{height:"30vh",width:"auto",flexShrink:0,objectFit:"contain",borderRadius:10,background:"#000",scrollSnapAlign:"center",display:"block"}}))),
+              React.createElement("div",{style:{position:"absolute",top:8,right:8,background:"rgba(0,0,0,0.7)",color:"#fff",fontSize:11,fontWeight:700,padding:"3px 9px",borderRadius:12,pointerEvents:"none"}},shareCount+" photos · swipe"))
+          : shareThumb&&React.createElement("div",{style:{position:"relative",marginBottom:12}},React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",display:"block"}})),
         React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption — for reference, review & edit before posting"),
         aiStatus&&aiStatus!=="ok"&&React.createElement("div",{style:{fontSize:10,marginBottom:8,lineHeight:1.4,color:aiStatus==="loading"?"#94a3b8":"#fbbf24",display:"flex",alignItems:"center",gap:6}},aiStatus==="loading"?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Analyzing photo content (food, objects)…"):aiStatus==="failed"?"Photo-content AI couldn't load on this network/CDN -- captions use basic tags. Location/landmark still works.":aiStatus==="inferfail"?"Photo-content AI loaded but couldn't analyze on this device -- using basic tags.":"Photo AI found no specific items in this photo -- using basic tags."),React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:6,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,lineHeight:1.5,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10,maxHeight:"40vh",overflowY:"auto"}}),
         shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to add (combine several)"),
