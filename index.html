@@ -19635,7 +19635,7 @@ function firstSentences(text, max) {
 // `sentences` controls how much description to pull. Returns { title,
 // description, lat, lon, distance } | null (null when nothing notable is
 // right there).
-const LANDMARK_RADIUS_M = 150;
+const LANDMARK_RADIUS_M = 50;
 async function _wikiLandmark(lang, gps, signal, sentences) {
   const base = "https://" + lang + ".wikipedia.org/w/api.php";
   const geoUrl = base + "?action=query&list=geosearch&gscoord=" +
