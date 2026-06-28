@@ -21088,6 +21088,82 @@ ZipWriter.prototype.finish = function () {
 // and drawing it into the full-resolution scratch canvas is the most
 // expensive part of this whole step, so it's done once per photo and
 // reused across all of that photo's variants instead of once per variant.
+// === Parallel render pool ============================================
+// The full-res pixel pipeline (processPixels) is the dominant cost of a zip
+// export and is pure typed-array math -- no DOM/canvas -- so it can run in Web
+// Workers, several photos at once, to use the phone's other CPU cores. The
+// worker source is assembled from the very same functions the main thread uses
+// (serialized with .toString()), so there is exactly one implementation to keep
+// in sync. _tick is redefined as a no-op in the worker: its yields exist only to
+// keep the MAIN thread's UI responsive and dodge the page-hang detector, neither
+// of which applies on a background worker thread -- so the worker also runs the
+// pass faster than main. Everything here is best-effort: if Workers/transfer
+// aren't available or anything throws, the caller falls back to the proven
+// single-threaded path, so this can only ever speed things up, never break them.
+let _renderWorkerURL = null;
+function _renderWorkerSource() {
+  if (_renderWorkerURL) return _renderWorkerURL;
+  const named = [_chunkRows, _snapshot, _lumaPlane, dehazePass, enhanceSky, processPixels];
+  const src =
+    "let _scratchBuf=null,_lumaScratchBuf=null;\n" +
+    "const clamp=" + clamp.toString() + ";\n" +
+    "const lerp=" + lerp.toString() + ";\n" +
+    "function _tick(){}\n" +                       // no UI/hang-detector on a worker
+    named.map(f => f.toString()).join("\n") + "\n" +
+    "onmessage=async(e)=>{const{buffer,w,h,adj,stats}=e.data;try{" +
+    "const img=new ImageData(new Uint8ClampedArray(buffer),w,h);" +
+    "const r=await processPixels(img,adj,stats,{inPlace:true});" +
+    "postMessage({ok:true,buffer:r.data.buffer},[r.data.buffer]);" +
+    "}catch(err){postMessage({ok:false,error:String(err&&err.message||err)});}};";
+  _renderWorkerURL = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+  return _renderWorkerURL;
+}
+// Builds a pool of `n` render workers. Returns { run, close } or null if Web
+// Workers / transferables aren't usable here (-> caller stays single-threaded).
+function makeRenderPool(n) {
+  if (typeof Worker === "undefined") return null;
+  let url; try { url = _renderWorkerSource(); } catch (e) { return null; }
+  const workers = [], idle = [], waiters = [];
+  for (let i = 0; i < n; i++) {
+    let wk; try { wk = new Worker(url); } catch (e) { workers.forEach(w => w.terminate()); return null; }
+    workers.push(wk); idle.push(wk);
+  }
+  const acquire = () => new Promise(res => { const w = idle.pop(); if (w) res(w); else waiters.push(res); });
+  const release = (w) => { const next = waiters.shift(); if (next) next(w); else idle.push(w); };
+  // Runs processPixels for one image on a free worker. `buffer` is transferred
+  // in (and the processed buffer transferred back), so neither side copies the
+  // ~192MB pixel array. Resolves to the processed ArrayBuffer.
+  function run(buffer, w, h, adj, stats) {
+    return acquire().then(wk => new Promise((resolve, reject) => {
+      const onMsg = (e) => { cleanup(); if (e.data && e.data.ok) resolve(e.data.buffer); else reject(new Error(e.data && e.data.error || "worker failed")); };
+      const onErr = () => { cleanup(); reject(new Error("worker error")); };
+      function cleanup() { wk.removeEventListener("message", onMsg); wk.removeEventListener("error", onErr); release(wk); }
+      wk.addEventListener("message", onMsg); wk.addEventListener("error", onErr);
+      try { wk.postMessage({ buffer, w, h, adj, stats }, [buffer]); } catch (e) { cleanup(); reject(e); }
+    }));
+  }
+  return { run, close() { workers.forEach(w => w.terminate()); } };
+}
+// A promise-chain mutex: serializes the main-thread canvas operations (the
+// shared scratch canvases aren't safe to use from two overlapping renders) while
+// the worker processPixels stages run in parallel between the locked sections.
+function _makeLock() {
+  let tail = Promise.resolve();
+  return (fn) => { const r = tail.then(fn); tail = r.then(() => {}, () => {}); return r; };
+}
+// How many photos to render at once: bounded by cores AND by memory -- each
+// in-flight render holds the working buffer + processPixels' snapshot/luma
+// planes (~3x the pixel buffer), so a 48MP photo (~576MB peak) stays at 1 while
+// a 12MP photo (~144MB) can run several. Conservative on purpose: a too-high
+// count would reintroduce the out-of-memory tab crash this export just fixed.
+function _renderConcurrency(maxMP) {
+  const cores = Math.max(1, (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 2);
+  const perPhotoMB = Math.max(1, maxMP * 12);
+  const budgetMB = 720;
+  const byMem = Math.max(1, Math.floor(budgetMB / perPhotoMB));
+  return Math.max(1, Math.min(byMem, cores - 1, 4));
+}
+
 async function exportOrganizeAgent(results, files, onProgress) {
   const usable = results.filter(r => !r.error && !r.culled && r.adj);
   const byFile = new Map();
@@ -21108,6 +21184,90 @@ async function exportOrganizeAgent(results, files, onProgress) {
   // suffix with -2, -3, ... on repeat so every entry is unique.
   const usedPaths = new Map();
   let done = 0;
+  // Uniquifies the zip path for a result and adds its bytes. Shared by both the
+  // parallel and sequential paths; the parallel path calls it under a lock since
+  // several lanes finish concurrently.
+  const addZipEntry = (r, bytes) => {
+    const stem = (r.name || "photo").replace(/\.[^/.]+$/, "");
+    const folder = r.origFolder || r.group || "misc";
+    let path = folder + "/" + stem + "-" + (r.goalId || "batch") + ".jpg";
+    if (usedPaths.has(path)) {
+      const n = usedPaths.get(path) + 1; usedPaths.set(path, n);
+      path = folder + "/" + stem + "-" + (r.goalId || "batch") + "-" + n + ".jpg";
+    } else usedPaths.set(path, 1);
+    zip.add(path, bytes);
+    done++;
+    if (onProgress) onProgress(done, usable.length);
+  };
+
+  // PARALLEL PATH: render several photos at once across worker cores. Only worth
+  // it for photos small enough that multiple fit in the memory budget (big 48MP
+  // photos resolve to concurrency 1 and fall through to the sequential path,
+  // which is leaner for the one-at-a-time case). Probe the first photo's size to
+  // pick the pool size.
+  let pool = null, concurrency = 1, probeBitmap = null;
+  if (fileIndexes.length >= 2) {
+    try {
+      probeBitmap = await decodeAgent(files[fileIndexes[0]]);
+      concurrency = _renderConcurrency((probeBitmap.width * probeBitmap.height) / 1e6);
+      if (concurrency >= 2) pool = makeRenderPool(Math.min(concurrency, fileIndexes.length));
+    } catch (e) { pool = null; }
+  }
+  if (pool) {
+    const canvasLock = _makeLock(); // serializes the shared scratch-canvas ops
+    const zipLock = _makeLock();    // serializes zip mutation + progress
+    const renderJob = async (fileIndex, preDecoded) => {
+      const variants = byFile.get(fileIndex);
+      const bitmap = preDecoded || await decodeAgent(files[fileIndex]);
+      // Draw to full-res ImageData under the canvas lock (shared scratch A).
+      const fullData = await canvasLock(() => drawFullResFromBitmap(bitmap));
+      for (let vi = 0; vi < variants.length; vi++) {
+        const r = variants[vi];
+        const src = vi < variants.length - 1
+          ? new ImageData(new Uint8ClampedArray(fullData.data), fullData.width, fullData.height)
+          : fullData;
+        const w = src.width, h = src.height;
+        let blob;
+        try {
+          // processPixels in a worker (parallel); buffer transferred both ways.
+          const processedBuf = await pool.run(src.data.buffer, w, h, r.adj, r.stats);
+          blob = await canvasLock(async () => {
+            const id = new ImageData(new Uint8ClampedArray(processedBuf), w, h);
+            let cv = imageDataToCanvas(id);
+            cv = applyGeometryToCanvas(cv, { rotation: r.adj.rotation, perspective: r.adj.perspective, crop: r.crop });
+            return await new Promise(res => cv.toBlob(res, "image/jpeg", 0.92));
+          });
+        } catch (err) {
+          // Worker hiccup -> render this one on the main thread instead (still
+          // correct, just not parallel). src may have been transferred/detached,
+          // so rebuild it from the kept fullData when needed.
+          const safeSrc = (src.data.byteLength === 0)
+            ? new ImageData(new Uint8ClampedArray(fullData.data), fullData.width, fullData.height) : src;
+          blob = await canvasLock(() => renderFullFromData(safeSrc, r.adj, r.stats, r.crop));
+        }
+        const bytes = addExifSaveDate(new Uint8Array(await blob.arrayBuffer()));
+        await zipLock(() => addZipEntry(r, bytes));
+      }
+    };
+    let idx = 0;
+    const lanes = [];
+    const laneCount = Math.min(concurrency, fileIndexes.length);
+    for (let k = 0; k < laneCount; k++) {
+      lanes.push((async () => {
+        while (idx < fileIndexes.length) {
+          const my = idx++;
+          // Reuse the already-decoded probe bitmap for the very first photo.
+          await renderJob(fileIndexes[my], my === 0 ? probeBitmap : null);
+        }
+      })());
+    }
+    await Promise.all(lanes);
+    pool.close();
+    _releaseScratch();
+    return zip.finish();
+  }
+  // SEQUENTIAL PATH (fallback): one photo at a time on the main thread -- used
+  // for large photos (concurrency 1) and where Web Workers aren't available.
   // Pipelined: each photo's decodeAgent (native, typically off-main-thread)
   // is kicked off one photo ahead of when it's needed, so its latency
   // overlaps with the previous photo's draw/process/encode instead of the
@@ -21125,7 +21285,9 @@ async function exportOrganizeAgent(results, files, onProgress) {
   // when this photo is small enough that a second bitmap is affordable;
   // for big photos, decode strictly sequentially.
   const PREFETCH_MAX_PX = 16 * 1000 * 1000; // ~16MP
-  let nextBitmap = fileIndexes.length ? decodeAgent(files[fileIndexes[0]]) : null;
+  // Reuse the probe decode (when the parallel path was considered but not taken)
+  // for the first photo instead of decoding it twice.
+  let nextBitmap = probeBitmap || (fileIndexes.length ? decodeAgent(files[fileIndexes[0]]) : null);
   for (let i = 0; i < fileIndexes.length; i++) {
     const fileIndex = fileIndexes[i];
     const image = nextBitmap ? await nextBitmap : await decodeAgent(files[fileIndexes[i]]);
