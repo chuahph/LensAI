@@ -19420,7 +19420,10 @@ const CUISINE_WORDS = {
   south_indian: "South Indian food", mamak: "mamak food", banana_leaf: "banana-leaf rice",
   vietnamese: "Vietnamese food", pho: "pho", thai: "Thai food", indonesian: "Indonesian food",
   japanese: "Japanese food", sushi: "sushi", ramen: "ramen", korean: "Korean food",
-  asian: "Asian food", seafood: "seafood", bbq: "BBQ", barbecue: "BBQ",
+  yakiniku: "yakiniku (Japanese BBQ)", shabu_shabu: "shabu-shabu", sukiyaki: "sukiyaki",
+  teppanyaki: "teppanyaki", izakaya: "izakaya fare", udon: "udon", soba: "soba",
+  tempura: "tempura", donburi: "donburi", gyudon: "gyudon", curry: "curry",
+  asian: "Asian food", seafood: "seafood", grill: "grilled food", bbq: "BBQ", barbecue: "BBQ",
   steak_house: "steak", burger: "burgers", pizza: "pizza", italian: "Italian food",
   french: "French food", mexican: "Mexican food", coffee_shop: "coffee", breakfast: "breakfast",
 };
@@ -19753,34 +19756,42 @@ const COCO_FOODS = ["banana","apple","sandwich","orange","broccoli","carrot","ho
 // Runs both models on a canvas/image and returns a compact content summary,
 // or null if the models aren't available. Time-boxed so a stalled CDN never
 // hangs the share sheet.
-// Uninformative ImageNet labels (and cookware/tableware) that read badly in a
-// food/place caption -- dropped so only dish-like labels remain.
-const CONTENT_GENERIC = ["plate","dining table","tray","table","menu","plate rack",
-  "web site","comic book","tile roof","wok","crate","carton","packet","grocery store",
-  "frying pan","spatula","ladle","mixing bowl","dutch oven","caldron","cauldron",
-  "measuring cup","mortar","espresso maker","coffee mug","beer glass","goblet",
-  "water jug","pitcher","saltshaker","wooden spoon","spindle","restaurant","bib"];
-// ImageNet is Western-biased and only coarsely covers Asian food, so its top
-// guess for many dishes is a jargon/near-miss class. Map the common ones to
-// plain, caption-friendly food words (empty string = drop).
-const LABEL_FRIENDLY = {
-  "consomme":"soup","soup bowl":"soup","hot pot":"hotpot","hotpot":"hotpot",
-  "mashed potato":"comfort food","ice lolly":"ice cream","trifle":"dessert",
-  "chocolate sauce":"dessert","meat loaf":"roast","rotisserie":"roast meat",
-  "drumstick":"fried chicken","french loaf":"bread","bagel":"bagel","pretzel":"pretzel",
-  "espresso":"coffee","cup":"a drink","red wine":"wine","eggnog":"a drink",
-  "guacamole":"guacamole","burrito":"burrito","carbonara":"pasta","pizza":"pizza",
-  // Asian dishes spread ImageNet probability onto these near-miss classes;
-  // map them to the closest plain dish word instead of the jargon class name.
-  "spaghetti squash":"noodles","potpie":"pie","cheeseburger":"burger","hotdog":"hot dog",
+// ImageNet (the on-device classifier) has ~1000 fixed, mostly-Western classes,
+// and for anything outside that set it still returns its closest -- usually
+// wrong -- guess: raw wagyu reads as "pizza"/"crayfish", a white rice bowl as
+// "ice cream", a storefront as "cinema". So rather than passing every guess
+// through a blocklist (which lets unlisted junk like "cinema" leak), we ALLOW
+// only a curated set of classes that read well in a caption, each mapped to a
+// plain word; every other class is dropped as noise. Combined with the high
+// confidence bar in photoContentAgent, this stops the classifier from
+// inventing confident-sounding wrong dishes -- when it isn't sure, the caption
+// falls back to the venue's cuisine tag or a generic scene word instead, which
+// is honest rather than wrong. Keys are the first token of the ImageNet class
+// name, lowercased.
+const CONTENT_LABELS = {
+  // Food & drink
+  "consomme":"soup","soup bowl":"soup","hot pot":"hotpot","mashed potato":"comfort food",
+  "ice lolly":"ice cream","ice cream":"ice cream","trifle":"dessert","chocolate sauce":"dessert",
+  "meat loaf":"roast meat","rotisserie":"roast meat","drumstick":"fried chicken",
+  "french loaf":"bread","bagel":"bagel","pretzel":"pretzel","espresso":"coffee",
+  "red wine":"wine","guacamole":"guacamole","burrito":"burrito","carbonara":"pasta",
+  "pizza":"pizza","cheeseburger":"burger","hotdog":"hot dog","potpie":"pie",
   "dough":"dumplings",
-  // Produce (fresh-market / ingredient shots) -> simple group words.
-  "head cabbage":"vegetables","cabbage":"vegetables","broccoli":"vegetables",
-  "cauliflower":"vegetables","cucumber":"vegetables","bell pepper":"vegetables",
-  "zucchini":"vegetables","artichoke":"vegetables","mushroom":"mushrooms","corn":"corn",
+  // Produce (fresh-market / ingredient shots). Tropical fruit ImageNet has no
+  // class for -- durian, etc. -- gets guessed as a yellow squash; mapping the
+  // whole squash/gourd family to the plain category word "fruit" (botanically
+  // correct, and the right category for the durian/jackfruit/mango confusion)
+  // keeps such a guess at least category-accurate instead of "noodles".
+  "head cabbage":"vegetables","broccoli":"vegetables","cauliflower":"vegetables",
+  "cucumber":"vegetables","bell pepper":"vegetables","zucchini":"vegetables",
+  "artichoke":"vegetables","mushroom":"mushrooms","corn":"corn","cardoon":"vegetables",
+  "acorn squash":"fruit","butternut squash":"fruit","spaghetti squash":"fruit",
   "granny smith":"fruit","fig":"fruit","pineapple":"fruit","banana":"fruit","orange":"fruit",
-  "lemon":"fruit","pomegranate":"fruit","jackfruit":"fruit","custard apple":"fruit",
-  "strawberry":"fruit","mango":"fruit",
+  "lemon":"fruit","pomegranate":"fruit","jackfruit":"fruit","custard apple":"fruit","strawberry":"fruit",
+  // Scenery (nice for travel shots; otherwise the scene heuristic fills in)
+  "seashore":"by the sea","sandbar":"the beach","lakeside":"by the lake","cliff":"cliffs",
+  "promontory":"the coast","alp":"the mountains","volcano":"a volcano","valley":"a valley",
+  "geyser":"a geyser","coral reef":"a coral reef","lighthouse":"a lighthouse","fountain":"a fountain",
 };
 async function photoContentAgent(imageEl) {
   if (!imageEl) return null;
@@ -19792,15 +19803,25 @@ async function photoContentAgent(imageEl) {
   try { dets = (await models.coco.detect(imageEl)) || []; } catch (e) { inferErr++; }
   try { preds = (await models.mobilenet.classify(imageEl, 5)) || []; } catch (e) { inferErr++; }
   const objects = {};
-  dets.forEach(d => { if (d && d.score >= 0.5) objects[d.class] = (objects[d.class] || 0) + 1; });
-  // Lower confidence bar than a strict classifier: food/animal shots spread
-  // probability across similar ImageNet classes, so the right label often sits
-  // at 0.1-0.3. Take the top few above 0.10, map jargon to plain words, and
-  // drop generic/uninformative ones.
-  const labels = preds.filter(p => p && p.probability >= 0.10)
-    .map(p => p.className.split(",")[0].trim().toLowerCase())
-    .map(l => LABEL_FRIENDLY[l] !== undefined ? LABEL_FRIENDLY[l] : l)
-    .filter(l => l && CONTENT_GENERIC.indexOf(l) === -1)
+  // COCO detection is reliable for its classes, but its few food classes
+  // (pizza, cake, donut...) can still misfire on unfamiliar dishes -- raw meat
+  // read as "pizza" -- so hold food detections to a higher bar than people/
+  // animals/objects.
+  dets.forEach(d => {
+    if (!d) return;
+    const min = COCO_FOODS.indexOf(d.class) !== -1 ? 0.65 : 0.5;
+    if (d.score >= min) objects[d.class] = (objects[d.class] || 0) + 1;
+  });
+  // High confidence bar: ImageNet's softmax is diffuse on out-of-distribution
+  // images (most Asian food, storefronts), so a low bar surfaces confident-
+  // sounding WRONG guesses (the recurring "pizza/crayfish/ice cream" on a
+  // yakiniku table). Require a strong score AND membership in the curated
+  // allowlist; otherwise drop the guess and let the cuisine tag / scene
+  // heuristic describe the photo -- a generic-but-right caption beats a wrong
+  // dish name.
+  const labels = preds.filter(p => p && p.probability >= 0.45)
+    .map(p => CONTENT_LABELS[p.className.split(",")[0].trim().toLowerCase()])
+    .filter(Boolean)
     .filter((l, i, a) => a.indexOf(l) === i)
     .slice(0, 3);
   // "found" = something that actually becomes caption text (a fine label, a
@@ -21152,7 +21173,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-28 11:47";
+const APP_BUILD = "2026-06-28 13:13";
 
 function App() {
   const canvasRef    = useRef(null);
