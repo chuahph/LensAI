@@ -20385,6 +20385,17 @@ function buildContentTags(content, stats, leadTag) {
   return out.slice(0, 6);
 }
 
+// Joins several distinct place names for one caption ("A, B & C"), capped so a
+// big multi-stop batch stays readable ("A, B, C, D and more").
+function _joinPlaces(names) {
+  const uniq = [];
+  const seen = {};
+  (names || []).forEach(n => { const k = (n || "").toLowerCase(); if (n && !seen[k]) { seen[k] = 1; uniq.push(n); } });
+  if (!uniq.length) return null;
+  const list = uniq.slice(0, 4), more = uniq.length > 4;
+  const joined = list.length === 1 ? list[0] : list.slice(0, -1).join(", ") + " & " + list[list.length - 1];
+  return more ? joined + " and more" : joined;
+}
 // Builds the caption write-ups, richest first and in both English and
 // Mandarin: when an online landmark description is available it leads with a
 // descriptive, landmark-grounded line in each language (plus a bilingual
@@ -20443,8 +20454,14 @@ function buildShareCaptions(scene, locationName, landmark, extra) {
   // Fires whenever there's a recognized descriptor (scene, cuisine or detected
   // content) AND a resolved place, so the scene and the location/landmark are
   // merged into one lead line rather than offered as separate suggestions.
-  const comboPlace = (venue && venue.name) || enTitle || (locationName ? locationName.split(",")[0].trim() : null);
-  const comboEmoji = (venue && venue.emoji) || "📍";
+  // A batch share passes every distinct place visited across the selected
+  // photos, so the combined lead names them all ("Food & drinks at Gurney Plaza,
+  // Kek Lok Si & Padang Kota") instead of just the first photo's spot; a single
+  // photo passes none, so it falls back to its one venue/landmark/place.
+  const places = (extra && extra.places) || [];
+  const multiPlace = _joinPlaces(places.length > 1 ? places : []);
+  const comboPlace = multiPlace || (venue && venue.name) || enTitle || (locationName ? locationName.split(",")[0].trim() : null);
+  const comboEmoji = multiPlace ? "📍" : ((venue && venue.emoji) || "📍");
   if (tagStr && comboPlace) {
     const lmShort = (enTitle && landmark.description) ? firstSentences(landmark.description, 300) : null;
     caps.push(tagStr + " at " + comboPlace + " " + comboEmoji + (lmShort ? " — " + lmShort : ""));
@@ -21694,7 +21711,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-29 00:11";
+const APP_BUILD = "2026-06-29 00:33";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -22245,7 +22262,7 @@ function App() {
         cv.getContext("2d").putImageData(img,0,0);
         const content=await photoContentAgent(cv);
         if(content&&content.found){
-          const up=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content, stats:ctx.stats, basicTags:ctx.basicTags});
+          const up=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content, stats:ctx.stats, basicTags:ctx.basicTags, places:ctx.places});
           setShareCaps(up);
           const prevAuto=shareAutoRef.current;
           setShareText(prev=>prev===prevAuto?(up[0]||prev):prev);
@@ -22260,7 +22277,7 @@ function App() {
   const onToggleContentAI=()=>{
     const ctx=shareCtxRef.current;
     if(ctx){
-      const base=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats, basicTags:ctx.basicTags});
+      const base=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats, basicTags:ctx.basicTags, places:ctx.places});
       setShareCaps(base);
       const prevAuto=shareAutoRef.current;
       setShareText(prev=>prev===prevAuto?(base[0]||prev):prev);
@@ -22678,17 +22695,50 @@ function BatchAgent({onClose,onCloseApp}){
     // so one recommended caption can reflect the whole batch.
     const basicTags=Object.keys(sceneCounts).sort((a,b)=>sceneCounts[b]-sceneCounts[a])
       .map(sc=>SHARE_SCENE_DESC[sc]).filter(Boolean);
-    let loc=null, landmark=null, venue=null;
+    // Gather every DISTINCT place across all selected photos (deduped by
+    // coordinate bucket), not just the first, so the caption combines every spot
+    // visited. Reverse-geocode/venue/POI are already cached from batch
+    // processing (cheap); the landmark lookups run in parallel and are bounded.
+    const seenCoord={}, coords=[]; let embeddedLoc=null;
     for(const r of rs){
       const file=files[r.fileIndex]; if(!file) continue;
       try{
         const exif=await readExifGpsAndDate(file);
-        if(exif&&exif.gps){ loc=shareLocationName(await reverseGeocodeAgent(exif.gps)); venue=venueAgent(exif.gps); const poiI=poiInfoAgent(exif.gps); landmark=await landmarkDescribeAgent(exif.gps, (venue&&venue.name)||(poiI&&poiI.name), loc); break; }
-        if(exif&&exif.embeddedLocation&&!loc){ loc=shareLocationName(sanitizeFolderName(exif.embeddedLocation)); }
+        if(exif&&exif.gps){ const k=gpsCoordKey(exif.gps); if(!seenCoord[k]){ seenCoord[k]=1; coords.push(exif.gps); } }
+        else if(exif&&exif.embeddedLocation&&!embeddedLoc){ embeddedLoc=shareLocationName(sanitizeFolderName(exif.embeddedLocation)); }
       }catch(e){ /* keep going -- caption still works without it */ }
     }
-    if(!loc){ const fold=rs.map(r=>shareLocationName(r.origFolder)).find(Boolean); if(fold) loc=fold; }
-    return { scene, basicTags, loc, landmark, venue, stats: rs[0]&&rs[0].stats, files: rs.map(r=>files[r.fileIndex]).filter(Boolean) };
+    const use=coords.slice(0,6); // bound the parallel landmark lookups
+    const perCoord=await Promise.all(use.map(async(gps)=>{
+      let loc=null, venue=null, poi=null, lm=null;
+      try{
+        loc=shareLocationName(await reverseGeocodeAgent(gps));
+        venue=venueAgent(gps); poi=poiInfoAgent(gps);
+        lm=await landmarkDescribeAgent(gps, (venue&&venue.name)||(poi&&poi.name), loc).catch(()=>null);
+      }catch(e){ /* this spot just contributes nothing */ }
+      return { loc, venue, poi, lm };
+    }));
+    let loc=null, venue=null, landmark=null;
+    const places=[];
+    const lmScore=x=>(x.nearby?0:2)+(x.description?1:0);
+    perCoord.forEach(pc=>{
+      if(!loc&&pc.loc) loc=pc.loc;
+      if(!venue&&pc.venue) venue=pc.venue;
+      const lm=pc.lm;
+      if(lm){
+        // Best landmark across the set: an "at" place with a description beats a
+        // "nearby"/empty one, then the longer description wins.
+        if(!landmark || lmScore(lm)>lmScore(landmark) ||
+           (lmScore(lm)===lmScore(landmark) && (lm.description||"").length>(landmark.description||"").length)) landmark=lm;
+      }
+      // One distinct place name per spot: named venue > the landmark we're AT >
+      // named POI > the place's leading name.
+      places.push((pc.venue&&pc.venue.name) || (lm&&!lm.nearby&&lm.title) || (pc.poi&&pc.poi.name) || (pc.loc?pc.loc.split(",")[0].trim():null));
+    });
+    if(!loc&&embeddedLoc){ loc=embeddedLoc; places.push(embeddedLoc.split(",")[0].trim()); }
+    if(!loc){ const fold=rs.map(r=>shareLocationName(r.origFolder)).find(Boolean); if(fold){ loc=fold; places.push(fold.split(",")[0].trim()); } }
+    const placeNames=places.filter(Boolean);
+    return { scene, basicTags, loc, landmark, venue, places: placeNames, stats: rs[0]&&rs[0].stats, files: rs.map(r=>files[r.fileIndex]).filter(Boolean) };
   };
 
   // Recognizes the content of EVERY shared photo in the background and merges
@@ -22702,7 +22752,7 @@ function BatchAgent({onClose,onCloseApp}){
       try{
         const content=await analyzePhotosContent(ctx.files, 6);
         if(content&&content.found){
-          const up=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content, stats:ctx.stats, basicTags:ctx.basicTags});
+          const up=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content, stats:ctx.stats, basicTags:ctx.basicTags, places:ctx.places});
           setShareCaps(up);
           const prevAuto=shareAutoRef.current;
           setShareText(prev=>prev===prevAuto?(up[0]||prev):prev);
@@ -22717,7 +22767,7 @@ function BatchAgent({onClose,onCloseApp}){
   const onToggleContentAI=()=>{
     const ctx=shareCtxRef.current;
     if(ctx){
-      const base=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats, basicTags:ctx.basicTags});
+      const base=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats, basicTags:ctx.basicTags, places:ctx.places});
       setShareCaps(base);
       const prevAuto=shareAutoRef.current;
       setShareText(prev=>prev===prevAuto?(base[0]||prev):prev);
@@ -22746,7 +22796,7 @@ function BatchAgent({onClose,onCloseApp}){
       const outFiles=await renderShareFiles([r]);
       if(!outFiles.length) throw new Error("nothing to share");
       const ctx=await buildShareContext([r]);
-      const caps0=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats, basicTags:ctx.basicTags});
+      const caps0=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats, basicTags:ctx.basicTags, places:ctx.places});
       shareCtxRef.current=ctx; shareAutoRef.current=caps0[0]||"";
       await presentShare(outFiles, caps0);
       upgradeCaptionsWithContent(ctx);
@@ -22763,7 +22813,7 @@ function BatchAgent({onClose,onCloseApp}){
       const outFiles=await renderShareFiles(rs, (done)=>setSharePrepDone(done));
       if(!outFiles.length) throw new Error("nothing to share");
       const ctx=await buildShareContext(rs);
-      const caps0=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats, basicTags:ctx.basicTags});
+      const caps0=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats, basicTags:ctx.basicTags, places:ctx.places});
       shareCtxRef.current=ctx; shareAutoRef.current=caps0[0]||"";
       await presentShare(outFiles, caps0);
       upgradeCaptionsWithContent(ctx);
