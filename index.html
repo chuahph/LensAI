@@ -19384,7 +19384,34 @@ function sanitizeFolderName(name) {
 }
 
 const _geocodeCache = new Map();
+const _venueCache = new Map(); // coord key -> { name, kind } | null (the named eatery/shop at the spot)
 let _lastGeocodeAt = 0;
+
+// Food/drink and shop amenity types worth naming in a caption ("at Blue
+// Bottle Coffee"), mapped to a friendly kind word + emoji.
+const VENUE_KINDS = {
+  restaurant: { word: "restaurant", emoji: "🍽️" }, cafe: { word: "café", emoji: "☕" },
+  fast_food: { word: "spot", emoji: "🍔" }, bar: { word: "bar", emoji: "🍸" },
+  pub: { word: "pub", emoji: "🍺" }, food_court: { word: "food court", emoji: "🍜" },
+  ice_cream: { word: "ice cream shop", emoji: "🍦" }, bakery: { word: "bakery", emoji: "🥐" },
+  biergarten: { word: "beer garden", emoji: "🍺" }, nightclub: { word: "club", emoji: "🎶" },
+};
+// Pulls the named eatery/shop at a coordinate out of an already-fetched
+// Nominatim address, so a food/people photo can be captioned "at <name>".
+function extractVenue(address, properName) {
+  const a = address || {};
+  const kind = a.amenity && VENUE_KINDS[a.amenity] ? a.amenity : (a.shop === "bakery" ? "bakery" : null);
+  if (!kind) return null;
+  const name = properName || a.name || null;
+  return { name: name ? sanitizeFolderName(name) : null, kind };
+}
+// Reads the cached venue for a coordinate (populated as a side effect of
+// reverseGeocodeAgent). Returns { name, kind } | null.
+function venueAgent(gps) {
+  if (!gps) return null;
+  const key = gpsCoordKey(gps);
+  return _venueCache.has(key) ? _venueCache.get(key) : null;
+}
 
 // Reverse-geocodes GPS coordinates into a human place name (e.g. "San
 // Francisco, CA") via OpenStreetMap's free Nominatim API, so batch export
@@ -19442,6 +19469,7 @@ async function reverseGeocodeAgent(gps) {
     const poiCategory = a.tourism || a.historic || a.leisure || a.man_made ||
       a.shop || a.amenity || a.office || a.building;
     const properName = (json.namedetails && json.namedetails.name) || a.name;
+    _venueCache.set(key, extractVenue(a, properName));
     const poi = poiCategory
       ? (properName && properName !== a.neighbourhood && properName !== a.suburb ? properName : poiCategory)
       : null;
@@ -19463,6 +19491,7 @@ async function reverseGeocodeAgent(gps) {
     return result;
   } catch (e) {
     _geocodeCache.set(key, fallback);
+    if (!_venueCache.has(key)) _venueCache.set(key, null);
     return fallback;
   }
 }
@@ -19625,22 +19654,113 @@ async function landmarkDescribeAgent(gps) {
   return result;
 }
 
+// === On-device photo-content recognition (TensorFlow.js) =============
+// Recognizes what's actually IN the photo -- food, animals, objects, how
+// many people -- to enrich share captions beyond GPS/scene. Loaded lazily
+// from a CDN only when sharing (and only once), so it never weighs on the
+// offline-first core; every failure path (offline, blocked CDN, slow load,
+// inference error) degrades silently to the scene/face heuristics. COCO-SSD
+// counts people + 80 common object classes; MobileNet adds fine ImageNet
+// labels (specific dish/breed/item names).
+let _visionModels = null, _visionLoadPromise = null, _visionFailed = false;
+function _loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src; s.async = true;
+    s.onload = () => resolve(); s.onerror = () => reject(new Error("load " + src));
+    document.head.appendChild(s);
+  });
+}
+async function loadVisionModels() {
+  if (_visionModels) return _visionModels;
+  if (_visionFailed) return null;
+  // Don't even try the CDN when the device is plainly offline -- captions
+  // just stay on the heuristic content tags.
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return null;
+  if (!_visionLoadPromise) {
+    _visionLoadPromise = (async () => {
+      if (typeof tf === "undefined") await _loadScript("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
+      if (typeof cocoSsd === "undefined") await _loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js");
+      if (typeof mobilenet === "undefined") await _loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js");
+      const [coco, mn] = await Promise.all([cocoSsd.load(), mobilenet.load()]);
+      _visionModels = { coco: coco, mobilenet: mn };
+      return _visionModels;
+    })().catch(err => { _visionFailed = true; _visionLoadPromise = null; console.warn("[LensAI] vision models unavailable:", err); return null; });
+  }
+  return _visionLoadPromise;
+}
+// COCO classes that read as animals / as food, for caption phrasing.
+const COCO_ANIMALS = ["bird","cat","dog","horse","sheep","cow","elephant","bear","zebra","giraffe"];
+const COCO_FOODS = ["banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake"];
+// Runs both models on a canvas/image and returns a compact content summary,
+// or null if the models aren't available. Time-boxed so a stalled CDN never
+// hangs the share sheet.
+async function photoContentAgent(imageEl) {
+  if (!imageEl) return null;
+  let models;
+  try { models = await Promise.race([loadVisionModels(), new Promise(r => setTimeout(() => r(null), 12000))]); }
+  catch (e) { models = null; }
+  if (!models) return null;
+  try {
+    const [dets, preds] = await Promise.all([
+      models.coco.detect(imageEl).then(d => d || []).catch(() => []),
+      models.mobilenet.classify(imageEl).then(p => p || []).catch(() => []),
+    ]);
+    const objects = {};
+    dets.forEach(d => { if (d && d.score >= 0.55) objects[d.class] = (objects[d.class] || 0) + 1; });
+    const labels = preds.filter(p => p && p.probability >= 0.22).slice(0, 2)
+      .map(p => p.className.split(",")[0].trim());
+    return { objects, labels, peopleCount: objects.person || 0 };
+  } catch (e) { return null; }
+}
+// Turns the content summary (or, failing that, the scene/face stats) into a
+// short list of human descriptors for captions: people count, animals, food,
+// and the fine ML labels. Always returns something usable.
+function buildContentTags(content, stats) {
+  const s = stats || {};
+  const tags = [];
+  if (content) {
+    if (content.peopleCount >= 2) tags.push("Group photo of " + content.peopleCount);
+    else if (content.peopleCount === 1 && s.scene !== "food") tags.push("Portrait");
+    Object.keys(content.objects || {}).forEach(o => {
+      if (COCO_ANIMALS.indexOf(o) !== -1) tags.push(content.objects[o] > 1 ? content.objects[o] + " " + o + "s" : "a " + o);
+      else if (COCO_FOODS.indexOf(o) !== -1) tags.push(o);
+    });
+    (content.labels || []).forEach(l => tags.push(l));
+  }
+  if (tags.length === 0) {
+    // Heuristic fallback from the statistical scene analysis.
+    const map = { food: "Food & drinks", people: "Good company", portrait: "Portrait",
+      nature: "Nature & scenery", urban: "City scene", night: "Night scene" };
+    if (map[s.scene]) tags.push(map[s.scene]);
+    if (s.hasBigFace && s.scene !== "portrait") tags.push("Portrait");
+  }
+  // De-dupe case-insensitively, keep first casing, cap the list.
+  const seen = {}, out = [];
+  tags.forEach(t => { const k = t.toLowerCase(); if (!seen[k]) { seen[k] = 1; out.push(t); } });
+  return out.slice(0, 4);
+}
+
 // Builds the caption write-ups, richest first and in both English and
 // Mandarin: when an online landmark description is available it leads with a
 // descriptive, landmark-grounded line in each language (plus a bilingual
-// combo and a geo-pinned variant), then the scene-mood + place variants in
-// each language, so there's always something to post even with no location
-// or no network at all.
-function buildShareCaptions(scene, locationName, landmark) {
+// combo and a geo-pinned variant), then content- and venue-aware lines, then
+// the scene-mood + place variants in each language, so there's always
+// something to post even with no location or no network at all.
+function buildShareCaptions(scene, locationName, landmark, extra) {
   const moodsEn = SHARE_SCENE_MOODS[scene] || ["A moment worth sharing 📸", "Through my lens", "Captured today"];
   const moodsZh = SHARE_SCENE_MOODS_ZH[scene] || ["值得分享的瞬间 📸", "用镜头记录", "今日抓拍"];
   const enTitle = landmark && landmark.title;
   const zhTitle = landmark && landmark.zhTitle;
   const placeEn = enTitle || locationName;
   const placeZh = zhTitle || enTitle || locationName;
+  const venue = extra && extra.venue;
+  const tags = buildContentTags(extra && extra.content, extra && extra.stats);
+  const tagStr = tags.join(", ");
   const caps = [];
-  // English description of the exact landmark -- the fullest variant. Kept
-  // focused on the place the photo is actually of (no "nearby" filler).
+  // English description of the exact landmark -- the fullest variant, and the
+  // lead for an actual landmark photo. Kept focused on the place the photo is
+  // of (no "nearby" filler).
   if (enTitle && landmark.description) {
     const longDesc = firstSentences(landmark.description, 360);
     if (longDesc) caps.push(enTitle + " — " + longDesc);
@@ -19655,6 +19775,14 @@ function buildShareCaptions(scene, locationName, landmark) {
     caps.push(enTitle + " — " + firstSentences(landmark.description, 150) + "\n" +
       zhTitle + "——" + firstSentences(landmark.zhDescription, 120));
   }
+  // Content + venue: what's actually in the photo and the named eatery/shop
+  // it was taken at -- the most specific "exploration" caption, and the lead
+  // when there's no landmark article (e.g. a meal at a cafe).
+  if (venue && venue.name) {
+    const v = VENUE_KINDS[venue.kind] || { word: "place", emoji: "📍" };
+    caps.push((tagStr ? tagStr + " at " : "At ") + venue.name + " " + v.emoji);
+  }
+  if (tagStr) caps.push(tagStr + (placeEn ? " — " + placeEn : ""));
   // Mood-led blend with a short description (English).
   if (enTitle && landmark.description) {
     const shortDesc = firstSentences(landmark.description, 110);
@@ -19664,10 +19792,15 @@ function buildShareCaptions(scene, locationName, landmark) {
   if (landmark && landmark.lat != null && landmark.lon != null && (enTitle || placeEn)) {
     caps.push((enTitle || placeEn) + " 📍 " + landmark.lat.toFixed(4) + ", " + landmark.lon.toFixed(4));
   }
+  // A mood blend grounded at the named venue, when there is one.
+  if (venue && venue.name) {
+    const v = VENUE_KINDS[venue.kind] || { word: "place", emoji: "📍" };
+    caps.push(moodsEn[0] + " at " + venue.name + " " + v.emoji);
+  }
   // Scene-mood + place, English then Mandarin.
   moodsEn.forEach(m => caps.push(placeEn ? m + " — " + placeEn : m));
   moodsZh.forEach(m => caps.push(placeZh ? m + " — " + placeZh : m));
-  return [...new Set(caps.filter(Boolean))].slice(0, 9);
+  return [...new Set(caps.filter(Boolean))].slice(0, 12);
 }
 
 // Copies text to the clipboard as reliably as the platform allows. The
@@ -21407,24 +21540,38 @@ function App() {
       shareFileRef.current = new File([blob], filename, { type:"image/jpeg" });
       setShareThumb(prev=>{ if(prev) URL.revokeObjectURL(prev); return URL.createObjectURL(blob); });
       // Map the photo to a place + an online landmark description from its
-      // EXIF GPS (falling back to an embedded location tag, then nothing).
-      let loc=null, landmark=null;
+      // EXIF GPS (falling back to an embedded location tag, then nothing),
+      // and the named eatery/shop at that spot for venue captions.
+      let loc=null, landmark=null, venue=null;
       if(srcFileRef.current){
         try{
           const exif=await readExifGpsAndDate(srcFileRef.current);
           if(exif&&exif.gps){
             loc=shareLocationName(await reverseGeocodeAgent(exif.gps));
+            venue=venueAgent(exif.gps);
             landmark=await landmarkDescribeAgent(exif.gps);
           } else if(exif&&exif.embeddedLocation){
             loc=shareLocationName(sanitizeFolderName(exif.embeddedLocation));
           }
         }catch(e){ /* keep going with whatever resolved -- caption still works */ }
       }
-      const scene=(analysis&&analysis.scene)||(statsRef.current&&statsRef.current.scene)||(imgStats&&imgStats.scene)||null;
-      const caps=buildShareCaptions(scene, loc, landmark);
-      setShareCaps(caps);
-      setShareText(caps[0]||"");
+      const stats=statsRef.current||imgStats||null;
+      const scene=(analysis&&analysis.scene)||(stats&&stats.scene)||null;
+      // Open immediately with location/scene captions; the heavier on-device
+      // content recognition runs in the background and upgrades the
+      // suggestions in place when it resolves, so the sheet never waits on it.
+      const caps0=buildShareCaptions(scene, loc, landmark, {venue, content:null, stats});
+      setShareCaps(caps0);
+      setShareText(caps0[0]||"");
       setShareOpen(true);
+      (async()=>{
+        try{
+          const cv=document.createElement("canvas"); cv.width=img.width; cv.height=img.height;
+          cv.getContext("2d").putImageData(img,0,0);
+          const content=await photoContentAgent(cv);
+          if(content) setShareCaps(buildShareCaptions(scene, loc, landmark, {venue, content, stats}));
+        }catch(e){ /* heuristic captions already shown */ }
+      })();
     }catch(err){
       console.error("[LensAI] Share prepare failed:", err);
       showToast("Couldn't prepare share -- try again");
@@ -21716,21 +21863,44 @@ function BatchAgent({onClose,onCloseApp}){
   // scene, plus a place name + online landmark description read from the
   // first selected photo that carries GPS (falling back to an embedded
   // location tag, then the result's own origFolder place name).
-  const buildResultCaptions=async(rs)=>{
+  // Resolves the place / landmark / venue context for a set of results from
+  // the first one that carries GPS (dominant scene across all). Content
+  // recognition is NOT done here -- it runs in the background after the sheet
+  // opens (see upgradeCaptionsWithContent) so model load never blocks it.
+  const buildShareContext=async(rs)=>{
     const sceneCounts={};
     rs.forEach(r=>{ const s=r.stats&&r.stats.scene; if(s) sceneCounts[s]=(sceneCounts[s]||0)+1; });
     const scene=Object.keys(sceneCounts).sort((a,b)=>sceneCounts[b]-sceneCounts[a])[0]||null;
-    let loc=null, landmark=null;
+    let loc=null, landmark=null, venue=null;
     for(const r of rs){
       const file=files[r.fileIndex]; if(!file) continue;
       try{
         const exif=await readExifGpsAndDate(file);
-        if(exif&&exif.gps){ loc=shareLocationName(await reverseGeocodeAgent(exif.gps)); landmark=await landmarkDescribeAgent(exif.gps); break; }
+        if(exif&&exif.gps){ loc=shareLocationName(await reverseGeocodeAgent(exif.gps)); venue=venueAgent(exif.gps); landmark=await landmarkDescribeAgent(exif.gps); break; }
         if(exif&&exif.embeddedLocation&&!loc){ loc=shareLocationName(sanitizeFolderName(exif.embeddedLocation)); }
       }catch(e){ /* keep going -- caption still works without it */ }
     }
     if(!loc){ const fold=rs.map(r=>shareLocationName(r.origFolder)).find(Boolean); if(fold) loc=fold; }
-    return buildShareCaptions(scene, loc, landmark);
+    return { scene, loc, landmark, venue, stats: rs[0]&&rs[0].stats, file: files[rs[0]&&rs[0].fileIndex] };
+  };
+
+  // Runs on-device content recognition on the representative photo in the
+  // background and, if it produces anything, upgrades the suggestions in
+  // place. Never blocks the sheet; silent on any failure.
+  const upgradeCaptionsWithContent=(ctx)=>{
+    if(!ctx||!ctx.file) return;
+    (async()=>{
+      try{
+        const img=await decodeAgent(ctx.file);
+        const MAX=1024; let w=img.width,h=img.height;
+        if(w>MAX){h=Math.round(h*MAX/w);w=MAX;} if(h>MAX){w=Math.round(w*MAX/h);h=MAX;}
+        const cv=document.createElement("canvas"); cv.width=w; cv.height=h;
+        cv.getContext("2d").drawImage(img,0,0,w,h);
+        if(typeof img.close==="function") img.close();
+        const content=await photoContentAgent(cv);
+        if(content) setShareCaps(buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content, stats:ctx.stats}));
+      }catch(e){ /* heuristic captions already shown */ }
+    })();
   };
 
   const presentShare=async(outFiles, caps)=>{
@@ -21749,7 +21919,9 @@ function BatchAgent({onClose,onCloseApp}){
     try{
       const outFiles=await renderShareFiles([r]);
       if(!outFiles.length) throw new Error("nothing to share");
-      await presentShare(outFiles, await buildResultCaptions([r]));
+      const ctx=await buildShareContext([r]);
+      await presentShare(outFiles, buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats}));
+      upgradeCaptionsWithContent(ctx);
     }catch(err){
       setExportError("Couldn't prepare \""+(r.name||"that photo")+"\" for sharing -- "+(err&&err.message||"try again"));
     }finally{ setSharePrepIdx(null); _releaseScratch(); }
@@ -21762,7 +21934,9 @@ function BatchAgent({onClose,onCloseApp}){
     try{
       const outFiles=await renderShareFiles(rs, (done)=>setSharePrepDone(done));
       if(!outFiles.length) throw new Error("nothing to share");
-      await presentShare(outFiles, await buildResultCaptions(rs));
+      const ctx=await buildShareContext(rs);
+      await presentShare(outFiles, buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats}));
+      upgradeCaptionsWithContent(ctx);
     }catch(err){
       setExportError("Couldn't prepare the selected photos for sharing -- "+(err&&err.message||"try again"));
     }finally{ setSharePrepBusy(false); _releaseScratch(); }
