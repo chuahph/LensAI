@@ -19387,26 +19387,34 @@ const _geocodeCache = new Map();
 const _venueCache = new Map(); // coord key -> { name, kind } | null (the named eatery/shop at the spot)
 let _lastGeocodeAt = 0;
 
-// Food/drink and shop amenity types worth naming in a caption ("at Blue
-// Bottle Coffee"), mapped to a friendly kind word + emoji.
+// Eatery/drink amenity types (and food-ish shops) worth naming in a caption
+// ("at Blue Bottle Coffee"), mapped to a friendly word + emoji.
 const VENUE_KINDS = {
   restaurant: { word: "restaurant", emoji: "🍽️" }, cafe: { word: "café", emoji: "☕" },
   fast_food: { word: "spot", emoji: "🍔" }, bar: { word: "bar", emoji: "🍸" },
   pub: { word: "pub", emoji: "🍺" }, food_court: { word: "food court", emoji: "🍜" },
-  ice_cream: { word: "ice cream shop", emoji: "🍦" }, bakery: { word: "bakery", emoji: "🥐" },
-  biergarten: { word: "beer garden", emoji: "🍺" }, nightclub: { word: "club", emoji: "🎶" },
+  ice_cream: { word: "ice cream shop", emoji: "🍦" }, biergarten: { word: "beer garden", emoji: "🍺" },
+  nightclub: { word: "club", emoji: "🎶" }, bbq: { word: "BBQ spot", emoji: "🍖" },
+  cafeteria: { word: "cafeteria", emoji: "🍽️" },
+};
+const FOOD_SHOP_KINDS = {
+  bakery: { word: "bakery", emoji: "🥐" }, pastry: { word: "pastry shop", emoji: "🥐" },
+  confectionery: { word: "sweet shop", emoji: "🍬" }, coffee: { word: "coffee shop", emoji: "☕" },
+  deli: { word: "deli", emoji: "🥪" }, chocolate: { word: "chocolatier", emoji: "🍫" },
+  ice_cream: { word: "ice cream shop", emoji: "🍦" }, tea: { word: "tea house", emoji: "🍵" },
 };
 // Pulls the named eatery/shop at a coordinate out of an already-fetched
 // Nominatim address, so a food/people photo can be captioned "at <name>".
+// Returns { name, word, emoji } | null.
 function extractVenue(address, properName) {
   const a = address || {};
-  const kind = a.amenity && VENUE_KINDS[a.amenity] ? a.amenity : (a.shop === "bakery" ? "bakery" : null);
-  if (!kind) return null;
+  const k = (a.amenity && VENUE_KINDS[a.amenity]) || (a.shop && FOOD_SHOP_KINDS[a.shop]) || null;
+  if (!k) return null;
   const name = properName || a.name || null;
-  return { name: name ? sanitizeFolderName(name) : null, kind };
+  return { name: name ? sanitizeFolderName(name) : null, word: k.word, emoji: k.emoji };
 }
 // Reads the cached venue for a coordinate (populated as a side effect of
-// reverseGeocodeAgent). Returns { name, kind } | null.
+// reverseGeocodeAgent). Returns { name, word, emoji } | null.
 function venueAgent(gps) {
   if (!gps) return null;
   const key = gpsCoordKey(gps);
@@ -19754,7 +19762,14 @@ function buildShareCaptions(scene, locationName, landmark, extra) {
   const zhTitle = landmark && landmark.zhTitle;
   const placeEn = enTitle || locationName;
   const placeZh = zhTitle || enTitle || locationName;
-  const venue = extra && extra.venue;
+  // Use the tagged eatery when there is one; otherwise, for a food photo
+  // with a resolved place, fall back to the place's own name as the venue so
+  // a meal still gets a "... at <restaurant>" caption even when reverse-
+  // geocoding didn't return an explicit amenity tag at the exact point.
+  let venue = extra && extra.venue;
+  if ((!venue || !venue.name) && scene === "food" && placeEn) {
+    venue = { name: placeEn.split(",")[0].trim(), word: "spot", emoji: "🍽️" };
+  }
   const tags = buildContentTags(extra && extra.content, extra && extra.stats);
   const tagStr = tags.join(", ");
   const caps = [];
@@ -19779,8 +19794,7 @@ function buildShareCaptions(scene, locationName, landmark, extra) {
   // it was taken at -- the most specific "exploration" caption, and the lead
   // when there's no landmark article (e.g. a meal at a cafe).
   if (venue && venue.name) {
-    const v = VENUE_KINDS[venue.kind] || { word: "place", emoji: "📍" };
-    caps.push((tagStr ? tagStr + " at " : "At ") + venue.name + " " + v.emoji);
+    caps.push((tagStr ? tagStr + " at " : "At ") + venue.name + " " + (venue.emoji || "📍"));
   }
   if (tagStr) caps.push(tagStr + (placeEn ? " — " + placeEn : ""));
   // Mood-led blend with a short description (English).
@@ -19794,8 +19808,7 @@ function buildShareCaptions(scene, locationName, landmark, extra) {
   }
   // A mood blend grounded at the named venue, when there is one.
   if (venue && venue.name) {
-    const v = VENUE_KINDS[venue.kind] || { word: "place", emoji: "📍" };
-    caps.push(moodsEn[0] + " at " + venue.name + " " + v.emoji);
+    caps.push(moodsEn[0] + " at " + venue.name + " " + (venue.emoji || "📍"));
   }
   // Scene-mood + place, English then Mandarin.
   moodsEn.forEach(m => caps.push(placeEn ? m + " — " + placeEn : m));
