@@ -19869,128 +19869,30 @@ async function analyzePhotosContent(fileList, cap) {
   merged.inferErr = allInferErr;
   return merged;
 }
-
-// --- Optional cloud vision (user-supplied Anthropic API key) ----------------
-// The on-device ImageNet classifier cannot name Asian/specialty dishes (durian,
-// nasi lemak, wagyu yakiniku, pho, dim sum, ...). When the user opts in with
-// their own Anthropic API key, we send the photo to Claude's vision model,
-// which DOES name them accurately. The key lives only in this device's
-// localStorage; the call is gated on the key being present and never blocks the
-// share sheet (it runs in the same background upgrade as the on-device model).
-function cloudKey() { try { return (localStorage.getItem("lensai_ai_key") || "").trim(); } catch (e) { return ""; } }
-function cloudModel() { try { return localStorage.getItem("lensai_ai_model") || "claude-opus-4-8"; } catch (e) { return "claude-opus-4-8"; } }
-function cloudConfigured() { return !!cloudKey(); }
-const CLOUD_MODELS = ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"];
-const CLOUD_MODEL_LABEL = {
-  "claude-opus-4-8": "Opus — most accurate",
-  "claude-sonnet-4-6": "Sonnet — balanced",
-  "claude-haiku-4-5": "Haiku — fastest & cheapest",
-};
-// Decodes a File to a downscaled base64 JPEG (long edge <= max) for the API.
-async function fileToBase64Jpeg(file, max) {
-  const img = await decodeAgent(file);
-  let w = img.width, h = img.height; const M = max || 1024;
-  if (w > M) { h = Math.round(h * M / w); w = M; }
-  if (h > M) { w = Math.round(w * M / h); h = M; }
-  const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
-  cv.getContext("2d").drawImage(img, 0, 0, w, h);
-  if (typeof img.close === "function") img.close();
-  return cv.toDataURL("image/jpeg", 0.82).split(",")[1];
-}
-// Asks Claude to name the dish(es)/subject in ONE photo. Returns a short array
-// of names (most prominent first), or null when no key / offline / failure.
-// Never throws. Time-boxed so a slow network can't hang the share sheet.
-async function cloudFoodAgent(file) {
-  const key = cloudKey();
-  if (!key || !file) return null;
-  if (navigator.onLine === false) return null;
-  try {
-    const b64 = await fileToBase64Jpeg(file, 1024);
-    const ctrl = new AbortController();
-    const to = setTimeout(() => ctrl.abort(), 20000);
-    let res;
-    try {
-      res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": key,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        signal: ctrl.signal,
-        body: JSON.stringify({
-          model: cloudModel(),
-          max_tokens: 200,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } },
-              { type: "text", text: "Identify the main food/dish(es) in this photo for a social caption. Name specific dishes precisely, including Asian ones (e.g. nasi lemak, char kway teow, durian, wagyu yakiniku, pho, dim sum, roti canai). Reply with ONLY a JSON array of 1-3 short names, most prominent first, e.g. [\"nasi lemak\",\"teh tarik\"]. If there is no food, return a JSON array with one short description of the main subject instead." },
-            ],
-          }],
-        }),
-      });
-    } finally { clearTimeout(to); }
-    if (!res.ok) return null;
-    const j = await res.json();
-    const txt = ((j && j.content) || []).filter(b => b && b.type === "text").map(b => b.text).join("").trim();
-    if (!txt) return null;
-    let arr = null;
-    const m = txt.match(/\[[\s\S]*\]/);
-    try { arr = JSON.parse(m ? m[0] : txt); } catch (e) { arr = null; }
-    if (!Array.isArray(arr)) arr = txt.split(/[,\n]/);
-    return arr.map(s => String(s).trim().replace(/^["'\[\]\s]+|["'\[\]\s]+$/g, "")).filter(Boolean).slice(0, 3);
-  } catch (e) { return null; }
-}
-// Runs cloudFoodAgent across up to `cap` photos and merges the names (cost is
-// bounded by `cap` since each photo is a separate API call). Returns an array
-// or null.
-async function cloudDishesForFiles(fileList, cap) {
-  if (!cloudConfigured()) return null;
-  const list = (fileList || []).filter(Boolean).slice(0, cap || 3);
-  const seen = {}, out = [];
-  for (const f of list) {
-    const names = await cloudFoodAgent(f);
-    if (names) names.forEach(n => { const k = n.toLowerCase(); if (!seen[k]) { seen[k] = 1; out.push(n); } });
-  }
-  return out.length ? out.slice(0, 5) : null;
-}
-// Combined recognition for the share sheet: on-device models AND (if a key is
-// configured) the cloud dish-namer, in parallel. The cloud names are attached
-// as content.cloudDishes, which buildContentTags treats as authoritative.
-async function analyzeContentWithCloud(fileList, cap) {
-  const [onDevice, cloud] = await Promise.all([
-    analyzePhotosContent(fileList, cap).catch(() => null),
-    cloudDishesForFiles(fileList, 3).catch(() => null),
-  ]);
-  if (!onDevice && !(cloud && cloud.length)) return null;
-  const content = onDevice || { objects: {}, labels: [], peopleCount: 0, inferErr: false, found: false };
-  if (cloud && cloud.length) { content.cloudDishes = cloud; content.found = true; }
-  return content;
-}
+// Whether on-device photo-content recognition (food/object/people) and the OSM
+// cuisine food tag are switched on for captions. OFF by default -- the user
+// opts in from the share sheet, since the on-device model is imperfect
+// (notably it can't name most Asian dishes).
+function contentAIEnabled() { try { return localStorage.getItem("lensai_content_ai") === "1"; } catch (e) { return false; } }
+function setContentAIEnabled(on) { try { if (on) localStorage.setItem("lensai_content_ai", "1"); else localStorage.removeItem("lensai_content_ai"); } catch (e) {} }
 // Turns the content summary (or, failing that, the scene/face stats) into a
 // short list of human descriptors for captions: people count, animals, food,
 // and the fine ML labels. Always returns something usable.
 function buildContentTags(content, stats, leadTag) {
   const s = stats || {};
   const tags = [];
-  const cloud = content && content.cloudDishes;
-  // Cloud vision (when the user has configured a key) names the exact dish --
-  // the most authoritative source, so it leads and makes both the venue cuisine
-  // tag and the coarse on-device food labels redundant.
-  if (cloud && cloud.length) { cloud.forEach(d => tags.push(d)); }
-  // Otherwise a known cuisine (from the venue's OSM tag) is the most reliable
-  // food descriptor, so it leads and suppresses the vague scene fallback below.
-  else if (leadTag) tags.push(leadTag);
+  // A known cuisine (from the venue's OSM tag) is the most reliable food
+  // descriptor, so it leads and -- being real content -- suppresses the vague
+  // scene-heuristic fallback below.
+  if (leadTag) tags.push(leadTag);
   if (content) {
     if (content.peopleCount >= 2) tags.push("Group photo of " + content.peopleCount);
     else if (content.peopleCount === 1 && s.scene !== "food") tags.push("Portrait");
     Object.keys(content.objects || {}).forEach(o => {
       if (COCO_ANIMALS.indexOf(o) !== -1) tags.push(content.objects[o] > 1 ? content.objects[o] + " " + o + "s" : "a " + o);
-      else if (COCO_FOODS.indexOf(o) !== -1 && !cloud) tags.push(o);
+      else if (COCO_FOODS.indexOf(o) !== -1) tags.push(o);
     });
-    if (!cloud) (content.labels || []).forEach(l => { if (!leadTag || l.toLowerCase() !== leadTag.toLowerCase()) tags.push(l); });
+    (content.labels || []).forEach(l => { if (!leadTag || l.toLowerCase() !== leadTag.toLowerCase()) tags.push(l); });
   }
   if (tags.length === 0) {
     // Heuristic fallback from the statistical scene analysis.
@@ -20027,16 +19929,20 @@ function buildShareCaptions(scene, locationName, landmark, extra) {
   if ((!venue || !venue.name) && scene === "food" && placeEn) {
     venue = { name: placeEn.split(",")[0].trim(), word: "spot", emoji: "🍽️" };
   }
+  // Photo-content recognition and the OSM cuisine food tag are opt-in (off by
+  // default). When off, captions carry no per-photo content/food descriptors --
+  // only location, landmark, venue name and scene mood.
+  const aiOn = contentAIEnabled();
   // The venue's OSM cuisine is the most reliable food descriptor we have for
   // Asian dishes the on-device classifier can't name, so lead the content tags
   // with it (e.g. "Malaysian food, fried chicken at <restaurant>").
-  const cuisine = venue && venue.cuisine;
-  const tags = buildContentTags(extra && extra.content, extra && extra.stats, cuisine);
+  const cuisine = aiOn && venue && venue.cuisine ? venue.cuisine : null;
+  const tags = aiOn ? buildContentTags(extra && extra.content, extra && extra.stats, cuisine) : [];
   const tagStr = tags.join(", ");
   // A known cuisine is itself caption-worthy content (it lets a food photo lead
   // with the combined "<cuisine> at <place>" line even if the classifier found
   // nothing nameable).
-  const contentFound = !!(extra && extra.content && extra.content.found) || !!cuisine;
+  const contentFound = aiOn && (!!(extra && extra.content && extra.content.found) || !!cuisine);
   const caps = [];
   // COMBINED lead: the photo's content (e.g. the food) + the shop/landmark
   // it's at + a short description of that place -- everything in one caption.
@@ -21277,7 +21183,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-28 13:44";
+const APP_BUILD = "2026-06-28 14:12";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21803,11 +21709,51 @@ function App() {
   const [shareCopied,setShareCopied]=useState(false);
   const [aiStatus,setAiStatus]=useState(null); // null|"loading"|"ok"|"failed"|"none" -- content-AI state for the share sheet
   const shareFileRef=useRef(null);
+  // The resolved place/landmark/venue/scene context for the open share sheet,
+  // plus the last auto-prefilled caption -- so toggling content recognition can
+  // rebuild the captions for the already-open photo without reopening.
+  const shareCtxRef=useRef(null);
+  const shareAutoRef=useRef("");
 
   const copyCaption=async()=>{
     const ok=await copyTextToClipboard((shareText||"").trim());
     setShareCopied(ok); showToast(ok?"Caption copied -- paste it in your Facebook post":"Couldn't copy -- select the text and copy manually");
     if(ok) setTimeout(()=>setShareCopied(false),2000);
+  };
+  // Runs on-device recognition for the open photo and upgrades the captions --
+  // only when the user has switched content recognition on. Safe to call again.
+  const runShareContentAI=()=>{
+    const ctx=shareCtxRef.current;
+    if(!ctx||!contentAIEnabled()){ setAiStatus(null); return; }
+    setAiStatus("loading");
+    (async()=>{
+      try{
+        const cv=document.createElement("canvas"); cv.width=img.width; cv.height=img.height;
+        cv.getContext("2d").putImageData(img,0,0);
+        const content=await photoContentAgent(cv);
+        if(content&&content.found){
+          const up=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content, stats:ctx.stats});
+          setShareCaps(up);
+          const prevAuto=shareAutoRef.current;
+          setShareText(prev=>prev===prevAuto?(up[0]||prev):prev);
+          shareAutoRef.current=up[0]||shareAutoRef.current;
+        }
+        setAiStatus(!content?(visionState()==="failed"?"failed":"none"):content.inferErr?"inferfail":content.found?"ok":"none");
+      }catch(e){ setAiStatus("failed"); }
+    })();
+  };
+  // Re-build captions for the open photo when content recognition is toggled:
+  // strip/restore the content + cuisine descriptors, then (re)run if now on.
+  const onToggleContentAI=()=>{
+    const ctx=shareCtxRef.current;
+    if(ctx){
+      const base=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats});
+      setShareCaps(base);
+      const prevAuto=shareAutoRef.current;
+      setShareText(prev=>prev===prevAuto?(base[0]||prev):prev);
+      shareAutoRef.current=base[0]||"";
+    }
+    runShareContentAI();
   };
   // Suggestions are multi-select: tapping one adds it to (or removes it from)
   // the caption box, blank-line separated, so several can be combined and
@@ -21847,36 +21793,17 @@ function App() {
       }
       const stats=statsRef.current||imgStats||null;
       const scene=(analysis&&analysis.scene)||(stats&&stats.scene)||null;
-      // Open immediately with location/scene captions; the heavier on-device
-      // content recognition runs in the background and upgrades the
-      // suggestions in place when it resolves, so the sheet never waits on it.
+      // Open immediately with location/scene captions. If the user has switched
+      // content recognition on, the heavier on-device analysis then runs in the
+      // background and upgrades the suggestions in place; off by default.
+      shareCtxRef.current={scene, loc, landmark, venue, stats};
       const caps0=buildShareCaptions(scene, loc, landmark, {venue, content:null, stats});
       setShareCaps(caps0);
       setShareText(caps0[0]||"");
-      setAiStatus("loading");
+      shareAutoRef.current=caps0[0]||"";
+      setAiStatus(null);
       setShareOpen(true);
-      (async()=>{
-        try{
-          const cv=document.createElement("canvas"); cv.width=img.width; cv.height=img.height;
-          cv.getContext("2d").putImageData(img,0,0);
-          // On-device recognition AND (if a key is configured) the cloud
-          // dish-namer, in parallel -- the cloud names are authoritative.
-          const [content0,cloud]=await Promise.all([
-            photoContentAgent(cv).catch(()=>null),
-            cloudDishesForFiles([shareFileRef.current],3).catch(()=>null)
-          ]);
-          let content=content0;
-          if(cloud&&cloud.length){ content=content0||{objects:{},labels:[],peopleCount:0,inferErr:false,found:false}; content.cloudDishes=cloud; content.found=true; }
-          if(content&&content.found){
-            const up=buildShareCaptions(scene, loc, landmark, {venue, content, stats});
-            setShareCaps(up);
-            // Also refresh the prefilled caption to the richer lead -- but only
-            // if the user hasn't edited/selected away from the auto one yet.
-            setShareText(prev=>prev===(caps0[0]||"")?(up[0]||prev):prev);
-          }
-          setAiStatus(!content?(visionState()==="failed"?"failed":"none"):(content.inferErr&&!(cloud&&cloud.length))?"inferfail":content.found?"ok":"none");
-        }catch(e){ setAiStatus("failed"); /* heuristic captions already shown */ }
-      })();
+      runShareContentAI();
     }catch(err){
       console.error("[LensAI] Share prepare failed:", err);
       showToast("Couldn't prepare share -- try again");
@@ -21989,7 +21916,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
             React.createElement("button",{onClick:closeShare,"aria-label":"Close",style:{flexShrink:0,width:28,height:28,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×")),
           shareThumb&&React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",marginBottom:12,display:"block"}}),
           React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption — for reference, review & edit before posting"),
-          React.createElement(CloudKeyBar,null),
+          React.createElement(ContentAIBar,{onToggle:onToggleContentAI}),
           aiStatus&&aiStatus!=="ok"&&React.createElement("div",{style:{fontSize:10,marginBottom:8,lineHeight:1.4,color:aiStatus==="loading"?"#94a3b8":"#fbbf24",display:"flex",alignItems:"center",gap:6}},aiStatus==="loading"?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Analyzing photo content (food, objects)…"):aiStatus==="failed"?"Photo-content AI couldn't load on this network/CDN -- captions use basic tags. Location/landmark still works.":aiStatus==="inferfail"?"Photo-content AI loaded but couldn't analyze on this device -- using basic tags.":"Photo AI found no specific items in this photo -- using basic tags."),React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:6,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,lineHeight:1.5,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10,maxHeight:"40vh",overflowY:"auto"}}),
           shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to add (combine several)"),
           shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>{const sel=capSelected(c);return React.createElement("button",{key:i,onClick:()=>toggleCaption(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(sel?"#9db2e8":BORD),background:sel?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:sel?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",gap:8,alignItems:"flex-start",whiteSpace:"pre-wrap"}},React.createElement("span",{style:{flexShrink:0,width:16,height:16,borderRadius:4,border:"1px solid "+(sel?"#9db2e8":"#475569"),background:sel?"#1877f2":"transparent",color:"#fff",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}},sel?"✓":""),React.createElement("span",null,c));})),
@@ -22002,30 +21929,16 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
       ),toast&&React.createElement("div",{style:{position:"fixed",bottom:68,left:"50%",transform:"translateX(-50%)",background:"rgba(13,18,32,0.97)",backdropFilter:"blur(12px)",border:"1px solid "+BORD,borderRadius:20,padding:"8px 18px",fontSize:12,fontWeight:600,whiteSpace:"nowrap",zIndex:100,boxShadow:"0 6px 20px rgba(0,0,0,0.4)",animation:"slideUp 0.25s ease-out"}},toast)));
 }
 
-// Lets the user opt into accurate cloud dish recognition by pasting their own
-// Anthropic API key (stored only on this device) and choosing a model. Shown in
-// the share sheet, right where the food caption is generated.
-function CloudKeyBar(){
+// Opt-in toggle (off by default) for on-device food/photo recognition + the OSM
+// cuisine food tag in captions, shown in the share sheet. onToggle rebuilds the
+// captions for the already-open photo. Carries the accuracy caveat.
+function ContentAIBar({onToggle}){
   const [,force]=useState(0);
-  const has=cloudConfigured();
-  const editKey=()=>{
-    const cur=cloudKey();
-    const v=window.prompt("Paste your Anthropic API key (sk-ant-...) to name dishes accurately with AI — including Asian dishes the on-device model can't.\n\nThe key is stored ONLY on this device. It is sent directly to Anthropic with each photo you share. Leave blank to remove.", cur);
-    if(v===null) return;
-    try{ if(v.trim()) localStorage.setItem("lensai_ai_key",v.trim()); else localStorage.removeItem("lensai_ai_key"); }catch(e){}
-    force(x=>x+1);
-  };
-  const cycleModel=()=>{
-    const i=CLOUD_MODELS.indexOf(cloudModel());
-    try{ localStorage.setItem("lensai_ai_model",CLOUD_MODELS[(i+1)%CLOUD_MODELS.length]); }catch(e){}
-    force(x=>x+1);
-  };
-  const btn=(label,onClick,strong)=>React.createElement("button",{onClick,style:{padding:"4px 9px",borderRadius:8,border:"1px solid "+(strong?"#6366f1":"rgba(255,255,255,0.07)"),background:strong?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:strong?"#c7d2fe":"#94a3b8",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},label);
-  return React.createElement("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
-    btn(has?"✨ AI dish names: ON":"✨ Enable accurate AI dish names",editKey,!has),
-    has&&btn(CLOUD_MODEL_LABEL[cloudModel()]||cloudModel(),cycleModel,false),
-    has&&btn("Remove",editKey,false),
-    React.createElement("span",{style:{fontSize:9,color:"#475569",flexBasis:"100%",lineHeight:1.4}},has?"Applies to the next photo you share. Key stored on this device only; photo + key go directly to Anthropic.":"Optional — uses your own Anthropic API key for spot-on dish recognition.")
+  const on=contentAIEnabled();
+  const toggle=()=>{ setContentAIEnabled(!on); force(x=>x+1); if(onToggle) onToggle(); };
+  return React.createElement("div",{style:{marginBottom:10}},
+    React.createElement("button",{onClick:toggle,style:{padding:"6px 11px",borderRadius:9,border:"1px solid "+(on?"#6366f1":"rgba(255,255,255,0.07)"),background:on?"rgba(99,102,241,0.18)":"rgba(255,255,255,0.03)",color:on?"#c7d2fe":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}, on?"🍽️ Food / photo detection: ON":"🍽️ Detect food / photo content: OFF"),
+    React.createElement("div",{style:{fontSize:9,color:"#64748b",lineHeight:1.4,marginTop:4}}, on?"Adds detected food/objects to captions. Note: Asian foods (and many specific dishes) might not be detectable.":"Off — captions use location, landmark & scene only. Turn on to add detected food/objects (note: Asian foods might not be detectable).")
   );
 }
 function Flag({children,color}){
@@ -22151,6 +22064,10 @@ function BatchAgent({onClose,onCloseApp}){
   const [aiStatus,setAiStatus]=useState(null); // null|"loading"|"ok"|"failed"|"none" -- content-AI state for the share sheet
   const [shareCopied,setShareCopied]=useState(false);
   const shareFileRef=useRef(null);                       // always an array of File
+  // Context + last auto-prefilled caption for the open share sheet, so toggling
+  // content recognition can rebuild captions without re-rendering the photos.
+  const shareCtxRef=useRef(null);
+  const shareAutoRef=useRef("");
   const [selectMode,setSelectMode]=useState(false);
   const [selected,setSelected]=useState(()=>new Set());
 
@@ -22224,22 +22141,35 @@ function BatchAgent({onClose,onCloseApp}){
   // it, then upgrades the suggestions (and the unedited caption) to reflect
   // all of them -- e.g. all the dishes across a meal, not just the first shot.
   // Never blocks the sheet; silent on any failure.
-  const upgradeCaptionsWithContent=(ctx, baseCaps)=>{
-    if(!ctx||!ctx.files||!ctx.files.length){ setAiStatus(null); return; }
+  const upgradeCaptionsWithContent=(ctx)=>{
+    if(!ctx||!ctx.files||!ctx.files.length||!contentAIEnabled()){ setAiStatus(null); return; }
     setAiStatus("loading");
     (async()=>{
       try{
-        const content=await analyzeContentWithCloud(ctx.files, 6);
+        const content=await analyzePhotosContent(ctx.files, 6);
         if(content&&content.found){
           const up=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content, stats:ctx.stats});
           setShareCaps(up);
-          const base0=(baseCaps&&baseCaps[0])||"";
-          setShareText(prev=>prev===base0?(up[0]||prev):prev);
+          const prevAuto=shareAutoRef.current;
+          setShareText(prev=>prev===prevAuto?(up[0]||prev):prev);
+          shareAutoRef.current=up[0]||shareAutoRef.current;
         }
-        const cloudOk=!!(content&&content.cloudDishes&&content.cloudDishes.length);
-        setAiStatus(!content?(visionState()==="failed"?"failed":"none"):(content.inferErr&&!cloudOk)?"inferfail":content.found?"ok":"none");
+        setAiStatus(!content?(visionState()==="failed"?"failed":"none"):content.inferErr?"inferfail":content.found?"ok":"none");
       }catch(e){ setAiStatus("failed"); /* heuristic captions already shown */ }
     })();
+  };
+  // Rebuild captions for the open share sheet when content recognition is
+  // toggled (strip/restore content + cuisine descriptors), then re-run if on.
+  const onToggleContentAI=()=>{
+    const ctx=shareCtxRef.current;
+    if(ctx){
+      const base=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats});
+      setShareCaps(base);
+      const prevAuto=shareAutoRef.current;
+      setShareText(prev=>prev===prevAuto?(base[0]||prev):prev);
+      shareAutoRef.current=base[0]||"";
+    }
+    upgradeCaptionsWithContent(ctx);
   };
 
   const presentShare=async(outFiles, caps)=>{
@@ -22262,8 +22192,9 @@ function BatchAgent({onClose,onCloseApp}){
       if(!outFiles.length) throw new Error("nothing to share");
       const ctx=await buildShareContext([r]);
       const caps0=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats});
+      shareCtxRef.current=ctx; shareAutoRef.current=caps0[0]||"";
       await presentShare(outFiles, caps0);
-      upgradeCaptionsWithContent(ctx, caps0);
+      upgradeCaptionsWithContent(ctx);
     }catch(err){
       setExportError("Couldn't prepare \""+(r.name||"that photo")+"\" for sharing -- "+(err&&err.message||"try again"));
     }finally{ setSharePrepIdx(null); _releaseScratch(); }
@@ -22278,8 +22209,9 @@ function BatchAgent({onClose,onCloseApp}){
       if(!outFiles.length) throw new Error("nothing to share");
       const ctx=await buildShareContext(rs);
       const caps0=buildShareCaptions(ctx.scene, ctx.loc, ctx.landmark, {venue:ctx.venue, content:null, stats:ctx.stats});
+      shareCtxRef.current=ctx; shareAutoRef.current=caps0[0]||"";
       await presentShare(outFiles, caps0);
-      upgradeCaptionsWithContent(ctx, caps0);
+      upgradeCaptionsWithContent(ctx);
     }catch(err){
       setExportError("Couldn't prepare the selected photos for sharing -- "+(err&&err.message||"try again"));
     }finally{ setSharePrepBusy(false); _releaseScratch(); }
@@ -22867,7 +22799,7 @@ function BatchAgent({onClose,onCloseApp}){
               React.createElement("div",{style:{position:"absolute",top:8,right:8,background:"rgba(0,0,0,0.7)",color:"#fff",fontSize:11,fontWeight:700,padding:"3px 9px",borderRadius:12,pointerEvents:"none"}},shareCount+" photos · swipe"))
           : shareThumb&&React.createElement("div",{style:{position:"relative",marginBottom:12}},React.createElement("img",{src:shareThumb,style:{width:"100%",maxHeight:"34vh",objectFit:"contain",borderRadius:10,background:"#000",display:"block"}})),
         React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Caption — for reference, review & edit before posting"),
-          React.createElement(CloudKeyBar,null),
+          React.createElement(ContentAIBar,{onToggle:onToggleContentAI}),
         aiStatus&&aiStatus!=="ok"&&React.createElement("div",{style:{fontSize:10,marginBottom:8,lineHeight:1.4,color:aiStatus==="loading"?"#94a3b8":"#fbbf24",display:"flex",alignItems:"center",gap:6}},aiStatus==="loading"?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Analyzing photo content (food, objects)…"):aiStatus==="failed"?"Photo-content AI couldn't load on this network/CDN -- captions use basic tags. Location/landmark still works.":aiStatus==="inferfail"?"Photo-content AI loaded but couldn't analyze on this device -- using basic tags.":"Photo AI found no specific items in this photo -- using basic tags."),React.createElement("textarea",{value:shareText,onChange:e=>setShareText(e.target.value),rows:6,placeholder:"Write a caption...",style:{width:"100%",boxSizing:"border-box",background:"#0b0e1a",border:"1px solid "+BORD,borderRadius:10,color:"#e2e8f0",fontSize:14,lineHeight:1.5,fontFamily:"inherit",padding:"10px 12px",resize:"vertical",marginBottom:10,maxHeight:"40vh",overflowY:"auto"}}),
         shareCaps.length>0&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155",marginBottom:6}},"Suggestions -- tap to add (combine several)"),
         shareCaps.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:14}},shareCaps.map((c,i)=>{const sel=capSelected(c);return React.createElement("button",{key:i,onClick:()=>toggleCaption(c),style:{textAlign:"left",padding:"9px 12px",borderRadius:10,border:"1px solid "+(sel?"#9db2e8":BORD),background:sel?"rgba(59,89,152,0.18)":"rgba(255,255,255,0.03)",color:sel?"#dbe4f7":"#cbd5e1",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",gap:8,alignItems:"flex-start",whiteSpace:"pre-wrap"}},React.createElement("span",{style:{flexShrink:0,width:16,height:16,borderRadius:4,border:"1px solid "+(sel?"#9db2e8":"#475569"),background:sel?"#1877f2":"transparent",color:"#fff",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}},sel?"✓":""),React.createElement("span",null,c));})),
