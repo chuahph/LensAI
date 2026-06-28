@@ -18972,6 +18972,17 @@ function _releaseScratch() {
   if (_scratchA) { _scratchA.width = 0; _scratchA.height = 0; }
   if (_scratchB) { _scratchB.width = 0; _scratchB.height = 0; }
   _scratchBuf = null;
+  _lumaScratchBuf = null;
+}
+// Frees just the per-pixel working planes processPixels allocated (the snapshot
+// copy + the luma plane, ~192MB each at 48MP) without disturbing the scratch
+// canvases. Called mid-render, the moment those planes are no longer needed, so
+// they don't stack with the output canvas at the memory peak. They're rebuilt
+// lazily on the next photo, so this only trims the peak, it doesn't slow steady
+// state appreciably.
+function _releasePixelScratch() {
+  _scratchBuf = null;
+  _lumaScratchBuf = null;
 }
 
 // Serializes every operation that draws into the shared scratch canvases /
@@ -20706,7 +20717,18 @@ async function renderFullFromData(data, adj, stats, crop) {
   // rather than cloning the whole full-res buffer -- see processPixels'
   // inPlace note. This halves the per-photo allocation on the 48MP export
   // path that was killing the tab on iOS.
+  //
+  // Peak-memory trim for the full-res export (the path that crashes/reloads the
+  // tab on a 48MP photo): the heavy processPixels pass only needs `data` plus
+  // its own snapshot/luma planes -- NOT the scratch canvas that drawFullResFrom-
+  // Bitmap/shareRenderAgent drew into (or a previous variant's output). That
+  // canvas is ~192MB at 48MP and was being held, idle, straight through the
+  // expensive pass. Free it now; imageDataToCanvas re-grows it afterwards.
+  if (_scratchA) { _scratchA.width = 0; _scratchA.height = 0; }
   const processed = await processPixels(data, adj, stats, { inPlace: true });
+  // Snapshot + luma planes are spent now -- free them BEFORE building the output
+  // canvas so those ~192MB buffers don't stack with it at the peak.
+  _releasePixelScratch();
   let outCv = imageDataToCanvas(processed);
   // Apply the same crop/straighten/perspective geometry the batch-edit
   // modal set on this result (no-op for results never opened for framing).
@@ -21668,7 +21690,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-29 00:52";
+const APP_BUILD = "2026-06-29 01:15";
 
 function App() {
   const canvasRef    = useRef(null);
