@@ -10,7 +10,15 @@
 // device that previously cached the old 3-file version cleanly drops
 // that stale cache and fetches the new single-file version.
 
-const CACHE_NAME = 'lensai-shell-v4';
+// v5: the fetch handler now only ever touches our own same-origin app-shell
+// requests. The previous version proxied EVERY request, including the
+// cross-origin TensorFlow.js CDN scripts and Google-hosted model weights the
+// share-caption content AI loads -- a service worker returning an opaque
+// response for a cross-origin <script> can break that script's execution
+// (notably on iOS Safari), which made the on-device food/object recognition
+// silently fail even on a working Wi-Fi connection. Third-party requests now
+// bypass the worker entirely and go straight to the network.
+const CACHE_NAME = 'lensai-shell-v5';
 
 const SHELL_FILES = [
   './',
@@ -43,6 +51,14 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const req = event.request;
+  const url = new URL(req.url);
+
+  // Only handle our own same-origin GET requests (the app shell). Everything
+  // cross-origin -- the TensorFlow.js CDN scripts, the Google-hosted model
+  // weights, the OpenStreetMap/Wikipedia caption lookups -- must go straight
+  // to the network untouched; a service worker has no business proxying
+  // third-party requests, and doing so can shadow or break them.
+  if (req.method !== 'GET' || url.origin !== self.location.origin) return;
 
   // Network-first, falling back to cache only when offline. This means
   // an app update always reaches a device that has a network connection
