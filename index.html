@@ -20944,10 +20944,179 @@ function computeFeaturedCells(n, W, H, gap) {
     .map(c => ({ x: c.x + restArea.x, y: c.y + restArea.y, w: c.w, h: c.h }));
   return [featured, ...restCells];
 }
+// Forced single row (ignores canvas orientation, unlike Filmstrip which
+// auto-picks row vs column) -- lets the user pin a strip layout deliberately.
+function computeRowsCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  const cellW = (W - gap * (n + 1)) / n;
+  const cells = [];
+  for (let i = 0; i < n; i++) cells.push({ x: gap + i * (cellW + gap), y: gap, w: cellW, h: H - gap * 2 });
+  return cells;
+}
+// Forced single column -- the vertical counterpart of Rows.
+function computeColumnsCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  const cellH = (H - gap * (n + 1)) / n;
+  const cells = [];
+  for (let i = 0; i < n; i++) cells.push({ x: gap, y: gap + i * (cellH + gap), w: W - gap * 2, h: cellH });
+  return cells;
+}
+// Mirror of Featured: the big cell sits on the right (wide canvas) or bottom
+// (square/tall canvas) instead of left/top.
+function computeFeaturedRightCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+  const wide = W >= H;
+  let featured, restArea;
+  if (wide) {
+    const fw = W * 0.6;
+    featured = { x: W - fw + gap * 0.5, y: gap, w: fw - gap * 1.5, h: H - gap * 2 };
+    restArea = { x: gap, y: gap, w: W - fw - gap * 1.5, h: H - gap * 2 };
+  } else {
+    const fh = H * 0.6;
+    featured = { x: gap, y: H - fh + gap * 0.5, w: W - gap * 2, h: fh - gap * 1.5 };
+    restArea = { x: gap, y: gap, w: W - gap * 2, h: H - fh - gap * 1.5 };
+  }
+  const restCells = computeGridCells(n - 1, restArea.w, restArea.h, gap)
+    .map(c => ({ x: c.x + restArea.x, y: c.y + restArea.y, w: c.w, h: c.h }));
+  return [featured, ...restCells];
+}
+// Diptych: the first TWO photos each get a large half-canvas cell (side by
+// side on a wide canvas, stacked on a square/tall one); any further photos
+// (n>2) fill a thin strip along the remaining edge as their own mini-grid.
+function computeSplitCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+  const wide = W >= H;
+  const hasExtra = n > 2;
+  const stripFrac = hasExtra ? 0.24 : 0;
+  const cells = [];
+  if (wide) {
+    const mainH = hasExtra ? H * (1 - stripFrac) : H;
+    const halfW = (W - gap * 3) / 2;
+    const cellH = mainH - gap * 2;
+    cells.push({ x: gap, y: gap, w: halfW, h: cellH });
+    cells.push({ x: gap * 2 + halfW, y: gap, w: halfW, h: cellH });
+    if (hasExtra) {
+      const stripArea = { x: gap, y: mainH, w: W - gap * 2, h: H - mainH - gap };
+      computeGridCells(n - 2, stripArea.w, stripArea.h, gap)
+        .forEach(c => cells.push({ x: c.x + stripArea.x, y: c.y + stripArea.y, w: c.w, h: c.h }));
+    }
+  } else {
+    const mainW = hasExtra ? W * (1 - stripFrac) : W;
+    const halfH = (H - gap * 3) / 2;
+    const cellW = mainW - gap * 2;
+    cells.push({ x: gap, y: gap, w: cellW, h: halfH });
+    cells.push({ x: gap, y: gap * 2 + halfH, w: cellW, h: halfH });
+    if (hasExtra) {
+      const stripArea = { x: mainW, y: gap, w: W - mainW - gap, h: H - gap * 2 };
+      computeGridCells(n - 2, stripArea.w, stripArea.h, gap)
+        .forEach(c => cells.push({ x: c.x + stripArea.x, y: c.y + stripArea.y, w: c.w, h: c.h }));
+    }
+  }
+  return cells;
+}
+// Editorial/magazine layout: the first photo spans a 2x2 block of a virtual
+// grid, the rest fill the remaining slots in reading order -- a distinctly
+// different rhythm from Featured's single long strip.
+function computeMosaicCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+  const totalSlots = (n - 1) + 4; // the big cell costs 4 grid slots (2x2)
+  let cols = Math.max(2, Math.round(Math.sqrt(totalSlots * (W / H))));
+  let rows = Math.max(2, Math.ceil(totalSlots / cols));
+  while (cols * rows < totalSlots) rows++;
+  const cellW = (W - gap * (cols + 1)) / cols;
+  const cellH = (H - gap * (rows + 1)) / rows;
+  const cellRect = (c, r, colSpan, rowSpan) => ({
+    x: gap + c * (cellW + gap), y: gap + r * (cellH + gap),
+    w: cellW * colSpan + gap * (colSpan - 1), h: cellH * rowSpan + gap * (rowSpan - 1),
+  });
+  const cells = [cellRect(0, 0, 2, 2)];
+  const occupied = new Set(["0,0", "1,0", "0,1", "1,1"]);
+  let placed = 1;
+  outer:
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (placed >= n) break outer;
+      if (occupied.has(c + "," + r)) continue;
+      cells.push(cellRect(c, r, 1, 1));
+      placed++;
+    }
+  }
+  return cells;
+}
+// Deterministic pseudo-random in [-1,1] from an integer seed -- gives each
+// photo in a Polaroid layout a STABLE jitter/rotation (same every render) so
+// the scattered look doesn't visibly reshuffle itself as the user tweaks
+// other settings, unlike a true Math.random() would.
+function _seededJitter(seed) {
+  const s = Math.sin(seed * 12.9898 + 78.233) * 43758.5453;
+  return (s - Math.floor(s)) * 2 - 1;
+}
+// Scattered, overlapping "photos on a table" look: square-ish cards laid out
+// on a loose grid with per-photo jitter and a small rotation, each carrying an
+// extra `rot` (degrees) the rect-based layouts don't use.
+function computePolaroidCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
+  const rows = Math.ceil(n / cols);
+  const cellW = W / cols, cellH = H / rows;
+  const baseSize = Math.min(cellW, cellH) * 0.82;
+  const cells = [];
+  for (let i = 0; i < n; i++) {
+    const col = i % cols, row = Math.floor(i / cols);
+    const jx = _seededJitter(i * 2 + 1), jy = _seededJitter(i * 2 + 2), jr = _seededJitter(i * 2 + 3);
+    const cx = cellW * (col + 0.5) + jx * cellW * 0.12;
+    const cy = cellH * (row + 0.5) + jy * cellH * 0.12;
+    const size = baseSize * (0.9 + Math.abs(jr) * 0.15);
+    cells.push({ x: cx - size / 2, y: cy - size / 2, w: size, h: size, rot: jr * 10 });
+  }
+  return cells;
+}
 function computeCollageLayout(mode, n, W, H, gap) {
   if (mode === "filmstrip") return computeFilmstripCells(n, W, H, gap);
+  if (mode === "rows") return computeRowsCells(n, W, H, gap);
+  if (mode === "columns") return computeColumnsCells(n, W, H, gap);
   if (mode === "featured") return computeFeaturedCells(n, W, H, gap);
+  if (mode === "featuredRight") return computeFeaturedRightCells(n, W, H, gap);
+  if (mode === "split") return computeSplitCells(n, W, H, gap);
+  if (mode === "mosaic") return computeMosaicCells(n, W, H, gap);
+  if (mode === "circleGrid") return computeGridCells(n, W, H, gap);
+  if (mode === "polaroid") return computePolaroidCells(n, W, H, gap);
   return computeGridCells(n, W, H, gap);
+}
+// Draws one photo into its layout cell, styled per mode: circleGrid clips to a
+// circle inscribed in the cell; polaroid rotates around the cell's centre and
+// adds a white card border + soft shadow behind the photo (the classic
+// scattered-photos look) using the cell's own `rot` (degrees); every other
+// mode is a plain rectangular cover-fit.
+function drawCollageCell(ctx, srcCv, cell, mode) {
+  if (mode === "circleGrid") {
+    const cx = cell.x + cell.w / 2, cy = cell.y + cell.h / 2, r = Math.min(cell.w, cell.h) / 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.clip();
+    drawCoverImage(ctx, srcCv, cx - r, cy - r, r * 2, r * 2);
+    ctx.restore();
+    return;
+  }
+  if (mode === "polaroid") {
+    const cx = cell.x + cell.w / 2, cy = cell.y + cell.h / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate((cell.rot || 0) * Math.PI / 180);
+    const border = cell.w * 0.06, bottomBorder = cell.h * 0.16;
+    ctx.shadowColor = "rgba(0,0,0,0.35)"; ctx.shadowBlur = cell.w * 0.06; ctx.shadowOffsetY = cell.h * 0.02;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(-cell.w / 2 - border, -cell.h / 2 - border, cell.w + border * 2, cell.h + border * 2 + bottomBorder);
+    ctx.shadowColor = "transparent";
+    drawCoverImage(ctx, srcCv, -cell.w / 2, -cell.h / 2, cell.w, cell.h);
+    ctx.restore();
+    return;
+  }
+  drawCoverImage(ctx, srcCv, cell.x, cell.y, cell.w, cell.h);
 }
 // Builds the final collage canvas: computes the output size from the chosen
 // aspect ratio (capped to COLLAGE_MAX_AREA total pixels), lays out cells for
@@ -20978,7 +21147,7 @@ async function buildCollageCanvas(order, files, mode, aspectW, aspectH, gapFrac,
     if (file && cell) {
       try {
         const srcCv = await collageSourceCanvas(file, r.adj, r.stats, r.crop);
-        drawCoverImage(ctx, srcCv, cell.x, cell.y, cell.w, cell.h);
+        drawCollageCell(ctx, srcCv, cell, mode);
       } catch (e) { /* one photo failing to decode shouldn't blank the whole collage -- leave its cell as background */ }
     }
     if (onProgress) onProgress(i + 1, order.length);
@@ -23951,7 +24120,14 @@ const COLLAGE_BG_COLORS = { white: "#ffffff", black: "#000000", grey: "#94a3b8" 
 const COLLAGE_MODES = [
   { id: "grid", label: "Grid" },
   { id: "filmstrip", label: "Filmstrip" },
+  { id: "rows", label: "Rows" },
+  { id: "columns", label: "Columns" },
   { id: "featured", label: "Featured" },
+  { id: "featuredRight", label: "Featured Right" },
+  { id: "split", label: "Split" },
+  { id: "mosaic", label: "Mosaic" },
+  { id: "circleGrid", label: "Circle Grid" },
+  { id: "polaroid", label: "Polaroid" },
 ];
 // Composes 2+ already-corrected batch photos into one shareable image. The
 // live preview lays out each photo's existing preview-resolution thumb (r.thumb,
@@ -23984,6 +24160,12 @@ function CollageAgent({ initialOrder, files, onClose }) {
   const pMax = Math.max(aspect.w, aspect.h);
   const pW = 1000 * aspect.w / pMax, pH = 1000 * aspect.h / pMax;
   const previewCells = computeCollageLayout(mode, order.length, pW, pH, gapFrac * 1000);
+
+  // A "Downloaded ✓"/"Shared" label from a previous export otherwise stays on
+  // the button after the user switches layout/aspect/background -- misleading
+  // now that there are 10 layouts to flip through instead of 3, since it reads
+  // as if the file just saved already matches the newly-selected composition.
+  useEffect(() => { setDoneMsg(null); }, [mode, aspectId, customW, customH, gap, bgId]);
 
   const onTapCell = (i) => {
     if (busy) return;
@@ -24040,16 +24222,32 @@ function CollageAgent({ initialOrder, files, onClose }) {
         order.map((r, i) => {
           const c = previewCells[i]; if (!c) return null;
           const picked = pickedIdx === i;
+          // circleGrid/polaroid don't exist in buildCollageCanvas's cell rects
+          // themselves -- they're plain rects styled differently at draw time
+          // (see drawCollageCell) -- so the preview approximates the same look
+          // with CSS: a circular clip, or a rotated white "Polaroid card" border,
+          // rather than reproducing pixel-exact canvas output.
+          const shadows = [];
+          if (mode === "polaroid") shadows.push("0 0 0 4% #fff", "0 3px 10px rgba(0,0,0,0.45)");
+          if (picked) shadows.push("inset 0 0 0 3px #6366f1");
           return React.createElement("img", {
             key: (r.fileIndex != null ? r.fileIndex : i) + "-" + i, src: r.thumb, onClick: () => onTapCell(i),
-            style: { position: "absolute", left: (c.x / pW * 100) + "%", top: (c.y / pH * 100) + "%", width: (c.w / pW * 100) + "%", height: (c.h / pH * 100) + "%", objectFit: "cover", cursor: busy ? "default" : "pointer", boxShadow: picked ? "inset 0 0 0 3px #6366f1" : "none", filter: picked ? "brightness(1.15)" : "none" }
+            style: {
+              position: "absolute", left: (c.x / pW * 100) + "%", top: (c.y / pH * 100) + "%", width: (c.w / pW * 100) + "%", height: (c.h / pH * 100) + "%",
+              objectFit: "cover", cursor: busy ? "default" : "pointer",
+              borderRadius: mode === "circleGrid" ? "50%" : 0,
+              transform: mode === "polaroid" ? "rotate(" + (c.rot || 0) + "deg)" : "none",
+              background: mode === "polaroid" ? "#fff" : "transparent",
+              boxShadow: shadows.length ? shadows.join(", ") : "none",
+              filter: picked ? "brightness(1.15)" : "none",
+            }
           });
         })
       ),
       React.createElement("div", { style: { fontSize: 11, color: "#64748b", marginBottom: 12 } }, "Tap a photo, then tap another to swap their positions."),
       React.createElement("div", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", marginBottom: 6 } }, "Layout"),
-      React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12 } }, COLLAGE_MODES.map(m =>
-        React.createElement("button", { key: m.id, onClick: () => setMode(m.id), style: chipStyle(mode === m.id) }, m.label)
+      React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12, overflowX: "auto", scrollbarWidth: "none", paddingBottom: 2 } }, COLLAGE_MODES.map(m =>
+        React.createElement("button", { key: m.id, onClick: () => setMode(m.id), style: Object.assign({ flexShrink: 0, whiteSpace: "nowrap" }, chipStyle(mode === m.id)) }, m.label)
       )),
       React.createElement("div", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", marginBottom: 6 } }, "Shape"),
       React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: aspectId === "custom" ? 8 : 12 } },
