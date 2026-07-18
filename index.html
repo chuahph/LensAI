@@ -21865,7 +21865,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-06-29 08:19";
+const APP_BUILD = "2026-07-18 12:48";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -21875,9 +21875,9 @@ function App() {
   const modalAutoCloseRef = useRef(null);
   const hdrRef       = useRef(null);
   const statsRef     = useRef(null);
-  const fullResRef   = useRef(null);   // original image at true file resolution
-  const fullResStats = useRef(null);   // stats computed from full-res data
-  const srcFileRef   = useRef(null);   // the originally-opened File, kept so share can read its EXIF location
+  const srcFileRef   = useRef(null);   // the originally-opened File -- share's EXIF-location lookup, AND the
+                                        // source buildEditedExport decodes fresh from at Save/Share time
+                                        // (kept small; the full-res pixel buffer is never held long-term)
   const analyzedAdjRef = useRef(null); // adj snapshot right after Analyze (corrections only, no HDR)
   const enhancedAdjRef = useRef(null); // adj snapshot right after Enhance (corrections + HDR look)
 
@@ -21976,23 +21976,21 @@ function App() {
     image.onload=()=>{
       const origW=image.width, origH=image.height;
 
-      // -- Store full resolution for export, matching the original file as
-      // closely as the browser canvas allows. Raised from 8000px to 12000px:
-      // the old cap silently downscaled modern flagship phone photos (e.g.
-      // iPhone 15 Pro 48MP at 8064px, high-res DSLRs at 8256px) even though
-      // the user expects output resolution to exactly match the original.
-      // 12000px safely covers virtually all consumer/prosumer photography
-      // while staying within browser canvas memory limits.
+      // Full-resolution pixels are NOT materialized here any more -- they used
+      // to be drawn to a full-size canvas and getImageData'd immediately on
+      // load (a 48MP photo is ~192MB) and kept resident in fullResRef for the
+      // ENTIRE editing session, whether or not the user ever saves. That
+      // constant, avoidable footprint (on top of everything else the editor
+      // holds) was enough on its own to crash a memory-tight mobile tab just
+      // from loading a large photo. buildEditedExport now decodes the ORIGINAL
+      // FILE fresh, on demand, only when Save/Share actually needs it -- see
+      // its own comment for the rest of the reasoning. The capped export
+      // dimensions are still cheap to compute here (pure arithmetic, no canvas)
+      // since the Auto HDR toast below reports them.
       const FULL_MAX=12000;
       let fw=origW, fh=origH;
       if(fw>FULL_MAX){fh=Math.round(fh*FULL_MAX/fw);fw=FULL_MAX;}
       if(fh>FULL_MAX){fw=Math.round(fw*FULL_MAX/fh);fh=FULL_MAX;}
-      const fullCv=document.createElement("canvas");
-      fullCv.width=fw; fullCv.height=fh;
-      const fctx=fullCv.getContext("2d");
-      fctx.drawImage(image,0,0,fw,fh);
-      const fullData=fctx.getImageData(0,0,fw,fh);
-      fullResRef.current=fullData;
 
       // -- Downscale to preview (max 1200px) for fast real-time editing
       const PREV_MAX=1200;
@@ -22014,7 +22012,6 @@ function App() {
       // stats instead of re-scanning the whole image a second time.
       const stats=analyzeImage(prevData);
       statsRef.current=stats;
-      fullResStats.current=stats;
       setImgStats(stats);
 
       const bestHDR=autoSelectHDR(stats);
@@ -22234,8 +22231,7 @@ function App() {
     setHasEnhanced(false); setActiveHDR(null); hdrRef.current=null;
     setAutoHDR(null); setHistory([]); setImgStats(null);
     setOrigFileName(null); setCrop({ x: 0, y: 0, w: 1, h: 1 });
-    statsRef.current=null; fullResRef.current=null; fullResStats.current=null;
-    srcFileRef.current=null;
+    statsRef.current=null; srcFileRef.current=null;
     analyzedAdjRef.current=null; enhancedAdjRef.current=null;
   };
   // Runs the full-resolution export pipeline (process -> perspective ->
@@ -22251,9 +22247,29 @@ function App() {
       // Save should match what's on screen, not silently fall back to
       // the live edit if the user is previewing a different snapshot.
       const exportAdj = displayAdj;
-      const srcData  = fullResRef.current  || img;
-      const srcStats = fullResStats.current || statsRef.current;
-      let processed=await processPixels(srcData, exportAdj, srcStats);
+      // Decode the ORIGINAL FILE fresh here rather than reading a full-res
+      // buffer kept resident since load: a 48MP photo's pixels are ~192MB, and
+      // holding that from the moment the photo opens until the app resets --
+      // regardless of whether Save/Share is ever used -- was a large, constant
+      // memory footprint that could crash a phone on its own. Decoding on
+      // demand means it's only ever held for the few seconds an export takes,
+      // and (matching the zip-export path) a freshly-decoded, single-use buffer
+      // is safe to hand to processPixels with {inPlace:true}, skipping the
+      // extra full-resolution copy the live editor's own cached data would
+      // otherwise require.
+      let srcData, freshDecode = true;
+      try { srcData = drawFullResFromBitmap(await decodeAgent(srcFileRef.current)); }
+      catch (e) { srcData = img; freshDecode = false; } // defensive fallback -- should not happen
+      const srcStats = statsRef.current;
+      // inPlace only when srcData is the fresh, single-use decode above -- the
+      // defensive `img` fallback is the live editor's own cached preview data,
+      // which must NOT be mutated (see processPixels' inPlace note).
+      let processed=await processPixels(srcData, exportAdj, srcStats, {inPlace:freshDecode});
+      // The internal per-pixel working planes processPixels allocated (the
+      // snapshot copy + luma plane, ~192MB EACH at 48MP) are spent now -- free
+      // them before building the output canvas below so they don't stack with
+      // it at the peak (same fix already applied to the zip-export path).
+      _releasePixelScratch();
       const expW=processed.width, expH=processed.height;
       const expWarped=applyPerspective(imageDataToCanvas(processed), expW, expH, exportAdj.perspective);
       // processed's backing buffer (a full extra copy of the full-res pixel
@@ -22265,23 +22281,25 @@ function App() {
       processed=null;
       await new Promise(r=>setTimeout(r,0));
 
-      // Rotation needs its own destination canvas (the scale-up to cover
-      // the rotated frame's corners changes the pixel content), but at
-      // rotation=0 -- the common case -- it was previously still allocating
-      // a full second full-resolution canvas just to copy expWarped into it
-      // unchanged. Skipping that when there's nothing to rotate avoids
-      // duplicating the entire full-res buffer, a meaningful chunk of peak
-      // memory on a large photo that can otherwise push a mobile tab over
-      // its memory ceiling and get it killed by the OS mid-export.
+      // Rotation needs its own destination canvas (the scale-up to cover the
+      // rotated frame's corners changes the pixel content), but at rotation=0 --
+      // the common case -- nothing is allocated: skipping it entirely avoids
+      // duplicating the full-res buffer for a no-op copy. When rotation IS
+      // applied, reuse the OTHER shared scratch canvas as the destination
+      // instead of a brand-new `document.createElement("canvas")` -- imageData-
+      // ToCanvas/applyPerspective above already drew expWarped into _scratchA or
+      // _scratchB, so the one NOT currently holding expWarped is free to reuse,
+      // saving a whole extra full-res canvas backing store (~192MB at 48MP) that
+      // an ad-hoc canvas would otherwise add on top of everything else alive
+      // during export -- the actual cause of an intermittent OOM crash on Save
+      // for large photos.
       let exportCv=expWarped;
       if (exportAdj.rotation) {
-        const offscreen=document.createElement("canvas");
-        offscreen.width=expW;
-        offscreen.height=expH;
-        const octx=offscreen.getContext("2d");
+        const rotDst=_getScratch(expWarped===_scratchA?"B":"A", expW, expH);
+        const octx=rotDst.getContext("2d");
         if (!octx) throw new Error("Could not create export canvas");
         applyRotation(octx, expWarped, expW, expH, exportAdj.rotation);
-        exportCv=offscreen;
+        exportCv=rotDst;
       }
 
       // Crop is applied last, as a non-destructive framing step on the fully
