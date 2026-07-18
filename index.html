@@ -20869,32 +20869,20 @@ async function collageSourceCanvas(file, adj, stats, crop) {
   outCv = applyGeometryToCanvas(outCv, { rotation: adj.rotation, perspective: adj.perspective, crop });
   return outCv;
 }
-// Draws `src` into the rect (dx,dy,dw,dh) with CSS background-size:cover
-// semantics -- fills the whole rect, cropping whichever axis overflows,
-// never distorting the source's aspect ratio.
-function drawCoverImage(ctx, src, dx, dy, dw, dh) {
-  const sw = src.width, sh = src.height;
-  const scale = Math.max(dw / sw, dh / sh);
-  const rw = sw * scale, rh = sh * scale;
-  const rx = dx + (dw - rw) / 2, ry = dy + (dh - rh) / 2;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(dx, dy, dw, dh);
-  ctx.clip();
-  ctx.drawImage(src, rx, ry, rw, rh);
-  ctx.restore();
-}
-// Same "cover" base fit as drawCoverImage, but layers the photo's own
-// finger-driven pinch-zoom/pan/rotate on top (zoom multiplies the cover
-// scale, offX/offY are a pan in fractions of the cell size, rotDeg spins the
-// photo around the cell's own center). Pan is applied in screen space --
-// i.e. BEFORE rotation in the transform chain, as the outermost shift -- so
-// dragging a finger always nudges the visible crop the same screen
-// direction regardless of the photo's current rotation. This must stay in
-// lockstep with the live preview's CSS `transform: translate() rotate()
-// scale()` order (also outermost-to-innermost) so the exported image
-// matches what the user framed.
-function drawCoverImageTransformed(ctx, src, x, y, w, h, zoom, offX, offY, rotDeg) {
+// Draws `src` into the cell (x,y,w,h) starting from a "contain" base fit --
+// the WHOLE photo always visible, never cropped, letterboxed against the
+// collage background on whichever axis doesn't match the cell's aspect --
+// then layers the photo's own finger-driven pinch-zoom/pan/rotate on top
+// (zoom multiplies the base scale, so pinching past 1x is how a user
+// deliberately crops in to fill the cell if they want that look; offX/offY
+// are a pan in fractions of the cell size; rotDeg spins the photo around the
+// cell's own center). Pan is applied in screen space -- i.e. BEFORE rotation
+// in the transform chain, as the outermost shift -- so dragging a finger
+// always nudges the visible crop the same screen direction regardless of the
+// photo's current rotation. This must stay in lockstep with the live
+// preview's CSS `transform: translate() rotate() scale()` order (also
+// outermost-to-innermost) so the exported image matches what the user framed.
+function drawCellPhoto(ctx, src, x, y, w, h, zoom, offX, offY, rotDeg) {
   const cx = x + w / 2, cy = y + h / 2;
   ctx.save();
   ctx.beginPath();
@@ -20902,7 +20890,7 @@ function drawCoverImageTransformed(ctx, src, x, y, w, h, zoom, offX, offY, rotDe
   ctx.clip();
   ctx.translate(cx + (offX || 0) * w, cy + (offY || 0) * h);
   if (rotDeg) ctx.rotate(rotDeg * Math.PI / 180);
-  const scale = Math.max(w / src.width, h / src.height) * (zoom || 1);
+  const scale = Math.min(w / src.width, h / src.height) * (zoom || 1);
   const dw = src.width * scale, dh = src.height * scale;
   ctx.drawImage(src, -dw / 2, -dh / 2, dw, dh);
   ctx.restore();
@@ -21157,10 +21145,10 @@ function computeCollageLayout(mode, n, W, H, gap, manualFracs) {
 // circle inscribed in the cell; polaroid rotates around the cell's centre and
 // adds a white card border + soft shadow behind the photo (the classic
 // scattered-photos look) using the cell's own `rot` (degrees); every other
-// mode is a plain rectangular cover-fit. `xform` ({zoom,offX,offY,rot}) is the
+// mode is a plain rectangular contain-fit. `xform` ({zoom,offX,offY,rot}) is the
 // photo's own finger-driven pinch/pan/rotate framing, layered on top of
 // whichever mode-level positioning above -- applies in every layout, not just
-// rect ones, since it's implemented inside drawCoverImageTransformed rather
+// rect ones, since it's implemented inside drawCellPhoto rather
 // than as a mode-specific case.
 function drawCollageCell(ctx, srcCv, cell, mode, xform) {
   const xf = xform || {};
@@ -21170,7 +21158,7 @@ function drawCollageCell(ctx, srcCv, cell, mode, xform) {
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.clip();
-    drawCoverImageTransformed(ctx, srcCv, cx - r, cy - r, r * 2, r * 2, xf.zoom, xf.offX, xf.offY, xf.rot);
+    drawCellPhoto(ctx, srcCv, cx - r, cy - r, r * 2, r * 2, xf.zoom, xf.offX, xf.offY, xf.rot);
     ctx.restore();
     return;
   }
@@ -21184,11 +21172,11 @@ function drawCollageCell(ctx, srcCv, cell, mode, xform) {
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(-cell.w / 2 - border, -cell.h / 2 - border, cell.w + border * 2, cell.h + border * 2 + bottomBorder);
     ctx.shadowColor = "transparent";
-    drawCoverImageTransformed(ctx, srcCv, -cell.w / 2, -cell.h / 2, cell.w, cell.h, xf.zoom, xf.offX, xf.offY, xf.rot);
+    drawCellPhoto(ctx, srcCv, -cell.w / 2, -cell.h / 2, cell.w, cell.h, xf.zoom, xf.offX, xf.offY, xf.rot);
     ctx.restore();
     return;
   }
-  drawCoverImageTransformed(ctx, srcCv, cell.x, cell.y, cell.w, cell.h, xf.zoom, xf.offX, xf.offY, xf.rot);
+  drawCellPhoto(ctx, srcCv, cell.x, cell.y, cell.w, cell.h, xf.zoom, xf.offX, xf.offY, xf.rot);
 }
 // Builds the final collage canvas: computes the output size from the chosen
 // aspect ratio (capped to COLLAGE_MAX_AREA total pixels), lays out cells for
@@ -24462,11 +24450,11 @@ function CollageAgent({ initialOrder, files, onClose }) {
           }, React.createElement("img", {
             src: r.thumb, draggable: false,
             style: {
-              width: "100%", height: "100%", objectFit: "cover", pointerEvents: "none",
+              width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none",
               transformOrigin: "center center",
               // Pan (translate) outermost so it always shifts the same screen
               // direction regardless of the photo's own rotation, matching
-              // drawCoverImageTransformed's canvas transform order exactly.
+              // drawCellPhoto's canvas transform order exactly.
               transform: "translate(" + (offX * 100) + "%," + (offY * 100) + "%) rotate(" + rot + "deg) scale(" + zoom + ")",
             }
           }));
