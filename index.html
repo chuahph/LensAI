@@ -20829,6 +20829,165 @@ async function shareRenderAgent(file, adj, stats, crop) {
   return renderFullFromData(data, adj, stats, crop);
 }
 
+// === Auto Collage ======================================================
+// Composites several already-corrected batch photos into one shareable image.
+// Cell photos are capped smaller than a full share render (SHARE_MAX_DIM=2048)
+// since a collage cell is always a fraction of the output canvas -- this keeps
+// per-photo decode/process cheap even for a 9-photo collage.
+const COLLAGE_SRC_MAX_DIM = 1400;
+// Total output pixels capped so a big collage still encodes/renders quickly and
+// stays well within mobile memory limits, regardless of aspect ratio -- roughly
+// the same ballpark as a single SHARE_MAX_DIM-capped photo.
+const COLLAGE_MAX_AREA = 1600 * 1600;
+const COLLAGE_MAX_PHOTOS = 9;
+const COLLAGE_ASPECTS = [
+  { id: "square", label: "Square", w: 1, h: 1 },
+  { id: "portrait", label: "Portrait", w: 4, h: 5 },
+  { id: "story", label: "Story", w: 9, h: 16 },
+  { id: "landscape", label: "Landscape", w: 16, h: 9 },
+];
+// Decodes+corrects ONE photo capped at COLLAGE_SRC_MAX_DIM and returns a ready-
+// to-draw canvas (not an encoded blob) -- mirrors shareRenderAgent up to the
+// point of encoding, since a collage draws each photo straight into a cell
+// instead of exporting it standalone. Uses the shared scratch canvas, so
+// callers must draw/copy this canvas's pixels before preparing the next photo
+// (buildCollageCanvas does so immediately, one photo at a time -- never holds
+// more than one decoded photo in memory at once, the same discipline the zip-
+// export loop uses for the same reason).
+async function collageSourceCanvas(file, adj, stats, crop) {
+  const image = await decodeAgent(file);
+  let w = image.width, h = image.height;
+  if (w > COLLAGE_SRC_MAX_DIM) { h = Math.round(h * COLLAGE_SRC_MAX_DIM / w); w = COLLAGE_SRC_MAX_DIM; }
+  if (h > COLLAGE_SRC_MAX_DIM) { w = Math.round(w * COLLAGE_SRC_MAX_DIM / h); h = COLLAGE_SRC_MAX_DIM; }
+  const cv = _getScratch("A", w, h);
+  const ctx = cv.getContext("2d");
+  ctx.drawImage(image, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h);
+  if (typeof image.close === "function") image.close();
+  const processed = await processPixels(data, adj, stats, { inPlace: true });
+  let outCv = imageDataToCanvas(processed);
+  outCv = applyGeometryToCanvas(outCv, { rotation: adj.rotation, perspective: adj.perspective, crop });
+  return outCv;
+}
+// Draws `src` into the rect (dx,dy,dw,dh) with CSS background-size:cover
+// semantics -- fills the whole rect, cropping whichever axis overflows,
+// never distorting the source's aspect ratio.
+function drawCoverImage(ctx, src, dx, dy, dw, dh) {
+  const sw = src.width, sh = src.height;
+  const scale = Math.max(dw / sw, dh / sh);
+  const rw = sw * scale, rh = sh * scale;
+  const rx = dx + (dw - rw) / 2, ry = dy + (dh - rh) / 2;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(dx, dy, dw, dh);
+  ctx.clip();
+  ctx.drawImage(src, rx, ry, rw, rh);
+  ctx.restore();
+}
+// Justified grid: as square a cols x rows split as fits the canvas aspect
+// ratio, with the last (possibly partial) row centered instead of left-
+// aligned with a gap -- the standard "photo grid" layout.
+function computeGridCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  const cols = Math.max(1, Math.min(n, Math.round(Math.sqrt(n * (W / H)))));
+  const rows = Math.ceil(n / cols);
+  const cellW = (W - gap * (cols + 1)) / cols;
+  const cellH = (H - gap * (rows + 1)) / rows;
+  const cells = [];
+  let idx = 0;
+  for (let r = 0; r < rows && idx < n; r++) {
+    const remaining = Math.min(cols, n - idx);
+    const rowW = remaining * cellW + (remaining - 1) * gap;
+    const rowX0 = (W - rowW) / 2;
+    for (let c = 0; c < remaining; c++) {
+      cells.push({
+        x: rowX0 + c * (cellW + gap),
+        y: gap + r * (cellH + gap),
+        w: cellW, h: cellH,
+      });
+      idx++;
+    }
+  }
+  return cells;
+}
+// One row (wide canvas) or one column (tall canvas) of equal-size cells.
+function computeFilmstripCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  const cells = [];
+  if (W >= H) {
+    const cellW = (W - gap * (n + 1)) / n;
+    for (let i = 0; i < n; i++) cells.push({ x: gap + i * (cellW + gap), y: gap, w: cellW, h: H - gap * 2 });
+  } else {
+    const cellH = (H - gap * (n + 1)) / n;
+    for (let i = 0; i < n; i++) cells.push({ x: gap, y: gap + i * (cellH + gap), w: W - gap * 2, h: cellH });
+  }
+  return cells;
+}
+// One large "featured" cell (the first photo) plus the rest filling the
+// remainder as their own mini-grid -- featured takes the left 60% on a wide
+// canvas, or the top 60% on a square/tall one.
+function computeFeaturedCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+  const wide = W >= H;
+  let featured, restArea;
+  if (wide) {
+    const fw = W * 0.6;
+    featured = { x: gap, y: gap, w: fw - gap * 1.5, h: H - gap * 2 };
+    restArea = { x: fw + gap * 0.5, y: gap, w: W - fw - gap * 1.5, h: H - gap * 2 };
+  } else {
+    const fh = H * 0.6;
+    featured = { x: gap, y: gap, w: W - gap * 2, h: fh - gap * 1.5 };
+    restArea = { x: gap, y: fh + gap * 0.5, w: W - gap * 2, h: H - fh - gap * 1.5 };
+  }
+  const restCells = computeGridCells(n - 1, restArea.w, restArea.h, gap)
+    .map(c => ({ x: c.x + restArea.x, y: c.y + restArea.y, w: c.w, h: c.h }));
+  return [featured, ...restCells];
+}
+function computeCollageLayout(mode, n, W, H, gap) {
+  if (mode === "filmstrip") return computeFilmstripCells(n, W, H, gap);
+  if (mode === "featured") return computeFeaturedCells(n, W, H, gap);
+  return computeGridCells(n, W, H, gap);
+}
+// Builds the final collage canvas: computes the output size from the chosen
+// aspect ratio (capped to COLLAGE_MAX_AREA total pixels), lays out cells for
+// the given mode, then decodes+corrects+draws each ordered photo into its cell
+// ONE AT A TIME -- never more than one decoded photo resident in memory at
+// once, the same discipline the zip-export loop uses and for the same reason
+// (a handful of photos held simultaneously at even a capped resolution adds up
+// fast on a memory-tight phone). `order` is the list of { fileIndex, adj,
+// stats, crop } for each result, in the user's chosen display order. `gapFrac`
+// is the gap as a FRACTION of the output's larger dimension (not raw pixels),
+// so the same value the live preview uses (computed in its own normalized
+// coordinate space) reproduces an identical-looking gap at final resolution.
+async function buildCollageCanvas(order, files, mode, aspectW, aspectH, gapFrac, bgColor, onProgress) {
+  const ratio = aspectW / aspectH;
+  let W = Math.round(Math.sqrt(COLLAGE_MAX_AREA * ratio));
+  let H = Math.round(Math.sqrt(COLLAGE_MAX_AREA / ratio));
+  const gap = gapFrac * Math.max(W, H);
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = bgColor;
+  ctx.fillRect(0, 0, W, H);
+  const cells = computeCollageLayout(mode, order.length, W, H, gap);
+  for (let i = 0; i < order.length; i++) {
+    const r = order[i];
+    const file = files[r.fileIndex];
+    const cell = cells[i];
+    if (file && cell) {
+      try {
+        const srcCv = await collageSourceCanvas(file, r.adj, r.stats, r.crop);
+        drawCoverImage(ctx, srcCv, cell.x, cell.y, cell.w, cell.h);
+      } catch (e) { /* one photo failing to decode shouldn't blank the whole collage -- leave its cell as background */ }
+    }
+    if (onProgress) onProgress(i + 1, order.length);
+    await new Promise(res => setTimeout(res, 0));
+  }
+  _releaseScratch();
+  return cv;
+}
+
 // qaAgent only ever reads pctBlown/pctBlocked/isOverexposed/isUnderexposed,
 // but the QA recheck was running the full analyzeImage pipeline a second
 // time per photo (sky/skin/sharpness/edge-direction passes included) just
@@ -22986,6 +23145,7 @@ function BatchAgent({onClose,onCloseApp}){
   const shareCtxRef=useRef(null);
   const shareAutoRef=useRef("");
   const [selectMode,setSelectMode]=useState(false);
+  const [collageOpen,setCollageOpen]=useState(false);
   const [selected,setSelected]=useState(()=>new Set());
 
   const copyCaption=async()=>{
@@ -23629,7 +23789,9 @@ function BatchAgent({onClose,onCloseApp}){
           React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,minWidth:0}},
             (function(){ const all=shareableIdxs(); const allSel=all.length>0&&selected.size>=all.length; return React.createElement("button",{onClick:toggleSelectAll,disabled:!all.length,"aria-label":allSel?"Deselect all":"Select all","aria-pressed":allSel,title:allSel?"Deselect all":"Select all "+all.length+" photos",style:{flexShrink:0,display:"flex",alignItems:"center",gap:6,minHeight:44,padding:"0 12px",borderRadius:12,border:"1px solid "+(allSel?"#1877f2":"rgba(24,119,242,0.4)"),background:allSel?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:!all.length?"#475569":"#9db2e8",fontSize:12,fontWeight:700,cursor:all.length?"pointer":"not-allowed",fontFamily:"inherit"}},React.createElement("span",{style:{flexShrink:0,width:18,height:18,borderRadius:5,border:"1px solid "+(allSel?"#1877f2":"#475569"),background:allSel?"#1877f2":"transparent",color:"#fff",fontSize:13,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}},allSel?"✓":""),allSel?"All":"Select all"); })(),
             React.createElement("span",{style:{fontSize:11,color:"#9db2e8",fontWeight:600}},selected.size?selected.size+" selected":"Tap photos to select")),
-          React.createElement("button",{onClick:shareSelected,disabled:!selected.size||sharePrepBusy,style:{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:16,border:"none",background:(!selected.size||sharePrepBusy)?"rgba(24,119,242,0.3)":"#1877f2",color:"#fff",fontSize:12,fontWeight:800,cursor:(!selected.size||sharePrepBusy)?"not-allowed":"pointer",fontFamily:"inherit"}},sharePrepBusy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Preparing "+sharePrepDone+"/"+selected.size+"..."):"Share "+(selected.size||"")+" to Facebook")
+          React.createElement("div",{style:{display:"flex",gap:6,flexShrink:0}},
+            React.createElement("button",{onClick:()=>setCollageOpen(true),disabled:selected.size<2||selected.size>COLLAGE_MAX_PHOTOS,title:selected.size>COLLAGE_MAX_PHOTOS?"Collage supports up to "+COLLAGE_MAX_PHOTOS+" photos -- deselect some to continue":"Combine the selected photos into one collage image",style:{display:"flex",alignItems:"center",gap:6,padding:"7px 12px",borderRadius:16,border:"1px solid "+(selected.size<2||selected.size>COLLAGE_MAX_PHOTOS?"rgba(148,163,184,0.2)":"rgba(99,102,241,0.4)"),background:selected.size<2||selected.size>COLLAGE_MAX_PHOTOS?"rgba(148,163,184,0.08)":"rgba(99,102,241,0.15)",color:selected.size<2||selected.size>COLLAGE_MAX_PHOTOS?"#475569":"#a5b4fc",fontSize:12,fontWeight:800,cursor:selected.size<2||selected.size>COLLAGE_MAX_PHOTOS?"not-allowed":"pointer",fontFamily:"inherit"}},"Collage"),
+            React.createElement("button",{onClick:shareSelected,disabled:!selected.size||sharePrepBusy,style:{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:16,border:"none",background:(!selected.size||sharePrepBusy)?"rgba(24,119,242,0.3)":"#1877f2",color:"#fff",fontSize:12,fontWeight:800,cursor:(!selected.size||sharePrepBusy)?"not-allowed":"pointer",fontFamily:"inherit"}},sharePrepBusy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Preparing "+sharePrepDone+"/"+selected.size+"..."):"Share "+(selected.size||"")+" to Facebook"))
         ),
         exportError&&React.createElement("div",{style:{fontSize:11,color:"#f87171",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:8,padding:"8px 10px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}},
           React.createElement("span",null,exportError),
@@ -23776,6 +23938,146 @@ function BatchAgent({onClose,onCloseApp}){
         React.createElement("div",{style:{display:"flex",gap:8}},
           React.createElement("button",{onClick:copyCaption,style:{flexShrink:0,padding:"12px 14px",borderRadius:12,border:"1px solid "+BORD,background:shareCopied?"rgba(34,197,94,0.15)":"rgba(255,255,255,0.04)",color:shareCopied?"#86efac":"#cbd5e1",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},shareCopied?"Copied ✓":((shareText||"").indexOf("\n\n")>=0?"Copy all":"Copy caption")),
           React.createElement("button",{onClick:doShare,disabled:sharePreparing,style:{flex:1,padding:"12px",borderRadius:12,border:"none",background:sharePreparing?"rgba(24,119,242,0.4)":"#1877f2",color:"#fff",fontSize:14,fontWeight:800,cursor:sharePreparing?"wait":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},sharePreparing?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Preparing…"):"Share to Facebook"))
+      )
+    ),
+    collageOpen&&React.createElement(CollageAgent,{
+      initialOrder:[...selected].sort((a,b)=>a-b).map(i=>results[i]).filter(Boolean),
+      files, onClose:()=>setCollageOpen(false),
+    })
+  );
+}
+
+const COLLAGE_BG_COLORS = { white: "#ffffff", black: "#000000", grey: "#94a3b8" };
+const COLLAGE_MODES = [
+  { id: "grid", label: "Grid" },
+  { id: "filmstrip", label: "Filmstrip" },
+  { id: "featured", label: "Featured" },
+];
+// Composes 2+ already-corrected batch photos into one shareable image. The
+// live preview lays out each photo's existing preview-resolution thumb (r.thumb,
+// already computed by the batch run) in a percentage-based replica of the real
+// layout -- no canvas work happens until Save/Share actually builds the full
+// output (buildCollageCanvas), so dragging through layouts/ratios/order stays
+// instant regardless of how large the source photos are.
+function CollageAgent({ initialOrder, files, onClose }) {
+  const BORD = "rgba(255,255,255,0.07)";
+  const [order, setOrder] = useState(initialOrder);
+  const [mode, setMode] = useState("grid");
+  const [aspectId, setAspectId] = useState("square");
+  const [customW, setCustomW] = useState(1);
+  const [customH, setCustomH] = useState(1);
+  const [gap, setGap] = useState(6);
+  const [bgId, setBgId] = useState("white");
+  const [pickedIdx, setPickedIdx] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState("");
+  const [error, setError] = useState(null);
+  const [doneMsg, setDoneMsg] = useState(null);
+
+  const aspect = aspectId === "custom"
+    ? { w: Math.max(1, customW || 1), h: Math.max(1, customH || 1) }
+    : (COLLAGE_ASPECTS.find(a => a.id === aspectId) || COLLAGE_ASPECTS[0]);
+  const gapFrac = gap / 300;
+  // Normalized preview space (larger side = 1000) so the on-screen layout is
+  // geometrically identical to buildCollageCanvas's real-pixel proportions,
+  // regardless of the actual output resolution -- see buildCollageCanvas.
+  const pMax = Math.max(aspect.w, aspect.h);
+  const pW = 1000 * aspect.w / pMax, pH = 1000 * aspect.h / pMax;
+  const previewCells = computeCollageLayout(mode, order.length, pW, pH, gapFrac * 1000);
+
+  const onTapCell = (i) => {
+    if (busy) return;
+    setDoneMsg(null);
+    if (pickedIdx === null) { setPickedIdx(i); return; }
+    if (pickedIdx === i) { setPickedIdx(null); return; }
+    setOrder(prev => { const next = [...prev]; const tmp = next[i]; next[i] = next[pickedIdx]; next[pickedIdx] = tmp; return next; });
+    setPickedIdx(null);
+  };
+  const resetOrder = () => { setOrder(initialOrder); setPickedIdx(null); setDoneMsg(null); };
+
+  const doExport = async () => {
+    if (busy || order.length < 2) return;
+    setBusy(true); setError(null); setDoneMsg(null);
+    setBusyLabel("Rendering 0/" + order.length + "…");
+    acquireWakeLock();
+    try {
+      const cv = await withScratchLock(() => buildCollageCanvas(
+        order, files, mode, aspect.w, aspect.h, gapFrac, COLLAGE_BG_COLORS[bgId],
+        (done, total) => setBusyLabel("Rendering " + done + "/" + total + "…")
+      ));
+      const blob = await new Promise(res => cv.toBlob(res, "image/jpeg", 0.92));
+      if (!blob) throw new Error("Could not encode collage");
+      const finalBlob = await addExifDateToBlob(blob);
+      const file = new File([finalBlob], "collage-" + Date.now() + ".jpg", { type: "image/jpeg" });
+      const result = await shareImageWithCaption([file], "");
+      setDoneMsg(result === "shared" ? "Shared" : result === "saved" ? "Downloaded ✓" : null);
+    } catch (e) {
+      setError("Couldn't build the collage -- try again");
+    } finally {
+      setBusy(false); _releaseScratch(); releaseWakeLock();
+    }
+  };
+
+  const chipStyle = (active) => ({
+    padding: "6px 12px", borderRadius: 16, border: "1px solid " + (active ? "#6366f1" : BORD),
+    background: active ? "rgba(99,102,241,0.18)" : "rgba(255,255,255,0.03)",
+    color: active ? "#a5b4fc" : "#94a3b8", fontSize: 12, fontWeight: 600,
+    cursor: "pointer", fontFamily: "inherit", minHeight: 32,
+  });
+
+  return React.createElement("div", {
+    onClick: e => { if (e.target === e.currentTarget && !busy) onClose(); },
+    style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.82)", backdropFilter: "blur(12px)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 1100, animation: "fadeIn 0.2s", paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }
+  },
+    React.createElement("div", { style: { background: "#0d1220", borderRadius: "22px 22px 0 0", borderTop: "1px solid " + BORD, width: "100%", maxWidth: 520, maxHeight: "calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px)", overflowY: "auto", animation: "slideUp 0.3s ease-out", padding: "0 16px 16px" } },
+      React.createElement("div", { onClick: () => !busy && onClose(), style: { width: 48, height: 4, borderRadius: 2, background: "rgba(255,255,255,0.25)", margin: "12px auto 14px", cursor: "pointer" } }),
+      React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, position: "sticky", top: 0, zIndex: 5, background: "#0d1220", paddingTop: 4, paddingBottom: 8 } },
+        React.createElement("div", { style: { fontFamily: "'Space Grotesk',system-ui", fontWeight: 800, fontSize: 18, color: "#fff" } }, "Auto Collage — " + order.length + " photos"),
+        React.createElement("button", { onClick: () => !busy && onClose(), disabled: busy, "aria-label": "Close", style: { flexShrink: 0, width: 44, height: 44, marginRight: -6, borderRadius: "50%", border: "1px solid " + BORD, background: "rgba(255,255,255,0.08)", color: "#cbd5e1", fontSize: 24, lineHeight: 1, cursor: busy ? "not-allowed" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", opacity: busy ? 0.5 : 1 } }, "×")),
+      // Live preview -- percentage-positioned thumbs in a container locked to
+      // the chosen aspect ratio, so the composition previews instantly.
+      React.createElement("div", { style: { position: "relative", width: "100%", aspectRatio: aspect.w + "/" + aspect.h, background: COLLAGE_BG_COLORS[bgId], borderRadius: 10, overflow: "hidden", marginBottom: 6, border: "1px solid " + BORD } },
+        order.map((r, i) => {
+          const c = previewCells[i]; if (!c) return null;
+          const picked = pickedIdx === i;
+          return React.createElement("img", {
+            key: (r.fileIndex != null ? r.fileIndex : i) + "-" + i, src: r.thumb, onClick: () => onTapCell(i),
+            style: { position: "absolute", left: (c.x / pW * 100) + "%", top: (c.y / pH * 100) + "%", width: (c.w / pW * 100) + "%", height: (c.h / pH * 100) + "%", objectFit: "cover", cursor: busy ? "default" : "pointer", boxShadow: picked ? "inset 0 0 0 3px #6366f1" : "none", filter: picked ? "brightness(1.15)" : "none" }
+          });
+        })
+      ),
+      React.createElement("div", { style: { fontSize: 11, color: "#64748b", marginBottom: 12 } }, "Tap a photo, then tap another to swap their positions."),
+      React.createElement("div", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", marginBottom: 6 } }, "Layout"),
+      React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12 } }, COLLAGE_MODES.map(m =>
+        React.createElement("button", { key: m.id, onClick: () => setMode(m.id), style: chipStyle(mode === m.id) }, m.label)
+      )),
+      React.createElement("div", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", marginBottom: 6 } }, "Shape"),
+      React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: aspectId === "custom" ? 8 : 12 } },
+        COLLAGE_ASPECTS.map(a => React.createElement("button", { key: a.id, onClick: () => setAspectId(a.id), style: chipStyle(aspectId === a.id) }, a.label)),
+        React.createElement("button", { onClick: () => setAspectId("custom"), style: chipStyle(aspectId === "custom") }, "Custom")
+      ),
+      aspectId === "custom" && React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12 } },
+        React.createElement("input", { type: "number", min: 1, max: 50, value: customW, onChange: e => setCustomW(parseInt(e.target.value) || 1), style: { width: 60, minHeight: 36, background: "#0b0e1a", border: "1px solid " + BORD, borderRadius: 8, color: "#e2e8f0", fontSize: 13, padding: "6px 8px", fontFamily: "inherit" } }),
+        React.createElement("span", { style: { color: "#64748b", fontSize: 13 } }, ":"),
+        React.createElement("input", { type: "number", min: 1, max: 50, value: customH, onChange: e => setCustomH(parseInt(e.target.value) || 1), style: { width: 60, minHeight: 36, background: "#0b0e1a", border: "1px solid " + BORD, borderRadius: 8, color: "#e2e8f0", fontSize: 13, padding: "6px 8px", fontFamily: "inherit" } }),
+        React.createElement("span", { style: { color: "#64748b", fontSize: 11 } }, "width : height ratio")
+      ),
+      React.createElement("div", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", marginBottom: 6 } }, "Background"),
+      React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 12 } }, Object.keys(COLLAGE_BG_COLORS).map(id =>
+        React.createElement("button", {
+          key: id, onClick: () => setBgId(id), title: id, "aria-label": id + " background",
+          style: { width: 32, height: 32, borderRadius: "50%", border: "2px solid " + (bgId === id ? "#6366f1" : BORD), background: COLLAGE_BG_COLORS[id], cursor: "pointer" }
+        })
+      )),
+      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 14 } },
+        React.createElement("span", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", flexShrink: 0 } }, "Spacing"),
+        React.createElement("input", { type: "range", min: 0, max: 20, value: gap, onChange: e => setGap(parseInt(e.target.value)), style: { flex: 1 } }),
+        React.createElement("button", { onClick: resetOrder, style: { flexShrink: 0, padding: "5px 11px", borderRadius: 9, border: "1px solid " + BORD, background: "transparent", color: "#64748b", fontSize: 11, cursor: "pointer", fontFamily: "inherit" } }, "Reset order")
+      ),
+      error && React.createElement("div", { style: { fontSize: 11, color: "#f87171", background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, padding: "8px 10px", marginBottom: 12 } }, error),
+      React.createElement("div", { style: { display: "flex", gap: 8 } },
+        React.createElement("button", { onClick: doExport, disabled: busy || order.length < 2, style: { flex: 1, padding: "12px", borderRadius: 12, border: "none", background: busy ? "rgba(99,102,241,0.3)" : "linear-gradient(135deg,#6366f1,#8b5cf6)", color: "#fff", fontSize: 14, fontWeight: 800, cursor: busy ? "wait" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, minHeight: 44 } },
+          busy ? React.createElement(React.Fragment, null, React.createElement(Spin, null), busyLabel) : (doneMsg || "Save / Share Collage"))
       )
     )
   );
