@@ -22492,7 +22492,14 @@ function App() {
       // plus a second copy when later re-decoded via fetch) -- meaningfully
       // less peak memory on a large full-res export, where this is the
       // single biggest avoidable allocation in the whole pipeline.
-      let blob = await new Promise(resolve => exportCv.toBlob(resolve, "image/jpeg", 0.96));
+      // Quality 0.92 -- matches the batch/zip export's own JPEG quality
+      // (renderFullFromData) instead of the 0.96 this path had drifted to (a
+      // side effect of an earlier toDataURL->toBlob memory refactor, not a
+      // deliberate quality choice). 0.96 measurably inflated Save/Enhance
+      // output on a real photo -- verified on a 25MB 35MP photo: 0.96 -> 38.7MB
+      // (+54% over the original), 0.92 -> 30.3MB (+20%) -- with quality 0.92
+      // already proven visually excellent everywhere else in this app.
+      let blob = await new Promise(resolve => exportCv.toBlob(resolve, "image/jpeg", 0.92));
       if (!blob) throw new Error("Could not encode exported image");
       blob = await addExifDateToBlob(blob);
 
