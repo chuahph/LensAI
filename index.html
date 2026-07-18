@@ -19688,15 +19688,26 @@ async function reverseGeocodeAgent(gps) {
     // queued up behind it. 4s is generous for a normal successful round
     // trip but still keeps a worst-case stall well short of 10s once
     // combined with the ~1s/coordinate throttle wait above.
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
-    let res;
-    try {
-      res = await fetch(url, { headers: { Accept: "application/json" }, signal: controller.signal });
-    } finally {
-      clearTimeout(timeout);
+    // One retry on a failed/timed-out attempt before giving up and falling
+    // back to the raw coordinate bucket -- a single dropped packet or a
+    // momentarily slow cell connection would otherwise permanently demote an
+    // otherwise-resolvable photo to an unlabeled "gps_..." group, which (for
+    // a batch where every photo shares that same fallback bucket) makes
+    // location grouping look broken rather than just having hit one bad
+    // network blip.
+    let res, lastErr;
+    for (let attempt = 0; attempt < 2 && !res; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 500));
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 4000);
+      try {
+        const r = await fetch(url, { headers: { Accept: "application/json" }, signal: controller.signal });
+        if (!r.ok) throw new Error("geocode http " + r.status);
+        res = r;
+      } catch (e) { lastErr = e; }
+      finally { clearTimeout(timeout); }
     }
-    if (!res.ok) throw new Error("geocode http " + res.status);
+    if (!res) throw lastErr || new Error("geocode failed");
     const json = await res.json();
     const a = json.address || {};
     // A named POI is the most specific grouping a photo can have -- prefer
@@ -22420,7 +22431,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-07-19 01:07";
+const APP_BUILD = "2026-07-19 01:21";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -24012,6 +24023,16 @@ function BatchAgent({onClose,onCloseApp}){
     if(!g){ g={key,items:[]}; groups.push(g); }
     g.items.push(r);
   });
+  // A raw "gps_..."/"date_..." key is the fallback locationGroupAgent uses
+  // when reverse-geocoding fails or a photo has no embedded place name --
+  // still a perfectly valid grouping key (same coordinates/day still land
+  // together), but showing the literal coordinate string as a header reads
+  // as broken rather than "grouped, just unnamed".
+  const groupHeaderLabel=(key)=>{
+    if (/^gps_/.test(key)) return "Unnamed location";
+    if (/^date_/.test(key)) return key.slice(5);
+    return key;
+  };
   const BORD="rgba(255,255,255,0.07)";
 
   return React.createElement("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",backdropFilter:"blur(12px)",display:"flex",alignItems:"flex-end",zIndex:60,animation:"fadeIn 0.2s",paddingTop:"env(safe-area-inset-top)",paddingBottom:"env(safe-area-inset-bottom)"},onClick:e=>{if(e.target===e.currentTarget&&!busy) onClose();}},
@@ -24069,14 +24090,15 @@ function BatchAgent({onClose,onCloseApp}){
             React.createElement("button",{onClick:()=>{ if(selectMode) exitSelect(); else setSelectMode(true); },title:"Select multiple photos to share to Facebook together",style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(selectMode?"#1877f2":"rgba(24,119,242,0.4)"),background:selectMode?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:"#9db2e8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},selectMode?"Cancel select":"Share"),
             (function(){
               // A top-level peer of Share/Download/Collage rather than nested
-              // inside the selectMode sub-bar -- tapping it works on its own
-              // (enters select mode and selects everything in one go) instead
-              // of requiring Share to be tapped first just to reveal it. Once
-              // already selecting, it keeps its old select-all/deselect-all
-              // toggle behavior.
+              // inside the selectMode sub-bar. The FIRST tap only enters
+              // select mode -- it doesn't presume the user wants everything,
+              // it just opens up the choice: tap individual photos to select
+              // some, or tap this same button again to select all of them.
+              // Once already selecting, it's the select-all/deselect-all
+              // toggle it always was.
               const all=shareableIdxs();
               const allSel=selectMode&&all.length>0&&selected.size>=all.length;
-              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); toggleSelectAll(); },disabled:!all.length,"aria-label":allSel?"Deselect all":"Select all","aria-pressed":allSel,title:allSel?"Deselect all":"Select all "+all.length+" photos",style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(allSel?"#1877f2":"rgba(24,119,242,0.4)"),background:allSel?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:all.length?"#9db2e8":"#475569",fontSize:11,fontWeight:700,cursor:all.length?"pointer":"not-allowed",fontFamily:"inherit"}},allSel?"All ✓":"Select all");
+              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); else toggleSelectAll(); },disabled:!all.length,"aria-label":!selectMode?"Select":(allSel?"Deselect all":"Select all"),"aria-pressed":allSel,title:!selectMode?"Start selecting photos -- tap individual photos, or tap this again to select all":(allSel?"Deselect all":"Select all "+all.length+" photos"),style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(allSel?"#1877f2":"rgba(24,119,242,0.4)"),background:allSel?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:all.length?"#9db2e8":"#475569",fontSize:11,fontWeight:700,cursor:all.length?"pointer":"not-allowed",fontFamily:"inherit"}},!selectMode?"Select":(allSel?"All ✓":"Select all"));
             })(),
             React.createElement("button",{onClick:downloadAll,disabled:zipping,title:"Bundles every result into one zip, organized into folders (Export/Organize Agent) -- a single reliable download instead of one-per-photo",style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping "+zipProgress.done+"/"+zipProgress.total+"...":"Download"),
             (function(){
@@ -24104,7 +24126,7 @@ function BatchAgent({onClose,onCloseApp}){
           React.createElement("button",{onClick:()=>setExportError(null),"aria-label":"Dismiss",style:{flexShrink:0,width:44,height:44,margin:"-10px -10px -10px 0",background:"none",border:"none",color:"#f87171",fontSize:20,cursor:"pointer",fontFamily:"inherit",lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center"}},"×")
         ),
         groups.map(g=>React.createElement("div",{key:g.key,style:{display:"flex",flexDirection:"column",gap:6}},
-          groups.length>1&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},g.key+" ("+g.items.length+")"),
+          (groups.length>1||g.key!=="other")&&React.createElement("div",{style:{fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#334155"}},groupHeaderLabel(g.key)+" ("+g.items.length+")"),
           React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(96px,1fr))",gap:8}},g.items.map((r,i)=>{
             const ridx=results.indexOf(r);
             const selectable=selectMode&&!r.error&&!r.culled;
