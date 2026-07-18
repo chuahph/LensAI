@@ -24090,14 +24090,15 @@ function BatchAgent({onClose,onCloseApp}){
             React.createElement("button",{onClick:()=>{ if(selectMode) exitSelect(); else setSelectMode(true); },title:"Select multiple photos to share to Facebook together",style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(selectMode?"#1877f2":"rgba(24,119,242,0.4)"),background:selectMode?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:"#9db2e8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},selectMode?"Cancel select":"Share"),
             (function(){
               // A top-level peer of Share/Download/Collage rather than nested
-              // inside the selectMode sub-bar -- tapping it works on its own
-              // (enters select mode and selects everything in one go) instead
-              // of requiring Share to be tapped first just to reveal it. Once
-              // already selecting, it keeps its old select-all/deselect-all
-              // toggle behavior.
+              // inside the selectMode sub-bar. The FIRST tap only enters
+              // select mode -- it doesn't presume the user wants everything,
+              // it just opens up the choice: tap individual photos to select
+              // some, or tap this same button again to select all of them.
+              // Once already selecting, it's the select-all/deselect-all
+              // toggle it always was.
               const all=shareableIdxs();
               const allSel=selectMode&&all.length>0&&selected.size>=all.length;
-              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); toggleSelectAll(); },disabled:!all.length,"aria-label":allSel?"Deselect all":"Select all","aria-pressed":allSel,title:allSel?"Deselect all":"Select all "+all.length+" photos",style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(allSel?"#1877f2":"rgba(24,119,242,0.4)"),background:allSel?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:all.length?"#9db2e8":"#475569",fontSize:11,fontWeight:700,cursor:all.length?"pointer":"not-allowed",fontFamily:"inherit"}},allSel?"All ✓":"Select all");
+              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); else toggleSelectAll(); },disabled:!all.length,"aria-label":!selectMode?"Select":(allSel?"Deselect all":"Select all"),"aria-pressed":allSel,title:!selectMode?"Start selecting photos -- tap individual photos, or tap this again to select all":(allSel?"Deselect all":"Select all "+all.length+" photos"),style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(allSel?"#1877f2":"rgba(24,119,242,0.4)"),background:allSel?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:all.length?"#9db2e8":"#475569",fontSize:11,fontWeight:700,cursor:all.length?"pointer":"not-allowed",fontFamily:"inherit"}},!selectMode?"Select":(allSel?"All ✓":"Select all"));
             })(),
             React.createElement("button",{onClick:downloadAll,disabled:zipping,title:"Bundles every result into one zip, organized into folders (Export/Organize Agent) -- a single reliable download instead of one-per-photo",style:{padding:"6px 12px",borderRadius:16,border:"1px solid rgba(34,197,94,0.3)",background:"rgba(34,197,94,0.1)",color:"#86efac",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping "+zipProgress.done+"/"+zipProgress.total+"...":"Download"),
             (function(){
