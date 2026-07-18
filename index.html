@@ -24390,10 +24390,10 @@ function CollageAgent({ initialOrder, files, onClose }) {
     setOrder(prev => prev.map((r, idx) => idx === i ? { ...r, ...patch } : r));
   };
   const clampZoom = z => Math.max(0.5, Math.min(4, z));
-  // Double-tap a single photo to snap just that one back to its original
-  // angle/size (zoom/pan/rotation), without touching order or any other
-  // photo's framing -- the quick per-photo undo "Reset framing" doesn't
-  // cover (that one resets every photo at once).
+  // Resets just this one photo's zoom/pan/rotation back to its original
+  // framing, without touching order or any other photo's -- the quick
+  // per-photo undo "Reset framing" doesn't cover (that one resets every
+  // photo at once). Used as the second half of the double-tap toggle below.
   const resetOnePhoto = (i) => {
     setOrder(prev => prev.map((r, idx) => {
       if (idx !== i) return r;
@@ -24401,6 +24401,35 @@ function CollageAgent({ initialOrder, files, onClose }) {
       return rest;
     }));
     setPickedIdx(null); setDoneMsg(null);
+  };
+  // Double-tap toggle: zoom in to fill the whole cell (cover-fit, centered,
+  // unrotated) if the photo isn't already filling it, or snap back to the
+  // original framing (contain-fit, no crop) if it already is -- mirrors the
+  // familiar double-tap-to-zoom gesture from photo apps while still giving
+  // an easy way back to "nothing cropped". The fill zoom is computed from
+  // the photo's actual loaded size against the cell's on-screen size (the
+  // exact multiplier that eliminates the contain-fit's letterboxing without
+  // over- or under-shooting it) -- falls back to a plain reset if that
+  // can't be read (image not loaded yet).
+  const fillOrResetPhoto = (i, cellEl) => {
+    const img = cellEl && cellEl.querySelector("img");
+    const rect = cellEl && cellEl.getBoundingClientRect();
+    const r0 = order[i] || {};
+    let fillZoom = null;
+    if (img && img.naturalWidth && img.naturalHeight && rect && rect.width && rect.height) {
+      const containScale = Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+      const coverScale = Math.max(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+      fillZoom = clampZoom(coverScale / containScale);
+    }
+    const curZoom = r0._zoom || 1, curRot = r0._rot || 0, curOffX = r0._offX || 0, curOffY = r0._offY || 0;
+    const alreadyFilled = fillZoom != null && Math.abs(curZoom - fillZoom) < 0.05 &&
+      Math.abs(curRot) < 1 && Math.abs(curOffX) < 0.02 && Math.abs(curOffY) < 0.02;
+    if (fillZoom != null && !alreadyFilled) {
+      updateXform(i, { _zoom: fillZoom, _rot: 0, _offX: 0, _offY: 0 });
+      setPickedIdx(null); setDoneMsg(null);
+    } else {
+      resetOnePhoto(i);
+    }
   };
 
   // Per-photo pinch-zoom/pan/rotate, tracked per cell index via pointerId so
@@ -24459,9 +24488,10 @@ function CollageAgent({ initialOrder, files, onClose }) {
         const lt = lastTapRef.current;
         if (lt.idx === i && (now - lt.time) < 350) {
           // Second tap on the SAME photo within the double-tap window --
-          // reset it instead of the usual pick/swap so a quick double-tap
-          // reliably means "undo my gesture", not "pick then un-pick".
-          resetOnePhoto(i);
+          // fill/reset it instead of the usual pick/swap so a quick
+          // double-tap reliably zooms or undoes the gesture, not "pick
+          // then un-pick".
+          fillOrResetPhoto(i, e.currentTarget);
           lastTapRef.current = { idx: null, time: 0 };
         } else {
           onTapCell(i);
