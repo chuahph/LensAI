@@ -17971,8 +17971,18 @@ function _tick() {
 // ============================================================
 // SKY ENHANCEMENT PASS - deep blue sky, not blown out
 // ============================================================
-async function enhanceSky(out, w, h, strength, toneBias, extraAdj) {
+// rowOffset/trueHeight: sky enhancement's vertical fade is a POSITION in the
+// photo (skies sit near the top), not a neighbour-radius effect, so it must be
+// measured against the TRUE full-image height/row -- not whatever `h`/`y` this
+// call happens to be given. Every other caller (the live editor, zip export)
+// passes a whole photo, where the slice IS the whole image, so the defaults
+// (rowOffset=0, trueHeight=h) reproduce today's exact behaviour unchanged.
+// Only processPixelsTiled's per-tile worker calls pass real values here, since
+// a tile is a partial ROW BAND of a larger photo and needs to know where that
+// band actually sits.
+async function enhanceSky(out, w, h, strength, toneBias, extraAdj, rowOffset, trueHeight) {
   const s = Math.min(1.0, strength * 1.8);
+  const rowOff = rowOffset || 0, trueH = trueHeight || h;
   // toneBias: -1 (cool/steel, urban) to +1 (warm/golden, nature). 0 = neutral.
   const tb = toneBias || 0;
   // extraAdj: user sliders that don't otherwise reach sky/cloud pixels --
@@ -17992,7 +18002,7 @@ async function enhanceSky(out, w, h, strength, toneBias, extraAdj) {
 
   for (let y = 0; y < h; y++) {
     if (y > 0 && y % chunkRows === 0) await _tick();
-    const yFrac = y / h;
+    const yFrac = (rowOff + y) / trueH;
     if (yFrac > 0.82) continue;
 
     for (let x = 0; x < w; x++) {
@@ -18170,23 +18180,28 @@ async function enhanceSky(out, w, h, strength, toneBias, extraAdj) {
 // ============================================================
 // DARK CHANNEL PRIOR DEHAZE
 // ============================================================
-async function dehazePass(out, w, h, strength) {
-  if (strength<=0) return;
-  const sv=strength/100;
+// Step 1 of dehazePass, split out on its own: estimates atmospheric light from
+// the FULL frame, not just the upper 25%. The old top-only scan assumed haze/
+// sky always sits at the top of the frame, which fails on portraits, macro,
+// and food photos where the haze-relevant bright region (a hazy background,
+// backlit window, foggy backdrop) can be anywhere or absent. Uses a fast
+// single-pass histogram-based percentile instead of sorting a large per-pixel
+// sample array (avoids the O(n log n) cost of the old method while also
+// covering the whole image). This is the ONE genuinely non-tileable step in
+// the whole pixel pipeline (a true whole-image reduction, not a local/
+// neighbour-radius one), so the tiled export path (processPixelsTiled) computes
+// it once upfront across the FULL image and hands the result to every tile,
+// keeping tiled output pixel-identical to a single-threaded run. Histogram
+// bucket counts are summed here from a caller-given row range so a tiled
+// caller can also run this itself per-tile and combine the sums (associative --
+// mathematically identical to a single full-image scan either way).
+async function dehazeAtmScan(out, w, h, rowStart, rowEnd) {
   const chunkRows = _chunkRows(w);
-
-  // Step 1: Estimate atmospheric light from the FULL frame, not just the
-  // upper 25%. The old top-only scan assumed haze/sky always sits at the
-  // top of the frame, which fails on portraits, macro, and food photos
-  // where the haze-relevant bright region (a hazy background, backlit
-  // window, foggy backdrop) can be anywhere or absent. Uses a fast
-  // single-pass histogram-based percentile instead of sorting a large
-  // per-pixel sample array (avoids the O(n log n) cost of the old method
-  // while also covering the whole image).
+  const y0 = rowStart == null ? 0 : rowStart, y1 = rowEnd == null ? h : rowEnd;
   const atmBuckets=new Array(26).fill(0); // buckets of 10 lum each, 0-255
   const atmBucketSums=new Array(26).fill(null).map(()=>[0,0,0]);
-  for (let y=0;y<h;y++) {
-    if (y > 0 && y % chunkRows === 0) await _tick();
+  for (let y=y0;y<y1;y++) {
+    if (y > y0 && (y-y0) % chunkRows === 0) await _tick();
     for (let x=0;x<w;x++) {
       const i=(y*w+x)*4;
       const lum=out[i]*0.299+out[i+1]*0.587+out[i+2]*0.114;
@@ -18199,6 +18214,13 @@ async function dehazePass(out, w, h, strength) {
       }
     }
   }
+  return { atmBuckets, atmBucketSums };
+}
+// Turns (possibly summed, across tiles) histogram buckets from dehazeAtmScan
+// into the final {atmR,atmG,atmB} triple -- pulled out so both the single-
+// threaded path and the tiled path compute this identically from whatever
+// bucket totals they have.
+function dehazeAtmFromBuckets(atmBuckets, atmBucketSums) {
   let atmR=210,atmG=212,atmB=218;
   const totalAtmSamples=atmBuckets.reduce((a,v)=>a+v,0);
   if (totalAtmSamples>20) {
@@ -18217,6 +18239,26 @@ async function dehazePass(out, w, h, strength) {
   atmR=Math.max(160,Math.min(220,atmR));
   atmG=Math.max(160,Math.min(220,atmG));
   atmB=Math.max(160,Math.min(225,atmB));
+  return { atmR, atmG, atmB };
+}
+// precomputedAtm: when the caller (processPixelsTiled) already knows the exact
+// whole-image atmospheric light, pass it here to skip step 1 entirely --
+// tiled workers don't each have the full image, so they can't recompute this
+// themselves and must be given the SAME value the single-threaded path would
+// have derived, or dehaze's output would differ per tile (a real quality
+// regression, not just a performance detail).
+async function dehazePass(out, w, h, strength, precomputedAtm) {
+  if (strength<=0) return;
+  const sv=strength/100;
+  const chunkRows = _chunkRows(w);
+
+  let atmR, atmG, atmB;
+  if (precomputedAtm) {
+    ({ atmR, atmG, atmB } = precomputedAtm);
+  } else {
+    const { atmBuckets, atmBucketSums } = await dehazeAtmScan(out, w, h);
+    ({ atmR, atmG, atmB } = dehazeAtmFromBuckets(atmBuckets, atmBucketSums));
+  }
 
   // Step 2: Dark channel prior per pixel
   // omega=0.85 (haze removal strength), t_min=0.20 (preserve some depth)
@@ -18315,6 +18357,14 @@ async function processPixels(src, adj, imgStats, opts) {
   const out = (opts && opts.inPlace) ? src.data : new Uint8ClampedArray(src.data);
   const w=src.width, h=src.height;
   const chunkRows = _chunkRows(w);
+  // rowOffset/trueHeight: only set by processPixelsTiled's per-tile worker
+  // calls, where `src` is a partial ROW BAND of a larger photo, not the whole
+  // thing. Position-dependent passes (sky enhancement's vertical fade,
+  // vignette's centre) need the TRUE full-image row/height, not this slice's
+  // own -- every other caller leaves these unset, so rowOffset=0/trueHeight=h
+  // (the slice IS the whole image), reproducing today's behaviour exactly.
+  const rowOffset = (opts && opts.rowOffset) || 0;
+  const trueHeight = (opts && opts.trueHeight) || h;
 
   // Contrast-aware scaling: high-contrast scenes need gentler treatment
   const sceneContrast = imgStats ? imgStats.contrast : 50;
@@ -18731,7 +18781,7 @@ async function processPixels(src, adj, imgStats, opts) {
     if (imgStats && !imgStats.isHazy && !imgStats.isWashedSky) {
       dehazeScale *= 0.55;
     }
-    await dehazePass(out, w, h, adj.dehaze*dehazeScale);
+    await dehazePass(out, w, h, adj.dehaze*dehazeScale, opts && opts.precomputedDehazeAtm);
   }
 
   // 11. Structure - broad-radius local-contrast ("clarity") pop, damped on
@@ -18919,12 +18969,16 @@ async function processPixels(src, adj, imgStats, opts) {
     if (skyStr > 0.12) await enhanceSky(out, w, h, skyStr, toneBias, {
       shadows: adj.shadows, contrast: adj.contrast,
       structure: adj.structure, sharpening: adj.sharpening, highlights: adj.highlights,
-    });
+    }, rowOffset, trueHeight);
   }
 
   // 14. Vignette
   if (adj.vignette>0) {
-    const cx=w/2, cy=h/2, maxD2=cx*cx+cy*cy, vf=(adj.vignette/100)*1.5;
+    // cy/dy use the TRUE full-image centre/row (see rowOffset/trueHeight above)
+    // -- vignette shading is a fixed radial falloff from the photo's actual
+    // centre, so a tile covering only the image's middle rows must still shade
+    // relative to where that centre REALLY is, not the slice's own midpoint.
+    const cx=w/2, cy=trueHeight/2, maxD2=cx*cx+cy*cy, vf=(adj.vignette/100)*1.5;
     // dk only depends on (distance from center)/maxD, i.e. on the single
     // scalar sqrt(dist2/maxD2) -- so instead of a Math.sqrt + Math.pow per
     // pixel (the dominant cost of this otherwise-trivial radial falloff on
@@ -18940,7 +18994,7 @@ async function processPixels(src, adj, imgStats, opts) {
     for (let x = 0; x < w; x++) { const dx = x - cx; dx2[x] = dx * dx; }
     for (let y=0;y<h;y++) {
       if (y > 0 && y % chunkRows === 0) await _tick();
-      const dy=y-cy, dy2=dy*dy;
+      const dy=(rowOffset+y)-cy, dy2=dy*dy;
       const rowBase=y*w*4;
       for (let x=0;x<w;x++) {
         const idx=rowBase+x*4;
@@ -21103,16 +21157,23 @@ ZipWriter.prototype.finish = function () {
 let _renderWorkerURL = null;
 function _renderWorkerSource() {
   if (_renderWorkerURL) return _renderWorkerURL;
-  const named = [_chunkRows, _snapshot, _lumaPlane, dehazePass, enhanceSky, processPixels];
+  // dehazeAtmScan/dehazeAtmFromBuckets are included so dehazePass's own no-
+  // precomputed-value fallback (the ordinary whole-photo path used by the zip/
+  // batch export pool) still works standalone inside a worker exactly as on the
+  // main thread; the tiled single-photo path (processPixelsTiled) computes the
+  // scan itself on the main thread and passes precomputedDehazeAtm in below,
+  // since a per-tile worker only ever sees a SLICE of the image and can't
+  // reproduce the whole-image scan on its own.
+  const named = [_chunkRows, _snapshot, _lumaPlane, dehazeAtmScan, dehazeAtmFromBuckets, dehazePass, enhanceSky, processPixels];
   const src =
     "let _scratchBuf=null,_lumaScratchBuf=null;\n" +
     "const clamp=" + clamp.toString() + ";\n" +
     "const lerp=" + lerp.toString() + ";\n" +
     "function _tick(){}\n" +                       // no UI/hang-detector on a worker
     named.map(f => f.toString()).join("\n") + "\n" +
-    "onmessage=async(e)=>{const{buffer,w,h,adj,stats}=e.data;try{" +
+    "onmessage=async(e)=>{const{buffer,w,h,adj,stats,precomputedDehazeAtm,rowOffset,trueHeight}=e.data;try{" +
     "const img=new ImageData(new Uint8ClampedArray(buffer),w,h);" +
-    "const r=await processPixels(img,adj,stats,{inPlace:true});" +
+    "const r=await processPixels(img,adj,stats,{inPlace:true,precomputedDehazeAtm,rowOffset,trueHeight});" +
     "postMessage({ok:true,buffer:r.data.buffer},[r.data.buffer]);" +
     "}catch(err){postMessage({ok:false,error:String(err&&err.message||err)});}};";
   _renderWorkerURL = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
@@ -21130,16 +21191,19 @@ function makeRenderPool(n) {
   }
   const acquire = () => new Promise(res => { const w = idle.pop(); if (w) res(w); else waiters.push(res); });
   const release = (w) => { const next = waiters.shift(); if (next) next(w); else idle.push(w); };
-  // Runs processPixels for one image on a free worker. `buffer` is transferred
-  // in (and the processed buffer transferred back), so neither side copies the
-  // ~192MB pixel array. Resolves to the processed ArrayBuffer.
-  function run(buffer, w, h, adj, stats) {
+  // Runs processPixels for one image (or, from processPixelsTiled, one row-band
+  // slice of a larger image) on a free worker. `buffer` is transferred in (and
+  // the processed buffer transferred back), so neither side copies the pixel
+  // array. precomputedDehazeAtm/rowOffset/trueHeight are only used by the tiled
+  // path -- see dehazeAtmScan's and processPixels' rowOffset comments.
+  // Resolves to the processed ArrayBuffer.
+  function run(buffer, w, h, adj, stats, precomputedDehazeAtm, rowOffset, trueHeight) {
     return acquire().then(wk => new Promise((resolve, reject) => {
       const onMsg = (e) => { cleanup(); if (e.data && e.data.ok) resolve(e.data.buffer); else reject(new Error(e.data && e.data.error || "worker failed")); };
       const onErr = () => { cleanup(); reject(new Error("worker error")); };
       function cleanup() { wk.removeEventListener("message", onMsg); wk.removeEventListener("error", onErr); release(wk); }
       wk.addEventListener("message", onMsg); wk.addEventListener("error", onErr);
-      try { wk.postMessage({ buffer, w, h, adj, stats }, [buffer]); } catch (e) { cleanup(); reject(e); }
+      try { wk.postMessage({ buffer, w, h, adj, stats, precomputedDehazeAtm, rowOffset, trueHeight }, [buffer]); } catch (e) { cleanup(); reject(e); }
     }));
   }
   return { run, close() { workers.forEach(w => w.terminate()); } };
@@ -21162,6 +21226,109 @@ function _renderConcurrency(maxMP) {
   const budgetMB = 720;
   const byMem = Math.max(1, Math.floor(budgetMB / perPhotoMB));
   return Math.max(1, Math.min(byMem, cores - 1, 4));
+}
+
+// === Tiled single-photo pixel processing ==============================
+// Cumulative row-reach any pixel's FINAL value (after the whole processPixels
+// pipeline) can depend on, counting every spatially-dependent pass from input
+// to output: despeckle(1) + structure(its own R2+1=10 margin) + noise-
+// reduction(1) + sharpening(2) + sky enhancement(8) = 22 rows. Giving each
+// tile this many extra, correctly-computed rows on both sides (then keeping
+// only its own "core" rows, discarding the halo) reproduces EXACTLY what a
+// single top-to-bottom pass would have produced for those core rows -- the
+// halo rows absorb any edge-of-slice artifact a pass's own boundary handling
+// would otherwise introduce, far from the rows actually kept. Rounded up for
+// headroom; pixel-diff testing against the single-threaded path (not just this
+// arithmetic) is what actually establishes correctness.
+const TILE_HALO_ROWS = 32;
+// Splits ONE photo's pixel processing across several Web Workers by ROW BANDS,
+// instead of running processPixels single-threaded top to bottom. This is a
+// DIFFERENT kind of parallelism from the zip-export pool above (which runs
+// several DIFFERENT photos at once) -- this parallelizes a SINGLE photo, which
+// is what makes Save/Share fast for one edited photo rather than only helping
+// a multi-photo batch.
+//
+// Every spatially-dependent pass only reads a bounded number of neighbouring
+// rows (never the whole image), so TILE_HALO_ROWS of real input on each side of
+// a tile is enough for its core rows to come out pixel-identical to a single-
+// threaded run. The two exceptions -- dehaze's atmospheric-light estimate and
+// vignette/sky's use of the photo's true centre/vertical position -- are true
+// WHOLE-IMAGE properties, not neighbourhood ones: dehaze's estimate is computed
+// once up front (dehazeAtmScan over the full buffer, the exact single-threaded
+// algorithm) and handed to every tile, and every tile is told its real
+// rowOffset/trueHeight (see processPixels' comment) so position-based shading
+// lines up with the whole photo, not the tile's own slice.
+//
+// Falls back to the plain single-threaded processPixels whenever tiling
+// wouldn't help or isn't safe -- too few rows to tile meaningfully, Workers
+// unavailable, or anything throws -- so this can only ever speed Save up, never
+// change its output or reliability.
+async function processPixelsTiled(src, adj, imgStats, opts) {
+  const w = src.width, h = src.height;
+  const cores = Math.max(1, (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 2);
+  const tileCount = Math.max(1, Math.min(cores, 8));
+  // Not worth tiling: too few rows per tile to clear the halo overlap sensibly
+  // (each tile would be mostly halo), or only one core anyway -- run the
+  // ordinary single-threaded path untouched.
+  if (tileCount < 2 || h < TILE_HALO_ROWS * 4) {
+    return processPixels(src, adj, imgStats, opts);
+  }
+  let pool = null;
+  try { pool = makeRenderPool(tileCount); } catch (e) { pool = null; }
+  if (!pool) return processPixels(src, adj, imgStats, opts);
+
+  try {
+    const data = src.data;
+    // Dehaze's one true whole-image statistic, computed once, identically to
+    // the single-threaded path, and handed to every tile below.
+    let precomputedDehazeAtm = null;
+    if (adj.dehaze > 0) {
+      const { atmBuckets, atmBucketSums } = await dehazeAtmScan(data, w, h);
+      precomputedDehazeAtm = dehazeAtmFromBuckets(atmBuckets, atmBucketSums);
+    }
+
+    // Row-band boundaries, as even as possible.
+    const coreH = Math.ceil(h / tileCount);
+    const tiles = [];
+    for (let t = 0; t < tileCount; t++) {
+      const coreStart = t * coreH;
+      if (coreStart >= h) break;
+      const coreEnd = Math.min(h, coreStart + coreH);
+      const sliceStart = Math.max(0, coreStart - TILE_HALO_ROWS);
+      const sliceEnd = Math.min(h, coreEnd + TILE_HALO_ROWS);
+      tiles.push({ coreStart, coreEnd, sliceStart, sliceEnd });
+    }
+
+    const out = (opts && opts.inPlace) ? data : new Uint8ClampedArray(data);
+    // Extract every tile's padded slice from the ORIGINAL, untouched `data`
+    // (never from `out`) so tiles are unaffected by each other regardless of
+    // whether `out` aliases `data` -- each slice is sliced-copied (not a view),
+    // so it's safe to hand to a worker as a transferable, single-use buffer.
+    const results = await Promise.all(tiles.map(t => {
+      const sliceH = t.sliceEnd - t.sliceStart;
+      const sliceBytes = data.slice(t.sliceStart * w * 4, t.sliceEnd * w * 4);
+      return pool.run(sliceBytes.buffer, w, sliceH, adj, imgStats, precomputedDehazeAtm, t.sliceStart, h)
+        .then(buf => ({ t, buf }));
+    }));
+
+    for (const { t, buf } of results) {
+      const processed = new Uint8ClampedArray(buf);
+      const coreOffsetInSlice = t.coreStart - t.sliceStart; // rows, within the slice
+      const coreRows = t.coreEnd - t.coreStart;
+      const srcOffset = coreOffsetInSlice * w * 4;
+      const dstOffset = t.coreStart * w * 4;
+      // Keep only this tile's own CORE rows (discard its halo) and place them
+      // at their true position in the final output.
+      out.set(processed.subarray(srcOffset, srcOffset + coreRows * w * 4), dstOffset);
+    }
+    pool.close();
+    return new ImageData(out, w, h);
+  } catch (e) {
+    if (pool) pool.close();
+    // Any failure (a worker error, an unexpected exception) -- fall back to the
+    // proven single-threaded path rather than surface a broken/partial export.
+    return processPixels(src, adj, imgStats, opts);
+  }
 }
 
 async function exportOrganizeAgent(results, files, onProgress) {
@@ -21865,7 +22032,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-07-18 12:48";
+const APP_BUILD = "2026-07-18 13:29";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -22264,7 +22431,12 @@ function App() {
       // inPlace only when srcData is the fresh, single-use decode above -- the
       // defensive `img` fallback is the live editor's own cached preview data,
       // which must NOT be mutated (see processPixels' inPlace note).
-      let processed=await processPixels(srcData, exportAdj, srcStats, {inPlace:freshDecode});
+      // processPixelsTiled splits the pixel work across CPU cores for a real
+      // speedup on Save/Share (the dominant cost of both) -- see its own
+      // comment for why this reproduces single-threaded output exactly, not
+      // just approximately. Falls straight back to plain processPixels
+      // whenever tiling isn't available or the photo is too small to bother.
+      let processed=await processPixelsTiled(srcData, exportAdj, srcStats, {inPlace:freshDecode});
       // The internal per-pixel working planes processPixels allocated (the
       // snapshot copy + luma plane, ~192MB EACH at 48MP) are spent now -- free
       // them before building the output canvas below so they don't stack with
