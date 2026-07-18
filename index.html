@@ -22420,7 +22420,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-07-18 22:28";
+const APP_BUILD = "2026-07-18 22:42";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -23284,6 +23284,7 @@ const BATCH_PHOTO_LIMIT = 100;
 function BatchAgent({onClose,onCloseApp}){
   const fileInputRef=useRef(null);
   const folderInputRef=useRef(null);
+  const addFileInputRef=useRef(null);
   const [files,setFiles]=useState([]);
   // Multiple goals can be selected at once: each selected goal produces
   // its own exported variant per photo, so e.g. picking both "Smart HDR"
@@ -23634,45 +23635,98 @@ function BatchAgent({onClose,onCloseApp}){
 
   const overLimit=files.length>BATCH_PHOTO_LIMIT;
 
+  // Runs the goal-independent analyze + per-goal correction pipeline for
+  // just the given file indices, appending each finished result to
+  // `results` as it completes (functional setState update, so it's always
+  // built on top of whatever's already there) rather than replacing the
+  // whole array. Shared by the full "Run batch agent" pass (every index,
+  // results reset first by the caller) and "Add photos" (only the newly
+  // added indices, so previously analyzed photos are never redone).
+  const processIndices=async(fileList,indices)=>{
+    setProgressTotal(indices.length*goals.length);
+    let done=0;
+    for(let k=0;k<indices.length;k++){
+      const i=indices[k];
+      // decodeAgent/analysisAgent/locationGroupAgent (a reverse-geocode
+      // network call) are goal-independent -- run them once per photo
+      // here instead of once per goal below, so selecting multiple goals
+      // doesn't multiply decode time and network calls by goals.length.
+      let analyzed = null, analyzeErr = null;
+      try { analyzed = await withScratchLock(()=>analyzeFileForBatch(fileList[i], setStage)); }
+      catch(err) { analyzeErr = err; }
+      for(let j=0;j<goals.length;j++){
+        let item;
+        try {
+          if (analyzeErr) throw analyzeErr;
+          item = {...await withScratchLock(()=>batchProcessFile(fileList[i], goals[j], setStage, {skipFlagged}, analyzed)), fileIndex:i};
+        }
+        catch(err){
+          console.error("[LensAI] Batch item failed:", fileList[i].name, goals[j], err);
+          item = { name: fileList[i].name, goalId: goals[j], fileIndex:i, error: true };
+        }
+        done++;
+        setProgress(done);
+        setResults(prev=>[...prev,item]);
+        // Yield a tick between photos so the progress UI actually paints
+        // instead of the whole batch running inside one blocked frame.
+        await new Promise(r=>setTimeout(r,0));
+      }
+    }
+  };
+
   const run=async()=>{
     if(!files.length||!goals.length||busy||overLimit) return;
     setBusy(true); setProgress(0); setResults([]); setStage(null);
     exitSelect(); // re-running rebuilds results -- drop any stale share selection
     acquireWakeLock(); // keep the screen (and so the tab) awake for the whole batch
-    const total=files.length*goals.length;
-    setProgressTotal(total);
-    const out=[];
-    let done=0;
     try {
-      for(let i=0;i<files.length;i++){
-        // decodeAgent/analysisAgent/locationGroupAgent (a reverse-geocode
-        // network call) are goal-independent -- run them once per photo
-        // here instead of once per goal below, so selecting multiple goals
-        // doesn't multiply decode time and network calls by goals.length.
-        let analyzed = null, analyzeErr = null;
-        try { analyzed = await withScratchLock(()=>analyzeFileForBatch(files[i], setStage)); }
-        catch(err) { analyzeErr = err; }
-        for(let j=0;j<goals.length;j++){
-          try {
-            if (analyzeErr) throw analyzeErr;
-            out.push({...await withScratchLock(()=>batchProcessFile(files[i], goals[j], setStage, {skipFlagged}, analyzed)), fileIndex:i});
-          }
-          catch(err){
-            console.error("[LensAI] Batch item failed:", files[i].name, goals[j], err);
-            out.push({ name: files[i].name, goalId: goals[j], fileIndex:i, error: true });
-          }
-          done++;
-          setProgress(done);
-          setResults([...out]);
-          // Yield a tick between photos so the progress UI actually paints
-          // instead of the whole batch running inside one blocked frame.
-          await new Promise(r=>setTimeout(r,0));
-        }
-      }
+      await processIndices(files, files.map((_,i)=>i));
     } finally {
       setStage(null);
       setBusy(false);
       releaseWakeLock();
+    }
+  };
+
+  // Analyzes only the newly added photos (fileList already includes them,
+  // appended after the existing ones) and appends their results -- doesn't
+  // touch the existing results or the current share/collage selection,
+  // since every prior index still points at the same file it always did.
+  const addAndAnalyze=async(fileList,newIndices)=>{
+    if(!newIndices.length||!goals.length||busy) return;
+    setBusy(true); setProgress(0); setStage(null);
+    acquireWakeLock();
+    try {
+      await processIndices(fileList, newIndices);
+    } finally {
+      setStage(null);
+      setBusy(false);
+      releaseWakeLock();
+    }
+  };
+
+  // "Add photos" appends to the existing selection instead of replacing it
+  // (unlike onPick/"Choose photos", which is a fresh start and clears
+  // everything) -- if a batch has already been run, the newly added photos
+  // are analyzed and merged in immediately so the user doesn't have to
+  // remember to hit "Run batch agent" again; if the batch hasn't run yet,
+  // they're just appended to `files` and included whenever the user does
+  // run it.
+  const onAddFiles=(e)=>{
+    const added=Array.from(e.target.files||[]).filter(f=>f.type.startsWith("image/"));
+    e.target.value="";
+    if(!added.length||busy) return;
+    const startIdx=files.length;
+    const combined=[...files,...added].slice(0,BATCH_PHOTO_LIMIT);
+    const actuallyAdded=combined.length-startIdx;
+    if(actuallyAdded<=0) return; // already at the cap
+    setFiles(combined);
+    if(actuallyAdded<added.length){
+      setExportError("Only "+actuallyAdded+" of "+added.length+" new photo"+(added.length>1?"s":"")+" added -- batches are capped at "+BATCH_PHOTO_LIMIT+" total.");
+    }
+    if(results.length>0){
+      const newIndices=Array.from({length:actuallyAdded},(_,k)=>startIdx+k);
+      addAndAnalyze(combined,newIndices);
     }
   };
 
@@ -23973,9 +24027,11 @@ function BatchAgent({onClose,onCloseApp}){
         React.createElement("div",{style:{fontSize:12,color:"#64748b",lineHeight:1.5}},"Pick a batch of photos and one or more goals -- the agent analyzes and corrects each photo on its own, producing one exported variant per selected goal, no per-photo input needed. On iPhone/Android, \"Choose photos\" opens your Photos app picker -- open an album there and select all to load the whole thing in one go."),
         React.createElement("input",{ref:fileInputRef,type:"file",accept:"image/*",multiple:true,style:{display:"none"},onChange:onPick}),
         React.createElement("input",{ref:folderInputRef,type:"file",webkitdirectory:"",directory:"",multiple:true,style:{display:"none"},onChange:onPick}),
+        React.createElement("input",{ref:addFileInputRef,type:"file",accept:"image/*",multiple:true,style:{display:"none"},onChange:onAddFiles}),
         React.createElement("div",{style:{display:"flex",gap:6}},
           React.createElement("button",{onClick:()=>fileInputRef.current&&fileInputRef.current.click(),disabled:busy,style:{flex:1,padding:"10px 14px",borderRadius:10,border:"1px solid "+(overLimit?"rgba(248,113,113,0.5)":BORD),background:"rgba(255,255,255,0.04)",color:"#fff",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"left"}},files.length?files.length+" photo"+(files.length>1?"s":"")+" selected -- tap to change":"Choose photos"),
-          React.createElement("button",{onClick:()=>folderInputRef.current&&folderInputRef.current.click(),disabled:busy,title:"Load every photo inside a folder (and its subfolders)",style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#94a3b8",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},"Choose folder")
+          React.createElement("button",{onClick:()=>folderInputRef.current&&folderInputRef.current.click(),disabled:busy,title:"Load every photo inside a folder (and its subfolders)",style:{padding:"10px 14px",borderRadius:10,border:"1px solid "+BORD,background:"rgba(255,255,255,0.04)",color:"#94a3b8",fontSize:12,fontWeight:700,cursor:busy?"not-allowed":"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},"Choose folder"),
+          files.length>0&&React.createElement("button",{onClick:()=>addFileInputRef.current&&addFileInputRef.current.click(),disabled:busy||files.length>=BATCH_PHOTO_LIMIT,title:files.length>=BATCH_PHOTO_LIMIT?"Already at the "+BATCH_PHOTO_LIMIT+"-photo cap for a single batch":"Add more photos without losing what's already selected"+(results.length>0?" -- new ones are analyzed and merged in right away":""),style:{padding:"10px 14px",borderRadius:10,border:"1px solid rgba(99,102,241,0.4)",background:"rgba(99,102,241,0.1)",color:"#a5b4fc",fontSize:12,fontWeight:700,cursor:(busy||files.length>=BATCH_PHOTO_LIMIT)?"not-allowed":"pointer",fontFamily:"inherit",whiteSpace:"nowrap",opacity:(busy||files.length>=BATCH_PHOTO_LIMIT)?0.5:1}},"+ Add photos")
         ),
         overLimit&&React.createElement("div",{style:{fontSize:11,color:"#fca5a5",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:10,padding:"8px 11px",lineHeight:1.5}},
           files.length+" photos selected -- batches are capped at "+BATCH_PHOTO_LIMIT+" at a time to keep a single run from taking too long (location lookups and full-resolution downloads are processed one photo at a time). Remove some photos, or run this batch in smaller groups."
