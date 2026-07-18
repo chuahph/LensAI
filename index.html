@@ -22420,7 +22420,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-07-18 18:48";
+const APP_BUILD = "2026-07-18 21:36";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -24224,6 +24224,7 @@ function CollageAgent({ initialOrder, files, onClose }) {
   const [manualRowFracs, setManualRowFracs] = useState(null);
   const previewWrapRef = useRef(null);
   const gestureRef = useRef({});
+  const lastTapRef = useRef({ idx: null, time: 0 });
 
   const aspect = aspectId === "custom"
     ? { w: Math.max(1, customW || 1), h: Math.max(1, customH || 1) }
@@ -24290,6 +24291,18 @@ function CollageAgent({ initialOrder, files, onClose }) {
     setOrder(prev => prev.map((r, idx) => idx === i ? { ...r, ...patch } : r));
   };
   const clampZoom = z => Math.max(0.5, Math.min(4, z));
+  // Double-tap a single photo to snap just that one back to its original
+  // angle/size (zoom/pan/rotation), without touching order or any other
+  // photo's framing -- the quick per-photo undo "Reset framing" doesn't
+  // cover (that one resets every photo at once).
+  const resetOnePhoto = (i) => {
+    setOrder(prev => prev.map((r, idx) => {
+      if (idx !== i) return r;
+      const { _zoom, _offX, _offY, _rot, ...rest } = r;
+      return rest;
+    }));
+    setPickedIdx(null); setDoneMsg(null);
+  };
 
   // Per-photo pinch-zoom/pan/rotate, tracked per cell index via pointerId so
   // multiple simultaneous touches on the SAME photo compose into pinch/twist,
@@ -24342,7 +24355,20 @@ function CollageAgent({ initialOrder, files, onClose }) {
     if (!g) return;
     g.pointers.delete(e.pointerId);
     if (g.pointers.size === 0) {
-      if (!g.moved) onTapCell(i);
+      if (!g.moved) {
+        const now = Date.now();
+        const lt = lastTapRef.current;
+        if (lt.idx === i && (now - lt.time) < 350) {
+          // Second tap on the SAME photo within the double-tap window --
+          // reset it instead of the usual pick/swap so a quick double-tap
+          // reliably means "undo my gesture", not "pick then un-pick".
+          resetOnePhoto(i);
+          lastTapRef.current = { idx: null, time: 0 };
+        } else {
+          onTapCell(i);
+          lastTapRef.current = { idx: i, time: now };
+        }
+      }
       delete gestureRef.current[i];
     } else if (g.pointers.size === 1) {
       // Dropped from pinch back to a single finger -- re-baseline pan from
@@ -24469,7 +24495,7 @@ function CollageAgent({ initialOrder, files, onClose }) {
         }, React.createElement("div", { style: { height: 3, width: "36%", borderRadius: 2, background: "rgba(255,255,255,0.85)", boxShadow: "0 0 0 1px rgba(0,0,0,0.3)" } })))
       ),
       React.createElement("div", { style: { fontSize: 11, color: "#64748b", marginBottom: 12 } },
-        mode === "manual" ? "Drag a divider to resize. On each photo: pinch to zoom, twist to rotate, drag to pan; tap, then tap another, to swap." : "Tap a photo, then tap another to swap their positions. Pinch to zoom, twist to rotate, drag to pan."),
+        mode === "manual" ? "Drag a divider to resize. On each photo: pinch to zoom, twist to rotate, drag to pan, double-tap to reset; tap, then tap another, to swap." : "Tap a photo, then tap another to swap their positions. Pinch to zoom, twist to rotate, drag to pan, double-tap to reset."),
       React.createElement("div", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", marginBottom: 6 } }, "Layout"),
       React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12, overflowX: "auto", scrollbarWidth: "none", paddingBottom: 2 } }, COLLAGE_MODES.map(m =>
         React.createElement("button", { key: m.id, onClick: () => setMode(m.id), style: Object.assign({ flexShrink: 0, whiteSpace: "nowrap" }, chipStyle(mode === m.id)) }, m.label)
