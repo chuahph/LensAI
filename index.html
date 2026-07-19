@@ -24531,6 +24531,14 @@ function CollageAgent({ initialOrder, files, onClose }) {
     setOrder(prev => prev.map((r, idx) => idx === i ? { ...r, ...patch } : r));
   };
   const clampZoom = z => Math.max(0.5, Math.min(4, z));
+  // Soft rotation lock during a pinch: a small twist is the natural hand
+  // wobble that comes with pinching two fingers together/apart to zoom, not
+  // a deliberate rotate gesture -- absorbed rather than spinning the photo.
+  // A real, stronger twist still rotates normally, and the transition at the
+  // threshold is a plain subtraction rather than a hard cutoff, so rotation
+  // picks up smoothly from zero right as the twist crosses it instead of
+  // jumping.
+  const PINCH_ROTATION_LOCK_DEG = 10;
   // Resets just this one photo's zoom/pan/rotation back to its original
   // framing, without touching order or any other photo's -- the quick
   // per-photo undo "Reset framing" doesn't cover (that one resets every
@@ -24613,9 +24621,14 @@ function CollageAgent({ initialOrder, files, onClose }) {
       const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
       const angle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
       g.moved = true;
+      // Normalize into (-180,180] so a twist that happens to cross atan2's
+      // wraparound boundary doesn't register as a huge spurious jump.
+      let deltaDeg = (angle - g.startAngle) * 180 / Math.PI;
+      deltaDeg = ((deltaDeg + 180) % 360 + 360) % 360 - 180;
+      const lockedDeltaDeg = Math.sign(deltaDeg) * Math.max(0, Math.abs(deltaDeg) - PINCH_ROTATION_LOCK_DEG);
       updateXform(i, {
         _zoom: clampZoom(g.startZoom * (dist / g.startDist)),
-        _rot: g.startRot + (angle - g.startAngle) * 180 / Math.PI,
+        _rot: g.startRot + lockedDeltaDeg,
       });
     }
   };
