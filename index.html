@@ -24824,6 +24824,20 @@ function CollageAgent({ initialOrder, files, onClose }) {
         return (a && b) ? (a.y + a.h + b.y) / 2 : null;
       }).filter(v => v != null)
     : [];
+  // When the photo count doesn't evenly fill the grid, the LAST row has
+  // fewer cells than every row above it and gets its own independent
+  // column split (computeManualCells' partial-row renormalization) --
+  // completely unrelated to the column boundaries above it. A vertical
+  // divider drawn the full canvas height would then cross straight through
+  // that differently-shaped last row, landing on nothing in particular
+  // (exactly the "floating in empty space" look Masonry's divider had).
+  // Clamping the divider's height to stop at the last full row's bottom
+  // edge keeps it anchored only to the rows it actually describes.
+  const gridLastRowCount = gridCols > 0 ? order.length - gridCols * (gridRows - 1) : 0;
+  const gridLastRowPartial = gridRows > 1 && gridLastRowCount > 0 && gridLastRowCount < gridCols;
+  const colDividerBottomPct = (gridLastRowPartial && manualRowBoundaries.length)
+    ? (manualRowBoundaries[manualRowBoundaries.length - 1] / pH * 100)
+    : null;
   // Rows/Columns/Filmstrip (single axis) and Mosaic/Masonry (cells that can
   // SPAN multiple columns/rows, so reading boundaries off any one cell's
   // edges wouldn't reliably capture every seam) instead compute divider
@@ -25158,8 +25172,14 @@ function CollageAgent({ initialOrder, files, onClose }) {
         // Every grid-shaped layout's col/row dividers, whichever set actually
         // applies to the current mode (mutually exclusive -- at most one of
         // these four is ever non-empty at a time), rendered the same way.
-        [...manualColBoundaries, ...singleAxisColBoundaries, ...mosaicColBoundaries, ...masonryColBoundaries].map((x, i) => React.createElement("div", {
+        manualColBoundaries.map((x, i) => React.createElement("div", {
           key: "cdiv" + i, onPointerDown: dragDivider("col", i),
+          style: colDividerBottomPct != null
+            ? { position: "absolute", left: (x / pW * 100) + "%", top: 0, height: colDividerBottomPct + "%", width: 20, marginLeft: -10, cursor: "col-resize", touchAction: "none", zIndex: 4, display: "flex", alignItems: "center", justifyContent: "center" }
+            : { position: "absolute", left: (x / pW * 100) + "%", top: 0, bottom: 0, width: 20, marginLeft: -10, cursor: "col-resize", touchAction: "none", zIndex: 4, display: "flex", alignItems: "center", justifyContent: "center" }
+        }, React.createElement("div", { style: { width: 3, height: "36%", borderRadius: 2, background: "rgba(255,255,255,0.85)", boxShadow: "0 0 0 1px rgba(0,0,0,0.3)" } }))),
+        [...singleAxisColBoundaries, ...mosaicColBoundaries, ...masonryColBoundaries].map((x, i) => React.createElement("div", {
+          key: "cdiv2" + i, onPointerDown: dragDivider("col", i),
           style: { position: "absolute", left: (x / pW * 100) + "%", top: 0, bottom: 0, width: 20, marginLeft: -10, cursor: "col-resize", touchAction: "none", zIndex: 4, display: "flex", alignItems: "center", justifyContent: "center" }
         }, React.createElement("div", { style: { width: 3, height: "36%", borderRadius: 2, background: "rgba(255,255,255,0.85)", boxShadow: "0 0 0 1px rgba(0,0,0,0.3)" } }))),
         [...manualRowBoundaries, ...singleAxisRowBoundaries, ...mosaicRowBoundaries].map((y, i) => React.createElement("div", {
