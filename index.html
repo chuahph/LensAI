@@ -22775,7 +22775,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-07-19 12:25";
+const APP_BUILD = "2026-07-19 14:06";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -24824,6 +24824,20 @@ function CollageAgent({ initialOrder, files, onClose }) {
         return (a && b) ? (a.y + a.h + b.y) / 2 : null;
       }).filter(v => v != null)
     : [];
+  // When the photo count doesn't evenly fill the grid, the LAST row has
+  // fewer cells than every row above it and gets its own independent
+  // column split (computeManualCells' partial-row renormalization) --
+  // completely unrelated to the column boundaries above it. A vertical
+  // divider drawn the full canvas height would then cross straight through
+  // that differently-shaped last row, landing on nothing in particular
+  // (exactly the "floating in empty space" look Masonry's divider had).
+  // Clamping the divider's height to stop at the last full row's bottom
+  // edge keeps it anchored only to the rows it actually describes.
+  const gridLastRowCount = gridCols > 0 ? order.length - gridCols * (gridRows - 1) : 0;
+  const gridLastRowPartial = gridRows > 1 && gridLastRowCount > 0 && gridLastRowCount < gridCols;
+  const colDividerBottomPct = (gridLastRowPartial && manualRowBoundaries.length)
+    ? (manualRowBoundaries[manualRowBoundaries.length - 1] / pH * 100)
+    : null;
   // Rows/Columns/Filmstrip (single axis) and Mosaic/Masonry (cells that can
   // SPAN multiple columns/rows, so reading boundaries off any one cell's
   // edges wouldn't reliably capture every seam) instead compute divider
@@ -24935,6 +24949,30 @@ function CollageAgent({ initialOrder, files, onClose }) {
     } else {
       resetOnePhoto(i);
     }
+  };
+  // Bulk version of the fill half of fillOrResetPhoto: zooms EVERY photo to
+  // fill its own cell in one tap, instead of double-tapping each one --
+  // mainly for grid-shaped layouts where portrait photos land in
+  // landscape-shaped cells (or vice versa) and contain-fit's letterboxing
+  // on every cell in a column/row combines into what reads as one big gap,
+  // with a divider handle seemingly floating in the middle of it. Reads
+  // each cell's actual rendered size straight from the DOM (same as the
+  // single-photo version), so it's exact regardless of aspect ratio, cell
+  // count, or manual box-dimension overrides.
+  const fillAllPhotos = () => {
+    const wrap = previewWrapRef.current;
+    if (!wrap) return;
+    const cellEls = [...wrap.children].filter(el => el.querySelector && el.querySelector("img"));
+    setOrder(prev => prev.map((r, i) => {
+      const cellEl = cellEls[i];
+      const img = cellEl && cellEl.querySelector("img");
+      const rect = cellEl && cellEl.getBoundingClientRect();
+      if (!img || !img.naturalWidth || !img.naturalHeight || !rect || !rect.width || !rect.height) return r;
+      const containScale = Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+      const coverScale = Math.max(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+      return { ...r, _zoom: clampZoom(coverScale / containScale), _rot: 0, _offX: 0, _offY: 0 };
+    }));
+    setPickedIdx(null); setDoneMsg(null);
   };
 
   // Per-photo pinch-zoom/pan/rotate, tracked per cell index via pointerId so
@@ -25158,8 +25196,14 @@ function CollageAgent({ initialOrder, files, onClose }) {
         // Every grid-shaped layout's col/row dividers, whichever set actually
         // applies to the current mode (mutually exclusive -- at most one of
         // these four is ever non-empty at a time), rendered the same way.
-        [...manualColBoundaries, ...singleAxisColBoundaries, ...mosaicColBoundaries, ...masonryColBoundaries].map((x, i) => React.createElement("div", {
+        manualColBoundaries.map((x, i) => React.createElement("div", {
           key: "cdiv" + i, onPointerDown: dragDivider("col", i),
+          style: colDividerBottomPct != null
+            ? { position: "absolute", left: (x / pW * 100) + "%", top: 0, height: colDividerBottomPct + "%", width: 20, marginLeft: -10, cursor: "col-resize", touchAction: "none", zIndex: 4, display: "flex", alignItems: "center", justifyContent: "center" }
+            : { position: "absolute", left: (x / pW * 100) + "%", top: 0, bottom: 0, width: 20, marginLeft: -10, cursor: "col-resize", touchAction: "none", zIndex: 4, display: "flex", alignItems: "center", justifyContent: "center" }
+        }, React.createElement("div", { style: { width: 3, height: "36%", borderRadius: 2, background: "rgba(255,255,255,0.85)", boxShadow: "0 0 0 1px rgba(0,0,0,0.3)" } }))),
+        [...singleAxisColBoundaries, ...mosaicColBoundaries, ...masonryColBoundaries].map((x, i) => React.createElement("div", {
+          key: "cdiv2" + i, onPointerDown: dragDivider("col", i),
           style: { position: "absolute", left: (x / pW * 100) + "%", top: 0, bottom: 0, width: 20, marginLeft: -10, cursor: "col-resize", touchAction: "none", zIndex: 4, display: "flex", alignItems: "center", justifyContent: "center" }
         }, React.createElement("div", { style: { width: 3, height: "36%", borderRadius: 2, background: "rgba(255,255,255,0.85)", boxShadow: "0 0 0 1px rgba(0,0,0,0.3)" } }))),
         [...manualRowBoundaries, ...singleAxisRowBoundaries, ...mosaicRowBoundaries].map((y, i) => React.createElement("div", {
@@ -25238,6 +25282,7 @@ function CollageAgent({ initialOrder, files, onClose }) {
       React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 14 } },
         React.createElement("span", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", flexShrink: 0 } }, "Spacing"),
         React.createElement("input", { type: "range", min: 0, max: 20, value: gap, onChange: e => setGap(parseInt(e.target.value)), style: { flex: 1 } }),
+        React.createElement("button", { onClick: fillAllPhotos, title: "Zoom every photo to fill its own cell -- removes any letterboxing from a mismatched photo/cell aspect ratio", style: { flexShrink: 0, padding: "5px 11px", borderRadius: 9, border: "1px solid rgba(99,102,241,0.35)", background: "rgba(99,102,241,0.1)", color: "#a5b4fc", fontSize: 11, cursor: "pointer", fontFamily: "inherit" } }, "Fill all"),
         React.createElement("button", { onClick: resetOrder, style: { flexShrink: 0, padding: "5px 11px", borderRadius: 9, border: "1px solid " + BORD, background: "transparent", color: "#64748b", fontSize: 11, cursor: "pointer", fontFamily: "inherit" } }, "Reset order"),
         React.createElement("button", { onClick: resetFraming, style: { flexShrink: 0, padding: "5px 11px", borderRadius: 9, border: "1px solid " + BORD, background: "transparent", color: "#64748b", fontSize: 11, cursor: "pointer", fontFamily: "inherit" } }, "Reset framing")
       ),
