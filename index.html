@@ -20842,14 +20842,16 @@ async function shareRenderAgent(file, adj, stats, crop) {
 
 // === Auto Collage ======================================================
 // Composites several already-corrected batch photos into one shareable image.
-// Cell photos are capped smaller than a full share render (SHARE_MAX_DIM=2048)
-// since a collage cell is always a fraction of the output canvas -- this keeps
-// per-photo decode/process cheap even for a 9-photo collage.
-const COLLAGE_SRC_MAX_DIM = 1400;
-// Total output pixels capped so a big collage still encodes/renders quickly and
-// stays well within mobile memory limits, regardless of aspect ratio -- roughly
-// the same ballpark as a single SHARE_MAX_DIM-capped photo.
-const COLLAGE_MAX_AREA = 1600 * 1600;
+// Set to the highest quality this app's memory budget can reasonably take --
+// each source photo now decodes at up to SHARE_MAX_DIM itself (the same cap
+// a full single-photo share render uses), and the composited output canvas
+// is large enough that even a 9-photo collage still prints/frames well.
+const COLLAGE_SRC_MAX_DIM = SHARE_MAX_DIM;
+// Total output pixels capped so a big collage still encodes/renders in a
+// reasonable time and stays within mobile memory limits, regardless of
+// aspect ratio -- ~12 total megapixels, comparable to a modern phone's own
+// default photo resolution.
+const COLLAGE_MAX_AREA = 3500 * 3500;
 const COLLAGE_MAX_PHOTOS = 9;
 const COLLAGE_ASPECTS = [
   { id: "square", label: "Square", w: 1, h: 1 },
@@ -21391,6 +21393,24 @@ function computeFilmReelCells(n, W, H, gap, manualFracs) {
   const rowFracs = (manualFracs && manualFracs.rowFracs && manualFracs.rowFracs.length === n) ? manualFracs.rowFracs : new Array(n).fill(1 / n);
   return computeManualCells(n, W - bar * 2, H, gap, [1], rowFracs).map(c => ({ ...c, x: c.x + bar }));
 }
+// Per-card size override for the layouts that DON'T share edges (Polaroid,
+// Cascade, Pile, Ring, Zigzag, and every inset in Spotlight but its full-
+// bleed main photo) -- these have no adjacent cell to redistribute space
+// with the way a grid divider does, so instead each card gets its own
+// independent scale multiplier, applied centered on the card's own natural
+// position so growing/shrinking it doesn't shift where it's anchored.
+// `boxScales[i]` of 1 (or missing) leaves cell i untouched.
+function applyBoxScales(cells, boxScales, skipMain) {
+  if (!boxScales) return cells;
+  return cells.map((c, i) => {
+    if (!c || (skipMain && c.isMain)) return c;
+    const s = boxScales[i];
+    if (!s || s === 1) return c;
+    const cx = c.x + c.w / 2, cy = c.y + c.h / 2;
+    const w = c.w * s, h = c.h * s;
+    return { ...c, x: cx - w / 2, y: cy - h / 2, w, h };
+  });
+}
 // Layouts built on a shared row/column grid -- Grid, Circle Grid, Heart,
 // Scrapbook, and Manual Split are literally the same cols x rows-from-aspect-
 // ratio grid (computeManualGridDims), just with different default fractions
@@ -21399,8 +21419,10 @@ function computeFilmReelCells(n, W, H, gap, manualFracs) {
 // computeManualCells so every one can have its row heights/column widths
 // manually adjusted the same way, defaulting to even fractions
 // (computeManualCells's own partial-last-row renormalization) when there's
-// no override yet.
-function computeCollageLayout(mode, n, W, H, gap, manualFracs, manualSplitRatio) {
+// no override yet. `boxScales` (see applyBoxScales) is the equivalent
+// adjustment for the scattered layouts further down, which have no shared
+// column/row grid to hang a divider off of.
+function computeCollageLayout(mode, n, W, H, gap, manualFracs, manualSplitRatio, boxScales) {
   if (mode === "filmstrip") {
     const wide = W >= H;
     if (wide) {
@@ -21414,12 +21436,12 @@ function computeCollageLayout(mode, n, W, H, gap, manualFracs, manualSplitRatio)
   if (mode === "featured") return computeFeaturedCells(n, W, H, gap, manualSplitRatio);
   if (mode === "featuredRight") return computeFeaturedRightCells(n, W, H, gap, manualSplitRatio);
   if (mode === "split") return computeSplitCells(n, W, H, gap, manualSplitRatio);
-  if (mode === "polaroid") return computePolaroidCells(n, W, H, gap);
-  if (mode === "cascade") return computeCascadeCells(n, W, H, gap);
-  if (mode === "pile") return computePileCells(n, W, H, gap);
-  if (mode === "ring") return computeRingCells(n, W, H, gap);
-  if (mode === "zigzag") return computeZigzagCells(n, W, H, gap);
-  if (mode === "spotlight") return computeSpotlightCells(n, W, H, gap);
+  if (mode === "polaroid") return applyBoxScales(computePolaroidCells(n, W, H, gap), boxScales);
+  if (mode === "cascade") return applyBoxScales(computeCascadeCells(n, W, H, gap), boxScales);
+  if (mode === "pile") return applyBoxScales(computePileCells(n, W, H, gap), boxScales);
+  if (mode === "ring") return applyBoxScales(computeRingCells(n, W, H, gap), boxScales);
+  if (mode === "zigzag") return applyBoxScales(computeZigzagCells(n, W, H, gap), boxScales);
+  if (mode === "spotlight") return applyBoxScales(computeSpotlightCells(n, W, H, gap), boxScales, true);
   if (mode === "mosaic") return computeMosaicCells(n, W, H, gap, manualFracs);
   if (mode === "masonry") return computeMasonryCells(n, W, H, gap, manualFracs && manualFracs.colFracs);
   if (mode === "rows") {
@@ -21536,7 +21558,8 @@ async function buildCollageCanvas(order, files, mode, aspectW, aspectH, gapFrac,
   const ctx = cv.getContext("2d");
   ctx.fillStyle = bgColor;
   ctx.fillRect(0, 0, W, H);
-  const cells = computeCollageLayout(mode, order.length, W, H, gap, manualFracs, manualSplitRatio);
+  const boxScales = order.map(r => r._boxScale || 1);
+  const cells = computeCollageLayout(mode, order.length, W, H, gap, manualFracs, manualSplitRatio, boxScales);
   // Heart's and Star's silhouettes are an OVERALL canvas clip (not a
   // per-cell one, unlike circleGrid/ring) -- background is filled first so
   // the corners outside the shape stay a solid color rather than
@@ -22775,7 +22798,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-07-19 14:06";
+const APP_BUILD = "2026-07-19 14:24";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -24752,8 +24775,14 @@ function CollageAgent({ initialOrder, files, onClose }) {
   // Switching layouts always starts each one's manual adjustment fresh --
   // an override tuned for one layout's grid shape rarely means anything for
   // a different one (and the length-mismatch fallback above can't catch two
-  // modes that coincidentally share the same cols/rows count).
-  useEffect(() => { setManualColFracs(null); setManualRowFracs(null); setManualSplitRatio(null); }, [mode]);
+  // modes that coincidentally share the same cols/rows count). Per-card box
+  // scale is the same idea for the scattered layouts -- a size tuned for
+  // Polaroid's grid-slot cards means nothing once cells are laid out along
+  // Ring's circle or Zigzag's staircase instead.
+  useEffect(() => {
+    setManualColFracs(null); setManualRowFracs(null); setManualSplitRatio(null);
+    setOrder(prev => prev.map(r => { const { _boxScale, ...rest } = r; return rest; }));
+  }, [mode]);
 
   const aspect = aspectId === "custom"
     ? { w: Math.max(1, customW || 1), h: Math.max(1, customH || 1) }
@@ -24805,7 +24834,15 @@ function CollageAgent({ initialOrder, files, onClose }) {
   // one of these modes looks identical to before until the user drags it.
   const splitRatioDefault = mode === "split" ? 0.5 : 0.6;
   const splitRatioValue = manualSplitRatio == null ? splitRatioDefault : manualSplitRatio;
-  const previewCells = computeCollageLayout(mode, order.length, pW, pH, g1000, manualFracs, splitRatioValue);
+  // Any mode that ISN'T one of the shared-edge grid/divider families above
+  // gets a per-card resize handle instead (see applyBoxScales) -- computed
+  // as a complement rather than a fixed list of mode ids, so a brand new
+  // layout automatically gets adjustability (one way or the other) the
+  // moment it's added, without this needing to be updated by hand.
+  const COLLAGE_ROW_MAJOR_MODES = ["rows", "columns", "filmstrip", "filmReel", "mosaic", "masonry"];
+  const hasPerCardResize = !COLLAGE_FULL_GRID_MODES.includes(mode) && !COLLAGE_SPLIT_RATIO_MODES.includes(mode) && !COLLAGE_ROW_MAJOR_MODES.includes(mode);
+  const boxScales = order.map(r => r._boxScale || 1);
+  const previewCells = computeCollageLayout(mode, order.length, pW, pH, g1000, manualFracs, splitRatioValue, boxScales);
   // Divider-handle positions, read straight off the actual rendered cells
   // (not recomputed from fractions independently) so the drag handles
   // always line up pixel-for-pixel with the gap the user sees -- column
@@ -24890,7 +24927,7 @@ function CollageAgent({ initialOrder, files, onClose }) {
   // escape hatch since there's no per-photo undo for an errant gesture.
   const resetFraming = () => {
     setOrder(prev => prev.map(r => {
-      const { _zoom, _offX, _offY, _rot, ...rest } = r;
+      const { _zoom, _offX, _offY, _rot, _boxScale, ...rest } = r;
       return rest;
     }));
     setManualColFracs(null); setManualRowFracs(null); setManualSplitRatio(null);
@@ -25109,6 +25146,30 @@ function CollageAgent({ initialOrder, files, onClose }) {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
+  const BOX_SCALE_MIN = 0.4, BOX_SCALE_MAX = 2.5;
+  // Per-card resize handle drag, for the scattered layouts that have no
+  // shared cell edge to hang a divider off of (see hasPerCardResize/
+  // applyBoxScales). Scale is driven by the pointer's distance from the
+  // CARD'S OWN CENTER rather than a screen-axis delta, so it works the same
+  // way regardless of the card's rotation (Polaroid/Cascade/Pile tilt each
+  // card a few degrees) -- dragging away from center grows it, toward
+  // center shrinks it.
+  const dragBoxScale = (i, cellEl) => (e) => {
+    e.preventDefault(); e.stopPropagation();
+    setDoneMsg(null);
+    const rect = cellEl.getBoundingClientRect();
+    const cx = rect.x + rect.width / 2, cy = rect.y + rect.height / 2;
+    const startDist = Math.hypot(e.clientX - cx, e.clientY - cy) || 1;
+    const startScale = order[i]._boxScale || 1;
+    const onMove = (ev) => {
+      const dist = Math.hypot(ev.clientX - cx, ev.clientY - cy);
+      const scale = Math.max(BOX_SCALE_MIN, Math.min(BOX_SCALE_MAX, startScale * (dist / startDist)));
+      setOrder(prev => prev.map((r, idx) => idx === i ? { ...r, _boxScale: scale } : r));
+    };
+    const onUp = () => { window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
 
   const doExport = async () => {
     if (busy || order.length < 2) return;
@@ -25120,7 +25181,7 @@ function CollageAgent({ initialOrder, files, onClose }) {
         order, files, mode, aspect.w, aspect.h, gapFrac, COLLAGE_BG_COLORS[bgId],
         (done, total) => setBusyLabel("Rendering " + done + "/" + total + "…"), manualFracs, splitRatioValue
       ));
-      const blob = await new Promise(res => cv.toBlob(res, "image/jpeg", 0.92));
+      const blob = await new Promise(res => cv.toBlob(res, "image/jpeg", 0.98));
       if (!blob) throw new Error("Could not encode collage");
       const finalBlob = await addExifDateToBlob(blob);
       const file = new File([finalBlob], "collage-" + Date.now() + ".jpg", { type: "image/jpeg" });
@@ -25191,7 +25252,15 @@ function CollageAgent({ initialOrder, files, onClose }) {
               // drawCellPhoto's canvas transform order exactly.
               transform: "translate(" + (offX * 100) + "%," + (offY * 100) + "%) rotate(" + rot + "deg) scale(" + zoom + ")",
             }
-          }));
+          }),
+          // Scattered layouts (Polaroid/Cascade/Pile/Ring/Zigzag, and every
+          // Spotlight inset) have no shared cell edge for a divider to
+          // adjust, so each card gets its own corner resize grip instead --
+          // see hasPerCardResize/dragBoxScale.
+          hasPerCardResize && !c.isMain && React.createElement("div", {
+            key: "resize", onPointerDown: e => dragBoxScale(i, e.currentTarget.parentElement)(e),
+            style: { position: "absolute", bottom: 3, right: 3, width: 22, height: 22, borderRadius: "50%", background: "rgba(0,0,0,0.55)", border: "2px solid #fff", color: "#fff", fontSize: 11, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center", cursor: "nwse-resize", touchAction: "none", zIndex: 2, boxShadow: "0 1px 4px rgba(0,0,0,0.5)" }
+          }, "⤡"));
         }),
         // Every grid-shaped layout's col/row dividers, whichever set actually
         // applies to the current mode (mutually exclusive -- at most one of
@@ -25256,6 +25325,8 @@ function CollageAgent({ initialOrder, files, onClose }) {
       React.createElement("div", { style: { fontSize: 11, color: "#64748b", marginBottom: 12 } },
         (manualColBoundaries.length || manualRowBoundaries.length || singleAxisColBoundaries.length || singleAxisRowBoundaries.length || mosaicColBoundaries.length || masonryColBoundaries.length || splitDividerPos != null)
           ? "Drag a divider to resize. On each photo: pinch to zoom, twist to rotate, drag to pan, double-tap to reset; tap, then tap another, to swap."
+          : hasPerCardResize
+          ? "Drag a photo's corner handle to resize its own card. On each photo: pinch to zoom, twist to rotate, drag to pan, double-tap to reset; tap, then tap another, to swap."
           : "Tap a photo, then tap another to swap their positions. Pinch to zoom, twist to rotate, drag to pan, double-tap to reset."),
       React.createElement("div", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", marginBottom: 6 } }, "Layout"),
       React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12, overflowX: "auto", scrollbarWidth: "none", paddingBottom: 2 } }, COLLAGE_MODES.map(m =>
