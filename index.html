@@ -24591,6 +24591,7 @@ function BatchAgent({onClose,onCloseApp}){
 
 const COLLAGE_BG_COLORS = { white: "#ffffff", black: "#000000", grey: "#94a3b8" };
 const COLLAGE_MODES = [
+  { id: "manual", label: "Manual Split" },
   { id: "grid", label: "Grid" },
   { id: "filmstrip", label: "Filmstrip" },
   { id: "rows", label: "Rows" },
@@ -24605,7 +24606,6 @@ const COLLAGE_MODES = [
   { id: "cascade", label: "Cascade" },
   { id: "spotlight", label: "Spotlight" },
   { id: "heart", label: "Heart" },
-  { id: "manual", label: "Manual Split" },
   { id: "scrapbook", label: "Scrapbook" },
   { id: "filmReel", label: "Film Reel" },
   { id: "pile", label: "Pile" },
@@ -24679,10 +24679,12 @@ function CollageAgent({ initialOrder, files, onClose }) {
   // columns/rows its OWN grid has -- Grid/Circle Grid/Heart/Manual Split
   // share one cols x rows grid; Rows/Columns/Filmstrip are the 1-row/
   // 1-column special case of the same idea; Mosaic has its own totalSlots-
-  // based grid (the 2x2 block spans it); Masonry only has adjustable column
-  // WIDTHS (its item heights are auto-packed, there's no shared "row").
-  // Scattered layouts (Polaroid/Cascade/Spotlight) aren't in here at all --
-  // their cards don't share edges the way a grid's cells do.
+  // based grid (the 2x2 block spans it). Masonry is deliberately NOT
+  // manually adjustable -- its columns pack items to different heights, so
+  // a straight divider drawn the full column height visibly floats free of
+  // any actual photo edge in the shorter column, looking broken rather than
+  // useful. Scattered layouts (Polaroid/Cascade/Spotlight) aren't in here
+  // either -- their cards don't share edges the way a grid's cells do.
   const COLLAGE_FULL_GRID_MODES = ["manual", "grid", "circleGrid", "heart", "scrapbook"];
   const COLLAGE_SPLIT_RATIO_MODES = ["featured", "featuredRight", "split"];
   let gridCols = 0, gridRows = 0;
@@ -24740,7 +24742,10 @@ function CollageAgent({ initialOrder, files, onClose }) {
   const singleAxisRowBoundaries = singleAxisIsRow ? gridFracBoundaries(effectiveRowFracs, pH, g1000) : [];
   const mosaicColBoundaries = mode === "mosaic" ? gridFracBoundaries(effectiveColFracs, pW, g1000) : [];
   const mosaicRowBoundaries = mode === "mosaic" ? gridFracBoundaries(effectiveRowFracs, pH, g1000) : [];
-  const masonryColBoundaries = mode === "masonry" ? gridFracBoundaries(effectiveColFracs, pW, g1000) : [];
+  // Masonry never renders a divider (see the comment above COLLAGE_FULL_GRID_MODES) --
+  // effectiveColFracs still exists for it above, but only ever holds the even
+  // default, so computeMasonryCells draws its usual auto-packed columns.
+  const masonryColBoundaries = [];
   // The one divider Featured/Featured Right/Split have -- its position
   // follows each layout's own geometry exactly (see computeFeaturedCells/
   // computeFeaturedRightCells/computeSplitCells), so dragging it lines up
