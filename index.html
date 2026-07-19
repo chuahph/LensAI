@@ -20932,33 +20932,22 @@ function computeGridCells(n, W, H, gap) {
   }
   return cells;
 }
-// One row (wide canvas) or one column (tall canvas) of equal-size cells.
-function computeFilmstripCells(n, W, H, gap) {
-  if (n <= 0) return [];
-  const cells = [];
-  if (W >= H) {
-    const cellW = (W - gap * (n + 1)) / n;
-    for (let i = 0; i < n; i++) cells.push({ x: gap + i * (cellW + gap), y: gap, w: cellW, h: H - gap * 2 });
-  } else {
-    const cellH = (H - gap * (n + 1)) / n;
-    for (let i = 0; i < n; i++) cells.push({ x: gap, y: gap + i * (cellH + gap), w: W - gap * 2, h: cellH });
-  }
-  return cells;
-}
 // One large "featured" cell (the first photo) plus the rest filling the
-// remainder as their own mini-grid -- featured takes the left 60% on a wide
-// canvas, or the top 60% on a square/tall one.
-function computeFeaturedCells(n, W, H, gap) {
+// remainder as their own mini-grid -- featured takes the left `ratio` (default
+// 60%) on a wide canvas, or the top `ratio` on a square/tall one. `ratio` is
+// user-adjustable (drag the single divider between featured and the rest).
+function computeFeaturedCells(n, W, H, gap, ratio) {
   if (n <= 0) return [];
   if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+  const r = ratio == null ? 0.6 : ratio;
   const wide = W >= H;
   let featured, restArea;
   if (wide) {
-    const fw = W * 0.6;
+    const fw = W * r;
     featured = { x: gap, y: gap, w: fw - gap * 1.5, h: H - gap * 2 };
     restArea = { x: fw + gap * 0.5, y: gap, w: W - fw - gap * 1.5, h: H - gap * 2 };
   } else {
-    const fh = H * 0.6;
+    const fh = H * r;
     featured = { x: gap, y: gap, w: W - gap * 2, h: fh - gap * 1.5 };
     restArea = { x: gap, y: fh + gap * 0.5, w: W - gap * 2, h: H - fh - gap * 1.5 };
   }
@@ -20966,36 +20955,21 @@ function computeFeaturedCells(n, W, H, gap) {
     .map(c => ({ x: c.x + restArea.x, y: c.y + restArea.y, w: c.w, h: c.h }));
   return [featured, ...restCells];
 }
-// Forced single row (ignores canvas orientation, unlike Filmstrip which
-// auto-picks row vs column) -- lets the user pin a strip layout deliberately.
-function computeRowsCells(n, W, H, gap) {
-  if (n <= 0) return [];
-  const cellW = (W - gap * (n + 1)) / n;
-  const cells = [];
-  for (let i = 0; i < n; i++) cells.push({ x: gap + i * (cellW + gap), y: gap, w: cellW, h: H - gap * 2 });
-  return cells;
-}
-// Forced single column -- the vertical counterpart of Rows.
-function computeColumnsCells(n, W, H, gap) {
-  if (n <= 0) return [];
-  const cellH = (H - gap * (n + 1)) / n;
-  const cells = [];
-  for (let i = 0; i < n; i++) cells.push({ x: gap, y: gap + i * (cellH + gap), w: W - gap * 2, h: cellH });
-  return cells;
-}
 // Mirror of Featured: the big cell sits on the right (wide canvas) or bottom
-// (square/tall canvas) instead of left/top.
-function computeFeaturedRightCells(n, W, H, gap) {
+// (square/tall canvas) instead of left/top. `ratio` is the same adjustable
+// featured-cell-share as computeFeaturedCells.
+function computeFeaturedRightCells(n, W, H, gap, ratio) {
   if (n <= 0) return [];
   if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+  const r = ratio == null ? 0.6 : ratio;
   const wide = W >= H;
   let featured, restArea;
   if (wide) {
-    const fw = W * 0.6;
+    const fw = W * r;
     featured = { x: W - fw + gap * 0.5, y: gap, w: fw - gap * 1.5, h: H - gap * 2 };
     restArea = { x: gap, y: gap, w: W - fw - gap * 1.5, h: H - gap * 2 };
   } else {
-    const fh = H * 0.6;
+    const fh = H * r;
     featured = { x: gap, y: H - fh + gap * 0.5, w: W - gap * 2, h: fh - gap * 1.5 };
     restArea = { x: gap, y: gap, w: W - gap * 2, h: H - fh - gap * 1.5 };
   }
@@ -21006,19 +20980,24 @@ function computeFeaturedRightCells(n, W, H, gap) {
 // Diptych: the first TWO photos each get a large half-canvas cell (side by
 // side on a wide canvas, stacked on a square/tall one); any further photos
 // (n>2) fill a thin strip along the remaining edge as their own mini-grid.
-function computeSplitCells(n, W, H, gap) {
+// `ratio` is the adjustable share the FIRST of the two main cells takes
+// (default 0.5, an even split) -- drag the divider between them to make one
+// bigger than the other.
+function computeSplitCells(n, W, H, gap, ratio) {
   if (n <= 0) return [];
   if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+  const r = ratio == null ? 0.5 : ratio;
   const wide = W >= H;
   const hasExtra = n > 2;
   const stripFrac = hasExtra ? 0.24 : 0;
   const cells = [];
   if (wide) {
     const mainH = hasExtra ? H * (1 - stripFrac) : H;
-    const halfW = (W - gap * 3) / 2;
+    const mainW = W - gap * 3;
+    const w1 = mainW * r, w2 = mainW * (1 - r);
     const cellH = mainH - gap * 2;
-    cells.push({ x: gap, y: gap, w: halfW, h: cellH });
-    cells.push({ x: gap * 2 + halfW, y: gap, w: halfW, h: cellH });
+    cells.push({ x: gap, y: gap, w: w1, h: cellH });
+    cells.push({ x: gap * 2 + w1, y: gap, w: w2, h: cellH });
     if (hasExtra) {
       const stripArea = { x: gap, y: mainH, w: W - gap * 2, h: H - mainH - gap };
       computeGridCells(n - 2, stripArea.w, stripArea.h, gap)
@@ -21026,10 +21005,11 @@ function computeSplitCells(n, W, H, gap) {
     }
   } else {
     const mainW = hasExtra ? W * (1 - stripFrac) : W;
-    const halfH = (H - gap * 3) / 2;
+    const mainH = H - gap * 3;
+    const h1 = mainH * r, h2 = mainH * (1 - r);
     const cellW = mainW - gap * 2;
-    cells.push({ x: gap, y: gap, w: cellW, h: halfH });
-    cells.push({ x: gap, y: gap * 2 + halfH, w: cellW, h: halfH });
+    cells.push({ x: gap, y: gap, w: cellW, h: h1 });
+    cells.push({ x: gap, y: gap * 2 + h1, w: cellW, h: h2 });
     if (hasExtra) {
       const stripArea = { x: mainW, y: gap, w: W - mainW - gap, h: H - gap * 2 };
       computeGridCells(n - 2, stripArea.w, stripArea.h, gap)
@@ -21038,21 +21018,40 @@ function computeSplitCells(n, W, H, gap) {
   }
   return cells;
 }
-// Editorial/magazine layout: the first photo spans a 2x2 block of a virtual
-// grid, the rest fill the remaining slots in reading order -- a distinctly
-// different rhythm from Featured's single long strip.
-function computeMosaicCells(n, W, H, gap) {
-  if (n <= 0) return [];
-  if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+// The cols x rows virtual grid Mosaic (and its manual-adjustment UI) lay
+// their cells against -- kept as its own function so the divider UI can
+// compute the same cols/rows without duplicating the totalSlots math.
+function computeMosaicGridDims(n, W, H) {
+  if (n <= 1) return { cols: 2, rows: 2 };
   const totalSlots = (n - 1) + 4; // the big cell costs 4 grid slots (2x2)
   let cols = Math.max(2, Math.round(Math.sqrt(totalSlots * (W / H))));
   let rows = Math.max(2, Math.ceil(totalSlots / cols));
   while (cols * rows < totalSlots) rows++;
-  const cellW = (W - gap * (cols + 1)) / cols;
-  const cellH = (H - gap * (rows + 1)) / rows;
+  return { cols, rows };
+}
+// Editorial/magazine layout: the first photo spans a 2x2 block of a virtual
+// grid, the rest fill the remaining slots in reading order -- a distinctly
+// different rhythm from Featured's single long strip. Column widths/row
+// heights are adjustable (manualFracs, defaulting to even -- the original
+// uniform cellW/cellH) since the 2x2 block and every single cell all derive
+// from the same shared column/row sizes, resizing one column or row
+// resizes every cell that touches it, including the big block.
+function computeMosaicCells(n, W, H, gap, manualFracs) {
+  if (n <= 0) return [];
+  if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+  const { cols, rows } = computeMosaicGridDims(n, W, H);
+  const colFracs = (manualFracs && manualFracs.colFracs && manualFracs.colFracs.length === cols)
+    ? manualFracs.colFracs : new Array(cols).fill(1 / cols);
+  const rowFracs = (manualFracs && manualFracs.rowFracs && manualFracs.rowFracs.length === rows)
+    ? manualFracs.rowFracs : new Array(rows).fill(1 / rows);
+  const innerW = W - gap * (cols + 1), innerH = H - gap * (rows + 1);
+  const colW = colFracs.map(f => f * innerW), rowH = rowFracs.map(f => f * innerH);
+  const colX = []; let accX = gap; for (let c = 0; c < cols; c++) { colX.push(accX); accX += colW[c] + gap; }
+  const rowY = []; let accY = gap; for (let r = 0; r < rows; r++) { rowY.push(accY); accY += rowH[r] + gap; }
   const cellRect = (c, r, colSpan, rowSpan) => ({
-    x: gap + c * (cellW + gap), y: gap + r * (cellH + gap),
-    w: cellW * colSpan + gap * (colSpan - 1), h: cellH * rowSpan + gap * (rowSpan - 1),
+    x: colX[c], y: rowY[r],
+    w: colW.slice(c, c + colSpan).reduce((a, b) => a + b, 0) + gap * (colSpan - 1),
+    h: rowH.slice(r, r + rowSpan).reduce((a, b) => a + b, 0) + gap * (rowSpan - 1),
   });
   const cells = [cellRect(0, 0, 2, 2)];
   const occupied = new Set(["0,0", "1,0", "0,1", "1,1"]);
@@ -21139,16 +21138,28 @@ function computeManualCells(n, W, H, gap, colFracs, rowFracs) {
   }
   return cells;
 }
+// Column count Masonry (and its column-width manual-adjustment UI) uses --
+// kept separate so the divider UI can compute it without duplicating the
+// formula.
+function computeMasonryCols(n, W, H) {
+  return Math.max(1, Math.min(n, Math.round(Math.sqrt(n * (W / H)))));
+}
 // Pinterest-style masonry: photos tile into columns of varying (but
 // deterministically seeded, not truly random) height instead of a uniform
 // grid, each new photo going into whichever column is shortest so far.
 // Every column is then independently renormalized to fill H exactly (like
 // computeGridCells centers a partial row) so no column falls short and
-// leaves bare background at the bottom.
-function computeMasonryCells(n, W, H, gap) {
+// leaves bare background at the bottom. Column WIDTHS are adjustable
+// (colFracs, defaulting to even -- the original uniform colW); each
+// column's own item-height weighting stays automatic either way, since
+// there isn't a shared "row" to hang a height adjustment off of.
+function computeMasonryCells(n, W, H, gap, colFracs) {
   if (n <= 0) return [];
-  const cols = Math.max(1, Math.min(n, Math.round(Math.sqrt(n * (W / H)))));
-  const colW = (W - gap * (cols + 1)) / cols;
+  const cols = computeMasonryCols(n, W, H);
+  const fracs = (colFracs && colFracs.length === cols) ? colFracs : new Array(cols).fill(1 / cols);
+  const innerW = W - gap * (cols + 1);
+  const colW = fracs.map(f => f * innerW);
+  const colX = []; let accX = gap; for (let c = 0; c < cols; c++) { colX.push(accX); accX += colW[c] + gap; }
   const colItems = Array.from({ length: cols }, () => []);
   const colWeight = new Array(cols).fill(0);
   for (let i = 0; i < n; i++) {
@@ -21168,7 +21179,7 @@ function computeMasonryCells(n, W, H, gap) {
     let y = gap;
     for (const item of items) {
       const h = (item.weight / totalWeight) * innerH;
-      cells[item.i] = { x: gap + c * (colW + gap), y, w: colW, h };
+      cells[item.i] = { x: colX[c], y, w: colW[c], h };
       y += h + gap;
     }
   }
@@ -21260,22 +21271,59 @@ function heartPolygonPercent(stepsPerCurve) {
   }
   return pts.map(([x, y]) => (x * 100) + "% " + (y * 100) + "%").join(", ");
 }
-function computeCollageLayout(mode, n, W, H, gap, manualFracs) {
-  if (mode === "filmstrip") return computeFilmstripCells(n, W, H, gap);
-  if (mode === "rows") return computeRowsCells(n, W, H, gap);
-  if (mode === "columns") return computeColumnsCells(n, W, H, gap);
-  if (mode === "featured") return computeFeaturedCells(n, W, H, gap);
-  if (mode === "featuredRight") return computeFeaturedRightCells(n, W, H, gap);
-  if (mode === "split") return computeSplitCells(n, W, H, gap);
-  if (mode === "mosaic") return computeMosaicCells(n, W, H, gap);
-  if (mode === "circleGrid") return computeGridCells(n, W, H, gap);
+// Cumulative column/row DIVIDER positions (the midpoint of each internal
+// gap, in the same coordinate space as W/H) computed directly from the
+// fraction array + gap, rather than reverse-engineered from a rendered
+// cell's rect -- works uniformly even for a layout (Mosaic) whose cells
+// span multiple columns/rows, where reading boundaries off any single
+// cell's edges wouldn't reliably capture every internal seam.
+function gridFracBoundaries(fracs, totalSize, gap) {
+  if (!fracs || fracs.length < 2) return [];
+  const inner = totalSize - gap * (fracs.length + 1);
+  const bounds = []; let acc = gap;
+  for (let i = 0; i < fracs.length - 1; i++) { acc += fracs[i] * inner; bounds.push(acc + gap / 2); acc += gap; }
+  return bounds;
+}
+// Layouts built on a shared row/column grid -- Grid, Circle Grid, Heart, and
+// Manual Split are literally the same cols x rows-from-aspect-ratio grid
+// (computeManualGridDims), just with different default fractions and/or a
+// draw-time style layered on top; Rows/Columns are the 1-row/1-column
+// special cases of the same idea. All of them go through computeManualCells
+// so every one can have its row heights/column widths manually adjusted the
+// same way, defaulting to even fractions (computeManualCells's own
+// partial-last-row renormalization) when there's no override yet.
+function computeCollageLayout(mode, n, W, H, gap, manualFracs, manualSplitRatio) {
+  if (mode === "filmstrip") {
+    const wide = W >= H;
+    if (wide) {
+      const colFracs = (manualFracs && manualFracs.colFracs && manualFracs.colFracs.length === n) ? manualFracs.colFracs : new Array(n).fill(1 / n);
+      return computeManualCells(n, W, H, gap, colFracs, [1]);
+    }
+    const rowFracs = (manualFracs && manualFracs.rowFracs && manualFracs.rowFracs.length === n) ? manualFracs.rowFracs : new Array(n).fill(1 / n);
+    return computeManualCells(n, W, H, gap, [1], rowFracs);
+  }
+  if (mode === "featured") return computeFeaturedCells(n, W, H, gap, manualSplitRatio);
+  if (mode === "featuredRight") return computeFeaturedRightCells(n, W, H, gap, manualSplitRatio);
+  if (mode === "split") return computeSplitCells(n, W, H, gap, manualSplitRatio);
   if (mode === "polaroid") return computePolaroidCells(n, W, H, gap);
-  if (mode === "masonry") return computeMasonryCells(n, W, H, gap);
   if (mode === "cascade") return computeCascadeCells(n, W, H, gap);
   if (mode === "spotlight") return computeSpotlightCells(n, W, H, gap);
-  if (mode === "heart") return computeGridCells(n, W, H, gap);
-  if (mode === "manual" && manualFracs) return computeManualCells(n, W, H, gap, manualFracs.colFracs, manualFracs.rowFracs);
-  return computeGridCells(n, W, H, gap);
+  if (mode === "mosaic") return computeMosaicCells(n, W, H, gap, manualFracs);
+  if (mode === "masonry") return computeMasonryCells(n, W, H, gap, manualFracs && manualFracs.colFracs);
+  if (mode === "rows") {
+    const colFracs = (manualFracs && manualFracs.colFracs && manualFracs.colFracs.length === n) ? manualFracs.colFracs : new Array(n).fill(1 / n);
+    return computeManualCells(n, W, H, gap, colFracs, [1]);
+  }
+  if (mode === "columns") {
+    const rowFracs = (manualFracs && manualFracs.rowFracs && manualFracs.rowFracs.length === n) ? manualFracs.rowFracs : new Array(n).fill(1 / n);
+    return computeManualCells(n, W, H, gap, [1], rowFracs);
+  }
+  // grid / circleGrid / heart / manual (and the default fallback for any
+  // unrecognized mode) all share this same grid.
+  const dims = computeManualGridDims(n, W / H);
+  const colFracs = (manualFracs && manualFracs.colFracs && manualFracs.colFracs.length === dims.cols) ? manualFracs.colFracs : new Array(dims.cols).fill(1 / dims.cols);
+  const rowFracs = (manualFracs && manualFracs.rowFracs && manualFracs.rowFracs.length === dims.rows) ? manualFracs.rowFracs : new Array(dims.rows).fill(1 / dims.rows);
+  return computeManualCells(n, W, H, gap, colFracs, rowFracs);
 }
 // Draws one photo into its layout cell, styled per mode: circleGrid clips to a
 // circle inscribed in the cell; polaroid/cascade rotate around the cell's
@@ -21330,7 +21378,7 @@ function drawCollageCell(ctx, srcCv, cell, mode, xform) {
 // is the gap as a FRACTION of the output's larger dimension (not raw pixels),
 // so the same value the live preview uses (computed in its own normalized
 // coordinate space) reproduces an identical-looking gap at final resolution.
-async function buildCollageCanvas(order, files, mode, aspectW, aspectH, gapFrac, bgColor, onProgress, manualFracs) {
+async function buildCollageCanvas(order, files, mode, aspectW, aspectH, gapFrac, bgColor, onProgress, manualFracs, manualSplitRatio) {
   const ratio = aspectW / aspectH;
   let W = Math.round(Math.sqrt(COLLAGE_MAX_AREA * ratio));
   let H = Math.round(Math.sqrt(COLLAGE_MAX_AREA / ratio));
@@ -21340,7 +21388,7 @@ async function buildCollageCanvas(order, files, mode, aspectW, aspectH, gapFrac,
   const ctx = cv.getContext("2d");
   ctx.fillStyle = bgColor;
   ctx.fillRect(0, 0, W, H);
-  const cells = computeCollageLayout(mode, order.length, W, H, gap, manualFracs);
+  const cells = computeCollageLayout(mode, order.length, W, H, gap, manualFracs, manualSplitRatio);
   // Heart's silhouette is an OVERALL canvas clip (not a per-cell one, unlike
   // circleGrid) -- background is filled first so the corners outside the
   // heart stay a solid color rather than transparent (JPEG has no alpha),
@@ -22568,7 +22616,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-07-19 01:40";
+const APP_BUILD = "2026-07-19 09:46";
 
 function App() {
   const canvasRef    = useRef(null);
@@ -24454,17 +24502,26 @@ function CollageAgent({ initialOrder, files, onClose }) {
   const [busyLabel, setBusyLabel] = useState("");
   const [error, setError] = useState(null);
   const [doneMsg, setDoneMsg] = useState(null);
-  // Manual Split's user-dragged divider positions (fraction arrays). null
-  // means "use the even default for however many rows/cols the current
-  // photo count + aspect ratio need" -- see the length-mismatch fallback
-  // below, which also transparently resets these back to even whenever the
-  // grid's shape changes (photo added/removed, aspect switched) instead of
-  // needing a separate effect to detect that.
+  // Manual per-mode adjustments: manualColFracs/manualRowFracs (fraction
+  // arrays, shared by every grid-shaped layout below) and manualSplitRatio
+  // (a single 0..1 share, for the layouts with just one big divider). null
+  // means "use the even/default share for however many rows/cols/split the
+  // current mode + photo count + aspect ratio need" -- see the length-
+  // mismatch fallback below, which also transparently resets these back to
+  // default whenever the grid's shape changes (photo added/removed, aspect
+  // switched) instead of needing a separate effect to detect that.
   const [manualColFracs, setManualColFracs] = useState(null);
   const [manualRowFracs, setManualRowFracs] = useState(null);
+  const [manualSplitRatio, setManualSplitRatio] = useState(null);
   const previewWrapRef = useRef(null);
   const gestureRef = useRef({});
   const lastTapRef = useRef({ idx: null, time: 0 });
+
+  // Switching layouts always starts each one's manual adjustment fresh --
+  // an override tuned for one layout's grid shape rarely means anything for
+  // a different one (and the length-mismatch fallback above can't catch two
+  // modes that coincidentally share the same cols/rows count).
+  useEffect(() => { setManualColFracs(null); setManualRowFracs(null); setManualSplitRatio(null); }, [mode]);
 
   const aspect = aspectId === "custom"
     ? { w: Math.max(1, customW || 1), h: Math.max(1, customH || 1) }
@@ -24475,30 +24532,92 @@ function CollageAgent({ initialOrder, files, onClose }) {
   // regardless of the actual output resolution -- see buildCollageCanvas.
   const pMax = Math.max(aspect.w, aspect.h);
   const pW = 1000 * aspect.w / pMax, pH = 1000 * aspect.h / pMax;
-  const manualDims = computeManualGridDims(order.length, aspect.w / aspect.h);
-  const effectiveColFracs = (manualColFracs && manualColFracs.length === manualDims.cols)
-    ? manualColFracs : new Array(manualDims.cols).fill(1 / (manualDims.cols || 1));
-  const effectiveRowFracs = (manualRowFracs && manualRowFracs.length === manualDims.rows)
-    ? manualRowFracs : new Array(manualDims.rows).fill(1 / (manualDims.rows || 1));
-  const manualFracs = { colFracs: effectiveColFracs, rowFracs: effectiveRowFracs };
-  const previewCells = computeCollageLayout(mode, order.length, pW, pH, gapFrac * 1000, manualFracs);
-  // Divider-handle positions for Manual Split, read straight off the actual
-  // rendered cells (not recomputed from fractions independently) so the drag
-  // handles always line up pixel-for-pixel with the gap the user sees --
-  // column boundaries come from row 0 (always fully populated, since cols is
-  // capped to <= n), row boundaries from column 0 of each row.
-  const manualColBoundaries = mode === "manual"
-    ? Array.from({ length: Math.max(0, manualDims.cols - 1) }, (_, c) => {
+  const wide = aspect.w >= aspect.h;
+  const g1000 = gapFrac * 1000;
+
+  // Every layout's manual-adjustment shape, expressed as however many
+  // columns/rows its OWN grid has -- Grid/Circle Grid/Heart/Manual Split
+  // share one cols x rows grid; Rows/Columns/Filmstrip are the 1-row/
+  // 1-column special case of the same idea; Mosaic has its own totalSlots-
+  // based grid (the 2x2 block spans it); Masonry only has adjustable column
+  // WIDTHS (its item heights are auto-packed, there's no shared "row").
+  // Scattered layouts (Polaroid/Cascade/Spotlight) aren't in here at all --
+  // their cards don't share edges the way a grid's cells do.
+  const COLLAGE_FULL_GRID_MODES = ["manual", "grid", "circleGrid", "heart"];
+  const COLLAGE_SPLIT_RATIO_MODES = ["featured", "featuredRight", "split"];
+  let gridCols = 0, gridRows = 0;
+  if (COLLAGE_FULL_GRID_MODES.includes(mode)) {
+    const d = computeManualGridDims(order.length, aspect.w / aspect.h);
+    gridCols = d.cols; gridRows = d.rows;
+  } else if (mode === "rows" || (mode === "filmstrip" && wide)) {
+    gridCols = order.length; gridRows = 1;
+  } else if (mode === "columns" || (mode === "filmstrip" && !wide)) {
+    gridCols = 1; gridRows = order.length;
+  } else if (mode === "mosaic") {
+    const d = computeMosaicGridDims(order.length, aspect.w, aspect.h);
+    gridCols = d.cols; gridRows = d.rows;
+  } else if (mode === "masonry") {
+    gridCols = computeMasonryCols(order.length, aspect.w, aspect.h); gridRows = 0;
+  }
+  const effectiveColFracs = gridCols > 1
+    ? ((manualColFracs && manualColFracs.length === gridCols) ? manualColFracs : new Array(gridCols).fill(1 / gridCols))
+    : null;
+  const effectiveRowFracs = gridRows > 1
+    ? ((manualRowFracs && manualRowFracs.length === gridRows) ? manualRowFracs : new Array(gridRows).fill(1 / gridRows))
+    : null;
+  const manualFracs = (effectiveColFracs || effectiveRowFracs) ? { colFracs: effectiveColFracs, rowFracs: effectiveRowFracs } : null;
+  // The single-divider layouts' default share when untouched -- matches
+  // each compute*Cells function's own hardcoded default exactly, so picking
+  // one of these modes looks identical to before until the user drags it.
+  const splitRatioDefault = mode === "split" ? 0.5 : 0.6;
+  const splitRatioValue = manualSplitRatio == null ? splitRatioDefault : manualSplitRatio;
+  const previewCells = computeCollageLayout(mode, order.length, pW, pH, g1000, manualFracs, splitRatioValue);
+  // Divider-handle positions, read straight off the actual rendered cells
+  // (not recomputed from fractions independently) so the drag handles
+  // always line up pixel-for-pixel with the gap the user sees -- column
+  // boundaries come from row 0 (always fully populated, since cols is
+  // capped to <= n), row boundaries from column 0 of each row. Only valid
+  // for the full-grid modes, where every cell is a plain 1x1 (no spans).
+  const manualColBoundaries = COLLAGE_FULL_GRID_MODES.includes(mode)
+    ? Array.from({ length: Math.max(0, gridCols - 1) }, (_, c) => {
         const a = previewCells[c], b = previewCells[c + 1];
         return (a && b) ? (a.x + a.w + b.x) / 2 : null;
       }).filter(v => v != null)
     : [];
-  const manualRowBoundaries = mode === "manual"
-    ? Array.from({ length: Math.max(0, manualDims.rows - 1) }, (_, r) => {
-        const a = previewCells[r * manualDims.cols], b = previewCells[(r + 1) * manualDims.cols];
+  const manualRowBoundaries = COLLAGE_FULL_GRID_MODES.includes(mode)
+    ? Array.from({ length: Math.max(0, gridRows - 1) }, (_, r) => {
+        const a = previewCells[r * gridCols], b = previewCells[(r + 1) * gridCols];
         return (a && b) ? (a.y + a.h + b.y) / 2 : null;
       }).filter(v => v != null)
     : [];
+  // Rows/Columns/Filmstrip (single axis) and Mosaic/Masonry (cells that can
+  // SPAN multiple columns/rows, so reading boundaries off any one cell's
+  // edges wouldn't reliably capture every seam) instead compute divider
+  // positions analytically straight from the fraction arrays.
+  const singleAxisIsCol = mode === "rows" || (mode === "filmstrip" && wide);
+  const singleAxisIsRow = mode === "columns" || (mode === "filmstrip" && !wide);
+  const singleAxisColBoundaries = singleAxisIsCol ? gridFracBoundaries(effectiveColFracs, pW, g1000) : [];
+  const singleAxisRowBoundaries = singleAxisIsRow ? gridFracBoundaries(effectiveRowFracs, pH, g1000) : [];
+  const mosaicColBoundaries = mode === "mosaic" ? gridFracBoundaries(effectiveColFracs, pW, g1000) : [];
+  const mosaicRowBoundaries = mode === "mosaic" ? gridFracBoundaries(effectiveRowFracs, pH, g1000) : [];
+  const masonryColBoundaries = mode === "masonry" ? gridFracBoundaries(effectiveColFracs, pW, g1000) : [];
+  // The one divider Featured/Featured Right/Split have -- its position
+  // follows each layout's own geometry exactly (see computeFeaturedCells/
+  // computeFeaturedRightCells/computeSplitCells), so dragging it lines up
+  // pixel-for-pixel with the real gap between the two regions.
+  let splitDividerPos = null, splitDividerAxis = null;
+  if (COLLAGE_SPLIT_RATIO_MODES.includes(mode) && order.length >= 2) {
+    splitDividerAxis = wide ? "col" : "row";
+    const size = wide ? pW : pH;
+    if (mode === "split") {
+      const mainSize = size - g1000 * 3;
+      splitDividerPos = g1000 * 1.5 + mainSize * splitRatioValue;
+    } else if (mode === "featuredRight") {
+      splitDividerPos = size * (1 - splitRatioValue);
+    } else {
+      splitDividerPos = size * splitRatioValue;
+    }
+  }
 
   // A "Downloaded ✓"/"Shared" label from a previous export otherwise stays on
   // the button after the user switches layout/aspect/background -- misleading
@@ -24515,15 +24634,15 @@ function CollageAgent({ initialOrder, files, onClose }) {
     setPickedIdx(null);
   };
   const resetOrder = () => { setOrder(initialOrder); setPickedIdx(null); setDoneMsg(null); };
-  // Clears every photo's own pinch-zoom/pan/rotate framing (and, in Manual
-  // Split, the dragged divider positions) back to defaults -- an escape
-  // hatch since there's no per-photo undo for an errant gesture.
+  // Clears every photo's own pinch-zoom/pan/rotate framing (and any manual
+  // box-dimension adjustment for the current layout) back to defaults -- an
+  // escape hatch since there's no per-photo undo for an errant gesture.
   const resetFraming = () => {
     setOrder(prev => prev.map(r => {
       const { _zoom, _offX, _offY, _rot, ...rest } = r;
       return rest;
     }));
-    setManualColFracs(null); setManualRowFracs(null);
+    setManualColFracs(null); setManualRowFracs(null); setManualSplitRatio(null);
     setDoneMsg(null);
   };
 
@@ -24531,6 +24650,14 @@ function CollageAgent({ initialOrder, files, onClose }) {
     setOrder(prev => prev.map((r, idx) => idx === i ? { ...r, ...patch } : r));
   };
   const clampZoom = z => Math.max(0.5, Math.min(4, z));
+  // Soft rotation lock during a pinch: a small twist is the natural hand
+  // wobble that comes with pinching two fingers together/apart to zoom, not
+  // a deliberate rotate gesture -- absorbed rather than spinning the photo.
+  // A real, stronger twist still rotates normally, and the transition at the
+  // threshold is a plain subtraction rather than a hard cutoff, so rotation
+  // picks up smoothly from zero right as the twist crosses it instead of
+  // jumping.
+  const PINCH_ROTATION_LOCK_DEG = 10;
   // Resets just this one photo's zoom/pan/rotation back to its original
   // framing, without touching order or any other photo's -- the quick
   // per-photo undo "Reset framing" doesn't cover (that one resets every
@@ -24613,9 +24740,14 @@ function CollageAgent({ initialOrder, files, onClose }) {
       const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
       const angle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
       g.moved = true;
+      // Normalize into (-180,180] so a twist that happens to cross atan2's
+      // wraparound boundary doesn't register as a huge spurious jump.
+      let deltaDeg = (angle - g.startAngle) * 180 / Math.PI;
+      deltaDeg = ((deltaDeg + 180) % 360 + 360) % 360 - 180;
+      const lockedDeltaDeg = Math.sign(deltaDeg) * Math.max(0, Math.abs(deltaDeg) - PINCH_ROTATION_LOCK_DEG);
       updateXform(i, {
         _zoom: clampZoom(g.startZoom * (dist / g.startDist)),
-        _rot: g.startRot + (angle - g.startAngle) * 180 / Math.PI,
+        _rot: g.startRot + lockedDeltaDeg,
       });
     }
   };
@@ -24651,8 +24783,10 @@ function CollageAgent({ initialOrder, files, onClose }) {
     }
   };
 
-  // Manual Split divider drag: redistributes the two fractions straddling
-  // the dragged line, clamped so neither neighbor collapses to a sliver.
+  // Grid divider drag (used by every grid-shaped layout's col/row dividers --
+  // Grid, Circle Grid, Heart, Rows, Columns, Filmstrip, Mosaic, Masonry,
+  // Manual Split): redistributes the two fractions straddling the dragged
+  // line, clamped so neither neighbor collapses to a sliver.
   const dragDivider = (axis, i) => (e) => {
     e.preventDefault(); e.stopPropagation();
     setDoneMsg(null);
@@ -24675,6 +24809,31 @@ function CollageAgent({ initialOrder, files, onClose }) {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
+  // Featured/Featured Right/Split's single divider drag: adjusts
+  // manualSplitRatio directly instead of a fraction-array pair. `invert`
+  // flips drag direction for Featured Right, where the featured share
+  // SHRINKS as its divider (on the opposite side from Featured's) moves
+  // further from the edge -- see splitDividerPos's own mirrored formula.
+  const SPLIT_RATIO_MIN = 0.2, SPLIT_RATIO_MAX = 0.8;
+  const dragSplitRatio = () => (e) => {
+    e.preventDefault(); e.stopPropagation();
+    setDoneMsg(null);
+    const startRatio = splitRatioValue;
+    const rect = previewWrapRef.current.getBoundingClientRect();
+    const isCol = splitDividerAxis === "col";
+    const totalPx = isCol ? rect.width : rect.height;
+    const startClient = isCol ? e.clientX : e.clientY;
+    const invert = mode === "featuredRight";
+    const onMove = (ev) => {
+      const cur = isCol ? ev.clientX : ev.clientY;
+      let deltaFrac = (cur - startClient) / totalPx;
+      if (invert) deltaFrac = -deltaFrac;
+      setManualSplitRatio(Math.max(SPLIT_RATIO_MIN, Math.min(SPLIT_RATIO_MAX, startRatio + deltaFrac)));
+    };
+    const onUp = () => { window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
 
   const doExport = async () => {
     if (busy || order.length < 2) return;
@@ -24684,7 +24843,7 @@ function CollageAgent({ initialOrder, files, onClose }) {
     try {
       const cv = await withScratchLock(() => buildCollageCanvas(
         order, files, mode, aspect.w, aspect.h, gapFrac, COLLAGE_BG_COLORS[bgId],
-        (done, total) => setBusyLabel("Rendering " + done + "/" + total + "…"), manualFracs
+        (done, total) => setBusyLabel("Rendering " + done + "/" + total + "…"), manualFracs, splitRatioValue
       ));
       const blob = await new Promise(res => cv.toBlob(res, "image/jpeg", 0.92));
       if (!blob) throw new Error("Could not encode collage");
@@ -24758,17 +24917,33 @@ function CollageAgent({ initialOrder, files, onClose }) {
             }
           }));
         }),
-        mode === "manual" && manualColBoundaries.map((x, i) => React.createElement("div", {
+        // Every grid-shaped layout's col/row dividers, whichever set actually
+        // applies to the current mode (mutually exclusive -- at most one of
+        // these four is ever non-empty at a time), rendered the same way.
+        [...manualColBoundaries, ...singleAxisColBoundaries, ...mosaicColBoundaries, ...masonryColBoundaries].map((x, i) => React.createElement("div", {
           key: "cdiv" + i, onPointerDown: dragDivider("col", i),
           style: { position: "absolute", left: (x / pW * 100) + "%", top: 0, bottom: 0, width: 20, marginLeft: -10, cursor: "col-resize", touchAction: "none", zIndex: 4, display: "flex", alignItems: "center", justifyContent: "center" }
         }, React.createElement("div", { style: { width: 3, height: "36%", borderRadius: 2, background: "rgba(255,255,255,0.85)", boxShadow: "0 0 0 1px rgba(0,0,0,0.3)" } }))),
-        mode === "manual" && manualRowBoundaries.map((y, i) => React.createElement("div", {
+        [...manualRowBoundaries, ...singleAxisRowBoundaries, ...mosaicRowBoundaries].map((y, i) => React.createElement("div", {
           key: "rdiv" + i, onPointerDown: dragDivider("row", i),
           style: { position: "absolute", top: (y / pH * 100) + "%", left: 0, right: 0, height: 20, marginTop: -10, cursor: "row-resize", touchAction: "none", zIndex: 4, display: "flex", alignItems: "center", justifyContent: "center" }
-        }, React.createElement("div", { style: { height: 3, width: "36%", borderRadius: 2, background: "rgba(255,255,255,0.85)", boxShadow: "0 0 0 1px rgba(0,0,0,0.3)" } })))
+        }, React.createElement("div", { style: { height: 3, width: "36%", borderRadius: 2, background: "rgba(255,255,255,0.85)", boxShadow: "0 0 0 1px rgba(0,0,0,0.3)" } }))),
+        // Featured/Featured Right/Split's single big-cell-vs-rest divider.
+        splitDividerPos != null && React.createElement("div", {
+          key: "splitdiv", onPointerDown: dragSplitRatio(),
+          style: splitDividerAxis === "col"
+            ? { position: "absolute", left: (splitDividerPos / pW * 100) + "%", top: 0, bottom: 0, width: 24, marginLeft: -12, cursor: "col-resize", touchAction: "none", zIndex: 4, display: "flex", alignItems: "center", justifyContent: "center" }
+            : { position: "absolute", top: (splitDividerPos / pH * 100) + "%", left: 0, right: 0, height: 24, marginTop: -12, cursor: "row-resize", touchAction: "none", zIndex: 4, display: "flex", alignItems: "center", justifyContent: "center" }
+        }, React.createElement("div", {
+          style: splitDividerAxis === "col"
+            ? { width: 4, height: "45%", borderRadius: 2, background: "rgba(255,255,255,0.85)", boxShadow: "0 0 0 1px rgba(0,0,0,0.3)" }
+            : { height: 4, width: "45%", borderRadius: 2, background: "rgba(255,255,255,0.85)", boxShadow: "0 0 0 1px rgba(0,0,0,0.3)" }
+        }))
       ),
       React.createElement("div", { style: { fontSize: 11, color: "#64748b", marginBottom: 12 } },
-        mode === "manual" ? "Drag a divider to resize. On each photo: pinch to zoom, twist to rotate, drag to pan, double-tap to reset; tap, then tap another, to swap." : "Tap a photo, then tap another to swap their positions. Pinch to zoom, twist to rotate, drag to pan, double-tap to reset."),
+        (manualColBoundaries.length || manualRowBoundaries.length || singleAxisColBoundaries.length || singleAxisRowBoundaries.length || mosaicColBoundaries.length || masonryColBoundaries.length || splitDividerPos != null)
+          ? "Drag a divider to resize. On each photo: pinch to zoom, twist to rotate, drag to pan, double-tap to reset; tap, then tap another, to swap."
+          : "Tap a photo, then tap another to swap their positions. Pinch to zoom, twist to rotate, drag to pan, double-tap to reset."),
       React.createElement("div", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", marginBottom: 6 } }, "Layout"),
       React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12, overflowX: "auto", scrollbarWidth: "none", paddingBottom: 2 } }, COLLAGE_MODES.map(m =>
         React.createElement("button", { key: m.id, onClick: () => setMode(m.id), style: Object.assign({ flexShrink: 0, whiteSpace: "nowrap" }, chipStyle(mode === m.id)) }, m.label)
