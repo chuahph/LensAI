@@ -24565,19 +24565,21 @@ function BatchAgent({onClose,onCloseApp}){
           )
         ),
         selectMode&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8,background:"rgba(24,119,242,0.08)",border:"1px solid rgba(24,119,242,0.3)",borderRadius:10,padding:"6px 8px"}},
-          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}},
+          React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:6,flexWrap:"wrap"}},
             React.createElement("span",{style:{fontSize:11,color:"#9db2e8",fontWeight:600,marginRight:2}},selected.size?selected.size+" selected":"Tap photos to select"),
-            (function(){
-              // Select-all/deselect-all and exiting select mode both live
-              // here now instead of in the top row -- by the time this
-              // sub-bar is showing at all, selectMode is already true, so
-              // neither needs the enter-select-mode branch the top-row
-              // Select/Share buttons still carry.
-              const all=shareableIdxs();
-              const allSel=all.length>0&&selected.size>=all.length;
-              return React.createElement("button",{onClick:toggleSelectAll,disabled:!all.length,"aria-pressed":allSel,title:allSel?"Deselect all":"Select all "+all.length+" photos",style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(allSel?"#1877f2":"rgba(24,119,242,0.4)"),background:allSel?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:all.length?"#9db2e8":"#475569",fontSize:11,fontWeight:700,cursor:all.length?"pointer":"not-allowed",fontFamily:"inherit"}},allSel?"All ✓":"Select all");
-            })(),
-            React.createElement("button",{onClick:exitSelect,title:"Exit select mode",style:{padding:"6px 12px",borderRadius:16,border:"1px solid #6366f1",background:"#6366f1",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Cancel select")
+            React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,flexShrink:0,marginLeft:"auto"}},
+              (function(){
+                // Select-all/deselect-all and exiting select mode both live
+                // here now instead of in the top row -- by the time this
+                // sub-bar is showing at all, selectMode is already true, so
+                // neither needs the enter-select-mode branch the top-row
+                // Select/Share buttons still carry.
+                const all=shareableIdxs();
+                const allSel=all.length>0&&selected.size>=all.length;
+                return React.createElement("button",{onClick:toggleSelectAll,disabled:!all.length,"aria-pressed":allSel,title:allSel?"Deselect all":"Select all "+all.length+" photos",style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(allSel?"#1877f2":"rgba(24,119,242,0.4)"),background:allSel?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:all.length?"#9db2e8":"#475569",fontSize:11,fontWeight:700,cursor:all.length?"pointer":"not-allowed",fontFamily:"inherit"}},allSel?"All ✓":"Select all");
+              })(),
+              React.createElement("button",{onClick:exitSelect,title:"Exit select mode",style:{padding:"6px 12px",borderRadius:16,border:"1px solid #6366f1",background:"#6366f1",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Cancel select")
+            )
           ),
           hdrPickerOpen&&React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap",paddingTop:2,borderTop:"1px solid rgba(24,119,242,0.2)"}},
             GOALS.filter(g=>g.id!=="auto"&&g.id!=="fullAuto").map(g=>React.createElement("button",{
