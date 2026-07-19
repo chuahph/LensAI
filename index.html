@@ -24409,13 +24409,16 @@ function BatchAgent({onClose,onCloseApp}){
   // one regardless of stagger) -- so bulk download now always goes through
   // exportOrganizeAgent's zip, which is exactly one download and reliable.
   // downloadOne (single explicit user click per file) is unaffected.
-  const downloadAll=async()=>{
+  // `subset` lets the top-row Download button, once it's led the user
+  // through the same select-first flow as Share/Collage, zip only the
+  // photos actually picked instead of always the whole batch.
+  const downloadAll=async(subset)=>{
     setZipping(true); setZipProgress({done:0,total:0}); setExportError(null);
     acquireWakeLock(); // keep the screen awake for the whole zip build -- iOS
     // throttles JS in a backgrounded/sleeping tab, which silently slows
     // (or stalls) the full-res render + zip-assembly loop below.
     try {
-      const blob=await withScratchLock(()=>exportOrganizeAgent(results, files, (done,total)=>setZipProgress({done,total})));
+      const blob=await withScratchLock(()=>exportOrganizeAgent(subset||results, files, (done,total)=>setZipProgress({done,total})));
       const url=URL.createObjectURL(blob);
       const a=document.createElement("a");
       a.href=url; a.download="lensai-batch-"+Date.now()+".zip";
@@ -24433,6 +24436,12 @@ function BatchAgent({onClose,onCloseApp}){
       // overlay over what should just be a failed export.
       setExportError("Zip export failed -- "+(err&&err.message||"try again")+". Try a smaller batch or fewer goals.");
     } finally { setZipping(false); releaseWakeLock(); }
+  };
+  const downloadSelected=()=>{
+    if(zipping) return;
+    const subset=[...selected].filter(i=>{ const r=results[i]; return r&&!r.error&&!r.culled&&r.adj; }).map(i=>results[i]);
+    if(!subset.length) return;
+    downloadAll(subset);
   };
 
   const doneCount=results.filter(r=>!r.error&&!r.culled).length;
@@ -24529,19 +24538,30 @@ function BatchAgent({onClose,onCloseApp}){
               const allSel=selectMode&&all.length>0&&selected.size>=all.length;
               return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); else toggleSelectAll(); },disabled:!all.length,"aria-label":!selectMode?"Select":(allSel?"Deselect all":"Select all"),"aria-pressed":allSel,title:!selectMode?"Start selecting photos -- tap individual photos, or tap this again to select all":(allSel?"Deselect all":"Select all "+all.length+" photos"),style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(allSel?"#1877f2":"rgba(24,119,242,0.4)"),background:allSel?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:all.length?"#9db2e8":"#475569",fontSize:11,fontWeight:700,cursor:all.length?"pointer":"not-allowed",fontFamily:"inherit"}},!selectMode?"Select":(allSel?"All ✓":"Select all"));
             })(),
-            React.createElement("button",{onClick:downloadAll,disabled:zipping,title:"Bundles every result into one zip, organized into folders (Export/Organize Agent) -- a single reliable download instead of one-per-photo",style:{padding:"6px 12px",borderRadius:16,border:"1px solid #22c55e",background:"#22c55e",color:"#fff",fontSize:11,fontWeight:700,cursor:zipping?"not-allowed":"pointer",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping "+zipProgress.done+"/"+zipProgress.total+"...":"Download"),
             (function(){
-              // Mirrors Share: while actively selecting, Collage follows that
-              // SAME selection (so picking just 3 photos out of a 20-photo
-              // batch still lets you collage just those 3) instead of always
-              // pulling in the whole batch, which would wrongly grey out
-              // above 9 regardless of how many the user actually selected.
-              // Outside select mode it falls back to the whole batch, as a
-              // quick one-tap action when there's nothing to pick from.
-              const n=selectMode?selected.size:shareableIdxs().length;
-              const ok=n>=2&&n<=COLLAGE_MAX_PHOTOS;
-              const label=selectMode?"Combine the "+n+" selected photo"+(n===1?"":"s")+" into one collage image":"Combine all "+n+" photos into one collage image";
-              return React.createElement("button",{onClick:()=>setCollageOpen(true),disabled:!ok,title:n>COLLAGE_MAX_PHOTOS?("Collage supports up to "+COLLAGE_MAX_PHOTOS+" photos -- "+(selectMode?"deselect some to continue":"this batch has "+n)):(n<2?(selectMode?"Select at least 2 photos for a collage":"Need at least 2 photos for a collage"):label),style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(ok?"#6366f1":"rgba(148,163,184,0.2)"),background:ok?"#6366f1":"rgba(148,163,184,0.08)",color:ok?"#fff":"#475569",fontSize:11,fontWeight:700,cursor:ok?"pointer":"not-allowed",fontFamily:"inherit"}},"Collage"); })()
+              // Mirrors Share/Select: the first tap just opens the same
+              // select-photos menu instead of instantly zipping the whole
+              // batch -- tap individual photos or "Select all", then tap
+              // Download again to zip just that selection. Always enabled
+              // outside select mode (there's nothing to gate yet, only
+              // entering the picker), same as Share's own gating.
+              const all=shareableIdxs();
+              const ok=selectMode?(selected.size>0&&!zipping):(all.length>0);
+              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); else downloadSelected(); },disabled:!ok,title:!selectMode?"Select which photos to bundle into one zip (Export/Organize Agent)":(selected.size?"Bundle the "+selected.size+" selected photo"+(selected.size===1?"":"s")+" into one zip":"Select at least 1 photo to download"),style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(ok?"#22c55e":"rgba(148,163,184,0.2)"),background:ok?"#22c55e":"rgba(148,163,184,0.08)",color:ok?"#fff":"#475569",fontSize:11,fontWeight:700,cursor:ok?"pointer":"not-allowed",fontFamily:"inherit",opacity:zipping?0.6:1}},zipping?"Zipping "+zipProgress.done+"/"+zipProgress.total+"...":(selectMode?"Download "+(selected.size||""):"Download"));
+            })(),
+            (function(){
+              // Mirrors Share/Download: the first tap just opens the same
+              // select-photos menu instead of instantly collaging the whole
+              // batch -- tap individual photos or "Select all", then tap
+              // Collage again to open the editor with just that selection.
+              // Always enabled outside select mode (there's nothing to gate
+              // yet, only entering the picker) -- the 2-9 count requirement
+              // only applies once a selection actually exists to check.
+              const all=shareableIdxs();
+              const n=selected.size;
+              const ok=selectMode?(n>=2&&n<=COLLAGE_MAX_PHOTOS):(all.length>0);
+              const label="Combine the "+n+" selected photo"+(n===1?"":"s")+" into one collage image";
+              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); else setCollageOpen(true); },disabled:!ok,title:!selectMode?"Select which photos to combine into a collage":(n>COLLAGE_MAX_PHOTOS?("Collage supports up to "+COLLAGE_MAX_PHOTOS+" photos -- deselect some to continue"):(n<2?"Select at least 2 photos for a collage":label)),style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(ok?"#6366f1":"rgba(148,163,184,0.2)"),background:ok?"#6366f1":"rgba(148,163,184,0.08)",color:ok?"#fff":"#475569",fontSize:11,fontWeight:700,cursor:ok?"pointer":"not-allowed",fontFamily:"inherit"}},"Collage"); })()
           )
         ),
         selectMode&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8,background:"rgba(24,119,242,0.08)",border:"1px solid rgba(24,119,242,0.3)",borderRadius:10,padding:"6px 8px"}},
