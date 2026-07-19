@@ -24950,6 +24950,30 @@ function CollageAgent({ initialOrder, files, onClose }) {
       resetOnePhoto(i);
     }
   };
+  // Bulk version of the fill half of fillOrResetPhoto: zooms EVERY photo to
+  // fill its own cell in one tap, instead of double-tapping each one --
+  // mainly for grid-shaped layouts where portrait photos land in
+  // landscape-shaped cells (or vice versa) and contain-fit's letterboxing
+  // on every cell in a column/row combines into what reads as one big gap,
+  // with a divider handle seemingly floating in the middle of it. Reads
+  // each cell's actual rendered size straight from the DOM (same as the
+  // single-photo version), so it's exact regardless of aspect ratio, cell
+  // count, or manual box-dimension overrides.
+  const fillAllPhotos = () => {
+    const wrap = previewWrapRef.current;
+    if (!wrap) return;
+    const cellEls = [...wrap.children].filter(el => el.querySelector && el.querySelector("img"));
+    setOrder(prev => prev.map((r, i) => {
+      const cellEl = cellEls[i];
+      const img = cellEl && cellEl.querySelector("img");
+      const rect = cellEl && cellEl.getBoundingClientRect();
+      if (!img || !img.naturalWidth || !img.naturalHeight || !rect || !rect.width || !rect.height) return r;
+      const containScale = Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+      const coverScale = Math.max(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+      return { ...r, _zoom: clampZoom(coverScale / containScale), _rot: 0, _offX: 0, _offY: 0 };
+    }));
+    setPickedIdx(null); setDoneMsg(null);
+  };
 
   // Per-photo pinch-zoom/pan/rotate, tracked per cell index via pointerId so
   // multiple simultaneous touches on the SAME photo compose into pinch/twist,
@@ -25258,6 +25282,7 @@ function CollageAgent({ initialOrder, files, onClose }) {
       React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 14 } },
         React.createElement("span", { style: { fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", color: "#334155", flexShrink: 0 } }, "Spacing"),
         React.createElement("input", { type: "range", min: 0, max: 20, value: gap, onChange: e => setGap(parseInt(e.target.value)), style: { flex: 1 } }),
+        React.createElement("button", { onClick: fillAllPhotos, title: "Zoom every photo to fill its own cell -- removes any letterboxing from a mismatched photo/cell aspect ratio", style: { flexShrink: 0, padding: "5px 11px", borderRadius: 9, border: "1px solid rgba(99,102,241,0.35)", background: "rgba(99,102,241,0.1)", color: "#a5b4fc", fontSize: 11, cursor: "pointer", fontFamily: "inherit" } }, "Fill all"),
         React.createElement("button", { onClick: resetOrder, style: { flexShrink: 0, padding: "5px 11px", borderRadius: 9, border: "1px solid " + BORD, background: "transparent", color: "#64748b", fontSize: 11, cursor: "pointer", fontFamily: "inherit" } }, "Reset order"),
         React.createElement("button", { onClick: resetFraming, style: { flexShrink: 0, padding: "5px 11px", borderRadius: 9, border: "1px solid " + BORD, background: "transparent", color: "#64748b", fontSize: 11, cursor: "pointer", fontFamily: "inherit" } }, "Reset framing")
       ),
