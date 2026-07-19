@@ -21220,6 +21220,53 @@ function computePileCells(n, W, H, gap) {
   }
   return cells;
 }
+// Ring/Halo: photos arranged as evenly-spaced circular medallions around a
+// center point, starting at 12 o'clock -- a genuinely different spatial
+// arrangement from every grid-based layout, and from Pile's loose scatter
+// (this one is precise and symmetric, not seeded-jitter). Shares its radius
+// with the faint connecting circle buildCollageCanvas strokes behind the
+// photos (see RING_RADIUS_FRAC) so that guide line reads as running exactly
+// through each medallion's center rather than floating off to one side.
+const RING_RADIUS_FRAC = 0.36;
+function computeRingCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+  const cx = W / 2, cy = H / 2;
+  const R = Math.min(W, H) * RING_RADIUS_FRAC;
+  // Sized so neighbors just clear each other around the ring's circumference
+  // (the chord between adjacent points), capped by a sensible fraction of
+  // the canvas so a small n doesn't blow up into cards that swallow the
+  // ring's own center.
+  const chord = 2 * R * Math.sin(Math.PI / n);
+  const idealSize = Math.min(W, H) * 0.34;
+  const size = Math.max(1, Math.min(idealSize, chord - gap));
+  const cells = [];
+  for (let i = 0; i < n; i++) {
+    const angle = -Math.PI / 2 + i * (2 * Math.PI / n);
+    const x = cx + R * Math.cos(angle), y = cy + R * Math.sin(angle);
+    cells.push({ x: x - size / 2, y: y - size / 2, w: size, h: size });
+  }
+  return cells;
+}
+// Zigzag: same-size cards stacked in even horizontal bands like Rows, but
+// alternating flush-left/flush-right instead of spanning the full width --
+// a non-overlapping staircase, distinct from Cascade's diagonal overlap and
+// from every grid layout's shared column edges (there's no divider that
+// would mean anything here, since neighboring cards don't share a border).
+function computeZigzagCells(n, W, H, gap) {
+  if (n <= 0) return [];
+  if (n === 1) return [{ x: gap, y: gap, w: W - gap * 2, h: H - gap * 2 }];
+  const bandH = (H - gap * (n + 1)) / n;
+  const cardW = W * 0.66;
+  const cells = [];
+  let y = gap;
+  for (let i = 0; i < n; i++) {
+    const x = (i % 2 === 0) ? gap : (W - cardW - gap);
+    cells.push({ x, y, w: cardW, h: bandH });
+    y += bandH + gap;
+  }
+  return cells;
+}
 // Spotlight: the first photo is a full-bleed background (no gap -- it's
 // meant to fill every edge), the rest are small framed thumbnails overlaid
 // in a centered row near the bottom, like a highlight-reel/picture-in-
@@ -21290,6 +21337,32 @@ function heartPolygonPercent(stepsPerCurve) {
   }
   return pts.map(([x, y]) => (x * 100) + "% " + (y * 100) + "%").join(", ");
 }
+// Five-point star outline as (x,y) 0..1 fractions of the bounding box (y=0
+// at the top) -- generated once from the standard outer/inner-radius
+// formula (inner ~0.382x the outer, the classic proportion for a
+// regular 5-point star) rather than hand-typed, then shared by the exact
+// canvas clip the real export uses and the CSS polygon() approximation the
+// live preview uses, the same split Heart's HEART_SEGMENTS/heartClipPath/
+// heartPolygonPercent use.
+const STAR_POINTS = (() => {
+  const pts = [];
+  const outerR = 0.5, innerR = outerR * 0.382;
+  for (let i = 0; i < 10; i++) {
+    const angle = (-90 + i * 36) * Math.PI / 180;
+    const r = i % 2 === 0 ? outerR : innerR;
+    pts.push([0.5 + r * Math.cos(angle), 0.5 + r * Math.sin(angle)]);
+  }
+  return pts;
+})();
+function starClipPath(ctx, x, y, w, h) {
+  ctx.beginPath();
+  ctx.moveTo(x + STAR_POINTS[0][0] * w, y + STAR_POINTS[0][1] * h);
+  for (let i = 1; i < STAR_POINTS.length; i++) ctx.lineTo(x + STAR_POINTS[i][0] * w, y + STAR_POINTS[i][1] * h);
+  ctx.closePath();
+}
+function starPolygonPercent() {
+  return STAR_POINTS.map(([x, y]) => (x * 100) + "% " + (y * 100) + "%").join(", ");
+}
 // Cumulative column/row DIVIDER positions (the midpoint of each internal
 // gap, in the same coordinate space as W/H) computed directly from the
 // fraction array + gap, rather than reverse-engineered from a rendered
@@ -21344,6 +21417,8 @@ function computeCollageLayout(mode, n, W, H, gap, manualFracs, manualSplitRatio)
   if (mode === "polaroid") return computePolaroidCells(n, W, H, gap);
   if (mode === "cascade") return computeCascadeCells(n, W, H, gap);
   if (mode === "pile") return computePileCells(n, W, H, gap);
+  if (mode === "ring") return computeRingCells(n, W, H, gap);
+  if (mode === "zigzag") return computeZigzagCells(n, W, H, gap);
   if (mode === "spotlight") return computeSpotlightCells(n, W, H, gap);
   if (mode === "mosaic") return computeMosaicCells(n, W, H, gap, manualFracs);
   if (mode === "masonry") return computeMasonryCells(n, W, H, gap, manualFracs && manualFracs.colFracs);
@@ -21365,23 +21440,27 @@ function computeCollageLayout(mode, n, W, H, gap, manualFracs, manualSplitRatio)
   if (mode === "scrapbook") return cells.map((c, i) => ({ ...c, rot: _seededJitter(i * 4 + 301) * 8 }));
   return cells;
 }
-// Draws one photo into its layout cell, styled per mode: circleGrid clips to a
-// circle inscribed in the cell; polaroid/cascade/scrapbook/pile rotate around
-// the cell's centre and add a white card border + soft shadow behind the
-// photo (using the cell's own `rot` degrees) -- polaroid gets the classic
-// thick-bottom instant-photo caption strip, the others a plain uniform
-// border instead; spotlight draws its full-bleed main cell plain but gives
-// every OTHER (inset) cell the same card treatment, un-rotated; heart and
-// every other mode are a plain rectangular contain-fit (heart's silhouette
+// Draws one photo into its layout cell, styled per mode: circleGrid/ring both
+// clip to a circle inscribed in the cell (Ring's cells are already
+// individually circular-sized by computeRingCells, so this just crops each
+// photo to match); polaroid/cascade/scrapbook/pile rotate around the cell's
+// centre and add a white card border + soft shadow behind the photo (using
+// the cell's own `rot` degrees) -- polaroid gets the classic thick-bottom
+// instant-photo caption strip, the others a plain uniform border instead;
+// spotlight draws its full-bleed main cell plain but gives every OTHER
+// (inset) cell the same card treatment, un-rotated; heart/star and every
+// other mode are a plain rectangular contain-fit (heart's/star's silhouette
 // comes from an overall canvas clip applied around the whole draw loop in
-// buildCollageCanvas, not from this per-cell function).
+// buildCollageCanvas, not from this per-cell function; zigzag is also plain
+// -- its distinction is purely the alternating left/right positions from
+// computeZigzagCells).
 // `xform` ({zoom,offX,offY,rot}) is the photo's own finger-driven
 // pinch/pan/rotate framing, layered on top of whichever mode-level
 // positioning above -- applies in every layout, not just rect ones, since
 // it's implemented inside drawCellPhoto rather than as a mode-specific case.
 function drawCollageCell(ctx, srcCv, cell, mode, xform) {
   const xf = xform || {};
-  if (mode === "circleGrid") {
+  if (mode === "circleGrid" || mode === "ring") {
     const cx = cell.x + cell.w / 2, cy = cell.y + cell.h / 2, r = Math.min(cell.w, cell.h) / 2;
     ctx.save();
     ctx.beginPath();
@@ -21458,12 +21537,22 @@ async function buildCollageCanvas(order, files, mode, aspectW, aspectH, gapFrac,
   ctx.fillStyle = bgColor;
   ctx.fillRect(0, 0, W, H);
   const cells = computeCollageLayout(mode, order.length, W, H, gap, manualFracs, manualSplitRatio);
-  // Heart's silhouette is an OVERALL canvas clip (not a per-cell one, unlike
-  // circleGrid) -- background is filled first so the corners outside the
-  // heart stay a solid color rather than transparent (JPEG has no alpha),
-  // then every cell drawn below is naturally cropped to the intersection of
-  // the heart shape and its own cell rect.
+  // Heart's and Star's silhouettes are an OVERALL canvas clip (not a
+  // per-cell one, unlike circleGrid/ring) -- background is filled first so
+  // the corners outside the shape stay a solid color rather than
+  // transparent (JPEG has no alpha), then every cell drawn below is
+  // naturally cropped to the intersection of the shape and its own cell rect.
   if (mode === "heart") { ctx.save(); heartClipPath(ctx, 0, 0, W, H); ctx.clip(); }
+  else if (mode === "star") { ctx.save(); starClipPath(ctx, 0, 0, W, H); ctx.clip(); }
+  // Ring's faint connecting circle, stroked BEHIND the photos so it only
+  // shows through the gaps between medallions -- a subtle cue that the
+  // arrangement is a deliberate ring rather than photos floating at random.
+  if (mode === "ring" && order.length > 1) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(0,0,0,0.12)"; ctx.lineWidth = Math.min(W, H) * 0.004;
+    ctx.beginPath(); ctx.arc(W / 2, H / 2, Math.min(W, H) * RING_RADIUS_FRAC, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
   for (let i = 0; i < order.length; i++) {
     const r = order[i];
     const file = files[r.fileIndex];
@@ -21477,7 +21566,7 @@ async function buildCollageCanvas(order, files, mode, aspectW, aspectH, gapFrac,
     if (onProgress) onProgress(i + 1, order.length);
     await new Promise(res => setTimeout(res, 0));
   }
-  if (mode === "heart") ctx.restore();
+  if (mode === "heart" || mode === "star") ctx.restore();
   if (mode === "filmReel") drawFilmReelSprockets(ctx, W, H, bgColor);
   _releaseScratch();
   return cv;
@@ -24606,9 +24695,12 @@ const COLLAGE_MODES = [
   { id: "cascade", label: "Cascade" },
   { id: "spotlight", label: "Spotlight" },
   { id: "heart", label: "Heart" },
+  { id: "star", label: "Star" },
   { id: "scrapbook", label: "Scrapbook" },
   { id: "filmReel", label: "Film Reel" },
   { id: "pile", label: "Pile" },
+  { id: "ring", label: "Ring" },
+  { id: "zigzag", label: "Zigzag" },
 ];
 // Fixed-density repeating hole pattern for Film Reel's live-preview bars --
 // approximates the real export's sprocket holes (drawFilmReelSprockets)
@@ -24685,7 +24777,7 @@ function CollageAgent({ initialOrder, files, onClose }) {
   // any actual photo edge in the shorter column, looking broken rather than
   // useful. Scattered layouts (Polaroid/Cascade/Spotlight) aren't in here
   // either -- their cards don't share edges the way a grid's cells do.
-  const COLLAGE_FULL_GRID_MODES = ["manual", "grid", "circleGrid", "heart", "scrapbook"];
+  const COLLAGE_FULL_GRID_MODES = ["manual", "grid", "circleGrid", "heart", "scrapbook", "star"];
   const COLLAGE_SPLIT_RATIO_MODES = ["featured", "featuredRight", "split"];
   let gridCols = 0, gridRows = 0;
   if (COLLAGE_FULL_GRID_MODES.includes(mode)) {
@@ -25021,7 +25113,7 @@ function CollageAgent({ initialOrder, files, onClose }) {
         React.createElement("button", { onClick: () => !busy && onClose(), disabled: busy, "aria-label": "Close", style: { flexShrink: 0, width: 44, height: 44, marginRight: -6, borderRadius: "50%", border: "1px solid " + BORD, background: "rgba(255,255,255,0.08)", color: "#cbd5e1", fontSize: 24, lineHeight: 1, cursor: busy ? "not-allowed" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", opacity: busy ? 0.5 : 1 } }, "×")),
       // Live preview -- percentage-positioned thumbs in a container locked to
       // the chosen aspect ratio, so the composition previews instantly.
-      React.createElement("div", { ref: previewWrapRef, style: { position: "relative", width: "100%", aspectRatio: aspect.w + "/" + aspect.h, background: COLLAGE_BG_COLORS[bgId], borderRadius: 10, overflow: "hidden", marginBottom: 6, border: "1px solid " + BORD, touchAction: "none", clipPath: mode === "heart" ? "polygon(" + heartPolygonPercent(16) + ")" : "none" } },
+      React.createElement("div", { ref: previewWrapRef, style: { position: "relative", width: "100%", aspectRatio: aspect.w + "/" + aspect.h, background: COLLAGE_BG_COLORS[bgId], borderRadius: 10, overflow: "hidden", marginBottom: 6, border: "1px solid " + BORD, touchAction: "none", clipPath: mode === "heart" ? "polygon(" + heartPolygonPercent(16) + ")" : mode === "star" ? "polygon(" + starPolygonPercent() + ")" : "none" } },
         order.map((r, i) => {
           const c = previewCells[i]; if (!c) return null;
           const picked = pickedIdx === i;
@@ -25045,7 +25137,7 @@ function CollageAgent({ initialOrder, files, onClose }) {
             style: {
               position: "absolute", left: (c.x / pW * 100) + "%", top: (c.y / pH * 100) + "%", width: (c.w / pW * 100) + "%", height: (c.h / pH * 100) + "%",
               overflow: "hidden", touchAction: "none", cursor: busy ? "default" : "grab",
-              borderRadius: mode === "circleGrid" ? "50%" : 0,
+              borderRadius: (mode === "circleGrid" || mode === "ring") ? "50%" : 0,
               transform: isCard ? "rotate(" + (c.rot || 0) + "deg)" : "none",
               background: isCard ? "#fff" : "transparent",
               boxShadow: shadows.length ? shadows.join(", ") : "none",
@@ -25101,6 +25193,20 @@ function CollageAgent({ initialOrder, files, onClose }) {
                 : { top: 0, bottom: 0, width: barPct + "%", [edge === 0 ? "left" : "right"]: 0, backgroundImage: filmReelHoleGradient(COLLAGE_BG_COLORS[bgId], "to bottom") }
             )
           });
+        }),
+        // Ring's faint connecting circle -- the same visual role as the
+        // sprocket bars above, just a CSS approximation of the stroke
+        // drawFilmReelSprockets' sibling (the ring stroke in
+        // buildCollageCanvas) paints behind the photos at export time.
+        mode === "ring" && order.length > 1 && React.createElement("div", {
+          key: "ringguide",
+          style: {
+            position: "absolute", left: "50%", top: "50%",
+            width: (Math.min(pW, pH) * RING_RADIUS_FRAC * 2 / pW * 100) + "%",
+            height: (Math.min(pW, pH) * RING_RADIUS_FRAC * 2 / pH * 100) + "%",
+            transform: "translate(-50%,-50%)", borderRadius: "50%",
+            border: "1px solid rgba(255,255,255,0.12)", pointerEvents: "none", zIndex: 1,
+          }
         })
       ),
       React.createElement("div", { style: { fontSize: 11, color: "#64748b", marginBottom: 12 } },
