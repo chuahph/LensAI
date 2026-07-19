@@ -20847,11 +20847,15 @@ async function shareRenderAgent(file, adj, stats, crop) {
 // a full single-photo share render uses), and the composited output canvas
 // is large enough that even a 9-photo collage still prints/frames well.
 const COLLAGE_SRC_MAX_DIM = SHARE_MAX_DIM;
-// Total output pixels capped so a big collage still encodes/renders in a
-// reasonable time and stays within mobile memory limits, regardless of
-// aspect ratio -- ~12 total megapixels, comparable to a modern phone's own
-// default photo resolution.
-const COLLAGE_MAX_AREA = 3500 * 3500;
+// Total output pixels, as a cascade from the highest quality down. The top
+// level (48MP) matches a modern phone's own camera sensor resolution, but a
+// canvas that large can silently exceed a browser's internal canvas-size
+// ceiling on an older or lower-memory device (getContext returning null, or
+// toBlob failing/returning null rather than throwing a catchable error) --
+// buildCollageCanvas's caller retries at the next lower level whenever that
+// happens, so the export degrades gracefully instead of just failing.
+const COLLAGE_MAX_AREA_LEVELS = [48000000, 24000000, 12000000, 6000000];
+const COLLAGE_MAX_AREA = COLLAGE_MAX_AREA_LEVELS[0];
 const COLLAGE_MAX_PHOTOS = 9;
 const COLLAGE_ASPECTS = [
   { id: "square", label: "Square", w: 1, h: 1 },
@@ -21538,7 +21542,8 @@ function drawFilmReelSprockets(ctx, W, H, bgColor) {
   ctx.restore();
 }
 // Builds the final collage canvas: computes the output size from the chosen
-// aspect ratio (capped to COLLAGE_MAX_AREA total pixels), lays out cells for
+// aspect ratio (capped to `maxArea` total pixels -- one level of
+// COLLAGE_MAX_AREA_LEVELS, defaulting to the highest), lays out cells for
 // the given mode, then decodes+corrects+draws each ordered photo into its cell
 // ONE AT A TIME -- never more than one decoded photo resident in memory at
 // once, the same discipline the zip-export loop uses and for the same reason
@@ -21548,14 +21553,22 @@ function drawFilmReelSprockets(ctx, W, H, bgColor) {
 // is the gap as a FRACTION of the output's larger dimension (not raw pixels),
 // so the same value the live preview uses (computed in its own normalized
 // coordinate space) reproduces an identical-looking gap at final resolution.
-async function buildCollageCanvas(order, files, mode, aspectW, aspectH, gapFrac, bgColor, onProgress, manualFracs, manualSplitRatio) {
+async function buildCollageCanvas(order, files, mode, aspectW, aspectH, gapFrac, bgColor, onProgress, manualFracs, manualSplitRatio, maxArea) {
   const ratio = aspectW / aspectH;
-  let W = Math.round(Math.sqrt(COLLAGE_MAX_AREA * ratio));
-  let H = Math.round(Math.sqrt(COLLAGE_MAX_AREA / ratio));
+  const area = maxArea || COLLAGE_MAX_AREA_LEVELS[0];
+  let W = Math.round(Math.sqrt(area * ratio));
+  let H = Math.round(Math.sqrt(area / ratio));
   const gap = gapFrac * Math.max(W, H);
   const cv = document.createElement("canvas");
   cv.width = W; cv.height = H;
   const ctx = cv.getContext("2d");
+  // A canvas this large can exceed the browser's own internal size ceiling,
+  // especially at the top of COLLAGE_MAX_AREA_LEVELS -- getContext returns
+  // null rather than throwing when that happens, so this needs its own
+  // explicit check to turn into a catchable error the caller's fallback
+  // cascade can act on, instead of a confusing "cannot set property of
+  // null" a few lines down.
+  if (!ctx) throw new Error("Canvas unavailable at this resolution");
   ctx.fillStyle = bgColor;
   ctx.fillRect(0, 0, W, H);
   const boxScales = order.map(r => r._boxScale || 1);
@@ -25177,12 +25190,25 @@ function CollageAgent({ initialOrder, files, onClose }) {
     setBusyLabel("Rendering 0/" + order.length + "…");
     acquireWakeLock();
     try {
-      const cv = await withScratchLock(() => buildCollageCanvas(
-        order, files, mode, aspect.w, aspect.h, gapFrac, COLLAGE_BG_COLORS[bgId],
-        (done, total) => setBusyLabel("Rendering " + done + "/" + total + "…"), manualFracs, splitRatioValue
-      ));
-      const blob = await new Promise(res => cv.toBlob(res, "image/jpeg", 0.98));
-      if (!blob) throw new Error("Could not encode collage");
+      // Starts at the highest quality level (COLLAGE_MAX_AREA_LEVELS[0], up
+      // to 48MP) and only drops to the next one down if that resolution
+      // actually fails on this device (canvas context unavailable, or an
+      // encode that comes back empty) -- most phones never see anything but
+      // the top level, but this keeps a big collage from just failing
+      // outright on an older or lower-memory one.
+      let blob = null, lastErr = null;
+      for (let li = 0; li < COLLAGE_MAX_AREA_LEVELS.length; li++) {
+        try {
+          const cv = await withScratchLock(() => buildCollageCanvas(
+            order, files, mode, aspect.w, aspect.h, gapFrac, COLLAGE_BG_COLORS[bgId],
+            (done, total) => setBusyLabel("Rendering " + done + "/" + total + (li > 0 ? " (reduced quality)" : "") + "…"),
+            manualFracs, splitRatioValue, COLLAGE_MAX_AREA_LEVELS[li]
+          ));
+          blob = await new Promise(res => cv.toBlob(res, "image/jpeg", 0.98));
+          if (blob) break;
+        } catch (err) { lastErr = err; blob = null; }
+      }
+      if (!blob) throw (lastErr || new Error("Could not encode collage"));
       const finalBlob = await addExifDateToBlob(blob);
       const file = new File([finalBlob], "collage-" + Date.now() + ".jpg", { type: "image/jpeg" });
       const result = await shareImageWithCaption([file], "");
