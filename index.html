@@ -24522,22 +24522,22 @@ function BatchAgent({onClose,onCloseApp}){
           "Skip photos that are too blurry/dark/blown to fix (Culling Agent)"
         ),
         React.createElement("button",{onClick:run,disabled:!files.length||!goals.length||busy||overLimit,style:{padding:"11px 14px",borderRadius:10,border:"none",background:(!files.length||!goals.length||busy||overLimit)?"rgba(99,102,241,0.2)":"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",fontSize:13,fontWeight:700,cursor:(!files.length||!goals.length||busy||overLimit)?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}},busy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Processing "+progress+"/"+progressTotal+(stage?" • "+STAGE_LABELS[stage]:"")+"..."):"Run batch agent"),
-        results.length>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
+        results.length>0&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6}},
           React.createElement("div",{style:{fontSize:11,color:"#64748b"}},doneCount+" of "+results.length+" done"+(culledCount?", "+culledCount+" skipped":"")),
-          !busy&&doneCount>0&&React.createElement("div",{style:{display:"flex",gap:6,alignItems:"center"}},
-            (function(){
-              // A top-level peer of Share/Download/Collage rather than nested
-              // inside the selectMode sub-bar. The FIRST tap only enters
-              // select mode -- it doesn't presume the user wants everything,
-              // it just opens up the choice: tap individual photos to select
-              // some, or tap this same button again to select all of them.
-              // Once already selecting, it's the select-all/deselect-all
-              // toggle it always was.
-              const all=shareableIdxs();
-              const allSel=selectMode&&all.length>0&&selected.size>=all.length;
-              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); else toggleSelectAll(); },disabled:!all.length,"aria-label":!selectMode?"Select":(allSel?"Deselect all":"Select all"),"aria-pressed":allSel,title:!selectMode?"Start selecting photos -- tap individual photos, or tap this again to select all":(allSel?"Deselect all":"Select all "+all.length+" photos"),style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(allSel?"#1877f2":"rgba(24,119,242,0.4)"),background:allSel?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:all.length?"#9db2e8":"#475569",fontSize:11,fontWeight:700,cursor:all.length?"pointer":"not-allowed",fontFamily:"inherit"}},!selectMode?"Select":(allSel?"All ✓":"Select all"));
-            })(),
-            React.createElement("button",{onClick:()=>{ if(selectMode) exitSelect(); else setSelectMode(true); },title:"Select multiple photos to share to Facebook together",style:{padding:"6px 12px",borderRadius:16,border:"1px solid #1877f2",background:"#1877f2",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",minWidth:88,textAlign:"center",whiteSpace:"nowrap"}},selectMode?"Cancel select":"Share"),
+          !busy&&doneCount>0&&React.createElement("div",{style:{display:"flex",gap:6}},
+            // Full-width row of 4 equal-size buttons (flex:1 each). Outside
+            // select mode all four just open it (Select/Share/Download/
+            // Collage are equivalent entry points, differing only in
+            // label/color) -- once selecting, the first two slots swap to
+            // Apply HDR and a direct Share action instead of staying as
+            // mode toggles, since Select-all/Cancel-select have their own
+            // home in the sub-bar below now.
+            !selectMode
+              ? React.createElement("button",{onClick:()=>setSelectMode(true),disabled:!shareableIdxs().length,title:"Start selecting photos -- tap individual photos, or tap Select all",style:{flex:1,padding:"6px 4px",borderRadius:16,border:"1px solid "+(shareableIdxs().length?"rgba(24,119,242,0.4)":"rgba(148,163,184,0.2)"),background:shareableIdxs().length?"rgba(24,119,242,0.1)":"rgba(148,163,184,0.08)",color:shareableIdxs().length?"#9db2e8":"#475569",fontSize:11,fontWeight:700,cursor:shareableIdxs().length?"pointer":"not-allowed",fontFamily:"inherit",textAlign:"center",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},"Select")
+              : React.createElement("button",{onClick:()=>setHdrPickerOpen(v=>!v),disabled:!selected.size||bulkHdrBusy,title:"Apply the same HDR preset to every selected photo at once",style:{flex:1,padding:"6px 4px",borderRadius:16,border:"1px solid "+(hdrPickerOpen?"#a5b4fc":"rgba(148,163,184,0.3)"),background:hdrPickerOpen?"rgba(99,102,241,0.2)":"rgba(255,255,255,0.06)",color:(!selected.size||bulkHdrBusy)?"#475569":"#cbd5e1",fontSize:11,fontWeight:700,cursor:(!selected.size||bulkHdrBusy)?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"center",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},bulkHdrBusy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Applying "+bulkHdrDone+"/"+bulkHdrTotal+"..."):"Apply HDR"),
+            !selectMode
+              ? React.createElement("button",{onClick:()=>setSelectMode(true),disabled:!shareableIdxs().length,title:"Select multiple photos to share to Facebook together",style:{flex:1,padding:"6px 4px",borderRadius:16,border:"1px solid #1877f2",background:shareableIdxs().length?"#1877f2":"rgba(24,119,242,0.3)",color:"#fff",fontSize:11,fontWeight:700,cursor:shareableIdxs().length?"pointer":"not-allowed",fontFamily:"inherit",textAlign:"center",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},"Share")
+              : React.createElement("button",{onClick:shareSelected,disabled:!selected.size||sharePrepBusy,title:"Share the selected photos to Facebook",style:{flex:1,padding:"6px 4px",borderRadius:16,border:"1px solid #1877f2",background:(!selected.size||sharePrepBusy)?"rgba(24,119,242,0.3)":"#1877f2",color:"#fff",fontSize:11,fontWeight:700,cursor:(!selected.size||sharePrepBusy)?"not-allowed":"pointer",fontFamily:"inherit",textAlign:"center",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},sharePrepBusy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Preparing "+sharePrepDone+"/"+selected.size+"..."):(selected.size?"Share "+selected.size:"Share")),
             (function(){
               // Mirrors Share/Select: the first tap just opens the same
               // select-photos menu instead of instantly zipping the whole
@@ -24547,7 +24547,7 @@ function BatchAgent({onClose,onCloseApp}){
               // entering the picker), same as Share's own gating.
               const all=shareableIdxs();
               const ok=selectMode?(selected.size>0&&!zipping):(all.length>0);
-              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); else downloadSelected(); },disabled:!ok,title:!selectMode?"Select which photos to bundle into one zip (Export/Organize Agent)":(selected.size?"Bundle the "+selected.size+" selected photo"+(selected.size===1?"":"s")+" into one zip":"Select at least 1 photo to download"),style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(ok?"#22c55e":"rgba(148,163,184,0.2)"),background:ok?"#22c55e":"rgba(148,163,184,0.08)",color:ok?"#fff":"#475569",fontSize:11,fontWeight:700,cursor:ok?"pointer":"not-allowed",fontFamily:"inherit",opacity:zipping?0.6:1,minWidth:88,textAlign:"center",whiteSpace:"nowrap"}},zipping?"Zipping "+zipProgress.done+"/"+zipProgress.total+"...":(selectMode?"Download "+(selected.size||""):"Download"));
+              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); else downloadSelected(); },disabled:!ok,title:!selectMode?"Select which photos to bundle into one zip (Export/Organize Agent)":(selected.size?"Bundle the "+selected.size+" selected photo"+(selected.size===1?"":"s")+" into one zip":"Select at least 1 photo to download"),style:{flex:1,padding:"6px 4px",borderRadius:16,border:"1px solid "+(ok?"#22c55e":"rgba(148,163,184,0.2)"),background:ok?"#22c55e":"rgba(148,163,184,0.08)",color:ok?"#fff":"#475569",fontSize:11,fontWeight:700,cursor:ok?"pointer":"not-allowed",fontFamily:"inherit",opacity:zipping?0.6:1,textAlign:"center",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},zipping?"Zipping "+zipProgress.done+"/"+zipProgress.total+"...":(selectMode?"Download "+(selected.size||""):"Download"));
             })(),
             (function(){
               // Mirrors Share/Download: the first tap just opens the same
@@ -24561,17 +24561,23 @@ function BatchAgent({onClose,onCloseApp}){
               const n=selected.size;
               const ok=selectMode?(n>=2&&n<=COLLAGE_MAX_PHOTOS):(all.length>0);
               const label="Combine the "+n+" selected photo"+(n===1?"":"s")+" into one collage image";
-              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); else setCollageOpen(true); },disabled:!ok,title:!selectMode?"Select which photos to combine into a collage":(n>COLLAGE_MAX_PHOTOS?("Collage supports up to "+COLLAGE_MAX_PHOTOS+" photos -- deselect some to continue"):(n<2?"Select at least 2 photos for a collage":label)),style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(ok?"#6366f1":"rgba(148,163,184,0.2)"),background:ok?"#6366f1":"rgba(148,163,184,0.08)",color:ok?"#fff":"#475569",fontSize:11,fontWeight:700,cursor:ok?"pointer":"not-allowed",fontFamily:"inherit",minWidth:88,textAlign:"center",whiteSpace:"nowrap"}},"Collage"); })()
+              return React.createElement("button",{onClick:()=>{ if(!selectMode) setSelectMode(true); else setCollageOpen(true); },disabled:!ok,title:!selectMode?"Select which photos to combine into a collage":(n>COLLAGE_MAX_PHOTOS?("Collage supports up to "+COLLAGE_MAX_PHOTOS+" photos -- deselect some to continue"):(n<2?"Select at least 2 photos for a collage":label)),style:{flex:1,padding:"6px 4px",borderRadius:16,border:"1px solid "+(ok?"#6366f1":"rgba(148,163,184,0.2)"),background:ok?"#6366f1":"rgba(148,163,184,0.08)",color:ok?"#fff":"#475569",fontSize:11,fontWeight:700,cursor:ok?"pointer":"not-allowed",fontFamily:"inherit",textAlign:"center",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},"Collage"); })()
           )
         ),
         selectMode&&React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8,background:"rgba(24,119,242,0.08)",border:"1px solid rgba(24,119,242,0.3)",borderRadius:10,padding:"6px 8px"}},
-          React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}},
-            React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,minWidth:0}},
-              React.createElement("span",{style:{fontSize:11,color:"#9db2e8",fontWeight:600}},selected.size?selected.size+" selected":"Tap photos to select")),
-            React.createElement("div",{style:{display:"flex",gap:6,flexShrink:0}},
-              React.createElement("button",{onClick:()=>setHdrPickerOpen(v=>!v),disabled:!selected.size||bulkHdrBusy,title:"Apply the same HDR preset to every selected photo at once",style:{padding:"7px 12px",borderRadius:16,border:"1px solid "+(hdrPickerOpen?"#a5b4fc":"rgba(148,163,184,0.3)"),background:hdrPickerOpen?"rgba(99,102,241,0.2)":"rgba(255,255,255,0.06)",color:(!selected.size||bulkHdrBusy)?"#475569":"#cbd5e1",fontSize:12,fontWeight:700,cursor:(!selected.size||bulkHdrBusy)?"not-allowed":"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}},bulkHdrBusy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Applying "+bulkHdrDone+"/"+bulkHdrTotal+"..."):"Apply HDR"),
-              React.createElement("button",{onClick:shareSelected,disabled:!selected.size||sharePrepBusy,style:{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:16,border:"none",background:(!selected.size||sharePrepBusy)?"rgba(24,119,242,0.3)":"#1877f2",color:"#fff",fontSize:12,fontWeight:800,cursor:(!selected.size||sharePrepBusy)?"not-allowed":"pointer",fontFamily:"inherit"}},sharePrepBusy?React.createElement(React.Fragment,null,React.createElement(Spin,null),"Preparing "+sharePrepDone+"/"+selected.size+"..."):"Share "+(selected.size||"")+" to Facebook")
-            )
+          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}},
+            React.createElement("span",{style:{fontSize:11,color:"#9db2e8",fontWeight:600,marginRight:2}},selected.size?selected.size+" selected":"Tap photos to select"),
+            (function(){
+              // Select-all/deselect-all and exiting select mode both live
+              // here now instead of in the top row -- by the time this
+              // sub-bar is showing at all, selectMode is already true, so
+              // neither needs the enter-select-mode branch the top-row
+              // Select/Share buttons still carry.
+              const all=shareableIdxs();
+              const allSel=all.length>0&&selected.size>=all.length;
+              return React.createElement("button",{onClick:toggleSelectAll,disabled:!all.length,"aria-pressed":allSel,title:allSel?"Deselect all":"Select all "+all.length+" photos",style:{padding:"6px 12px",borderRadius:16,border:"1px solid "+(allSel?"#1877f2":"rgba(24,119,242,0.4)"),background:allSel?"rgba(24,119,242,0.25)":"rgba(24,119,242,0.1)",color:all.length?"#9db2e8":"#475569",fontSize:11,fontWeight:700,cursor:all.length?"pointer":"not-allowed",fontFamily:"inherit"}},allSel?"All ✓":"Select all");
+            })(),
+            React.createElement("button",{onClick:exitSelect,title:"Exit select mode",style:{padding:"6px 12px",borderRadius:16,border:"1px solid #6366f1",background:"#6366f1",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"Cancel select")
           ),
           hdrPickerOpen&&React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap",paddingTop:2,borderTop:"1px solid rgba(24,119,242,0.2)"}},
             GOALS.filter(g=>g.id!=="auto"&&g.id!=="fullAuto").map(g=>React.createElement("button",{
