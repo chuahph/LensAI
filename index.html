@@ -21447,7 +21447,7 @@ function computeCollageLayout(mode, n, W, H, gap, manualFracs, manualSplitRatio,
   if (mode === "zigzag") return applyBoxScales(computeZigzagCells(n, W, H, gap), boxScales);
   if (mode === "spotlight") return applyBoxScales(computeSpotlightCells(n, W, H, gap), boxScales, true);
   if (mode === "mosaic") return computeMosaicCells(n, W, H, gap, manualFracs);
-  if (mode === "masonry") return computeMasonryCells(n, W, H, gap, manualFracs && manualFracs.colFracs);
+  if (mode === "masonry") return applyBoxScales(computeMasonryCells(n, W, H, gap, manualFracs && manualFracs.colFracs), boxScales);
   if (mode === "rows") {
     const colFracs = (manualFracs && manualFracs.colFracs && manualFracs.colFracs.length === n) ? manualFracs.colFracs : new Array(n).fill(1 / n);
     return computeManualCells(n, W, H, gap, colFracs, [1]);
@@ -24877,12 +24877,13 @@ function CollageAgent({ initialOrder, files, onClose, onShareCollage }) {
   // columns/rows its OWN grid has -- Grid/Circle Grid/Heart/Manual Split
   // share one cols x rows grid; Rows/Columns are the 1-row/
   // 1-column special case of the same idea; Mosaic has its own totalSlots-
-  // based grid (the 2x2 block spans it). Masonry is deliberately NOT
-  // manually adjustable -- its columns pack items to different heights, so
-  // a straight divider drawn the full column height visibly floats free of
-  // any actual photo edge in the shorter column, looking broken rather than
-  // useful. Scattered layouts (Polaroid/Cascade/Spotlight) aren't in here
-  // either -- their cards don't share edges the way a grid's cells do.
+  // based grid (the 2x2 block spans it). Masonry deliberately has NO shared
+  // divider -- its columns pack items to different heights, so a straight
+  // divider drawn the full column height visibly floats free of any actual
+  // photo edge in the shorter column, looking broken rather than useful.
+  // It still gets adjustability the same way the scattered layouts below
+  // do instead (see hasPerCardResize/applyBoxScales) -- their cards don't
+  // share edges the way a grid's cells do either.
   const COLLAGE_FULL_GRID_MODES = ["manual", "grid", "circleGrid", "heart", "scrapbook", "star"];
   const COLLAGE_SPLIT_RATIO_MODES = ["featured", "featuredRight", "split"];
   let gridCols = 0, gridRows = 0;
@@ -24916,7 +24917,7 @@ function CollageAgent({ initialOrder, files, onClose, onShareCollage }) {
   // as a complement rather than a fixed list of mode ids, so a brand new
   // layout automatically gets adjustability (one way or the other) the
   // moment it's added, without this needing to be updated by hand.
-  const COLLAGE_ROW_MAJOR_MODES = ["rows", "columns", "filmReel", "mosaic", "masonry"];
+  const COLLAGE_ROW_MAJOR_MODES = ["rows", "columns", "filmReel", "mosaic"];
   const hasPerCardResize = !COLLAGE_FULL_GRID_MODES.includes(mode) && !COLLAGE_SPLIT_RATIO_MODES.includes(mode) && !COLLAGE_ROW_MAJOR_MODES.includes(mode);
   const boxScales = order.map(r => r._boxScale || 1);
   const previewCells = computeCollageLayout(mode, order.length, pW, pH, g1000, manualFracs, splitRatioValue, boxScales);
@@ -24962,9 +24963,9 @@ function CollageAgent({ initialOrder, files, onClose, onShareCollage }) {
   const singleAxisRowBoundaries = singleAxisIsRow ? gridFracBoundaries(effectiveRowFracs, pH, g1000) : [];
   const mosaicColBoundaries = mode === "mosaic" ? gridFracBoundaries(effectiveColFracs, pW, g1000) : [];
   const mosaicRowBoundaries = mode === "mosaic" ? gridFracBoundaries(effectiveRowFracs, pH, g1000) : [];
-  // Masonry never renders a divider (see the comment above COLLAGE_FULL_GRID_MODES) --
-  // effectiveColFracs still exists for it above, but only ever holds the even
-  // default, so computeMasonryCells draws its usual auto-packed columns.
+  // Masonry never renders a shared divider (see the comment above
+  // COLLAGE_FULL_GRID_MODES) -- it's adjusted per-card instead, via
+  // hasPerCardResize/applyBoxScales below.
   const masonryColBoundaries = [];
   // The one divider Featured/Featured Right/Split have -- its position
   // follows each layout's own geometry exactly (see computeFeaturedCells/
