@@ -20842,11 +20842,19 @@ async function shareRenderAgent(file, adj, stats, crop) {
 
 // === Auto Collage ======================================================
 // Composites several already-corrected batch photos into one shareable image.
-// Set to the highest quality this app's memory budget can reasonably take --
-// each source photo now decodes at up to SHARE_MAX_DIM itself (the same cap
-// a full single-photo share render uses), and the composited output canvas
-// is large enough that even a 9-photo collage still prints/frames well.
-const COLLAGE_SRC_MAX_DIM = SHARE_MAX_DIM;
+// Set to the highest quality this app's memory budget can reasonably take.
+// Deliberately NOT tied to SHARE_MAX_DIM (2048) -- that cap exists because a
+// single shared photo is re-encoded down to ~2048px by the social target
+// anyway, but a collage output canvas goes up to 48MP (COLLAGE_MAX_AREA_LEVELS
+// below), and a single- or few-photo layout can give one cell nearly the
+// whole canvas -- at 48MP that's up to ~9240px on the long edge (16:9/9:16).
+// Capping the source at 2048px there would mean upscaling a soft 2048px
+// image back out to ~9240px, throwing away real detail the original photo
+// still has. 10000px comfortably covers that worst case (and virtually
+// every consumer camera's native resolution) while still bounding memory
+// for pathological inputs (e.g. 100MP+ scans), since only one decoded photo
+// is ever held in memory at a time (see collageSourceCanvas below).
+const COLLAGE_SRC_MAX_DIM = 10000;
 // Total output pixels, as a cascade from the highest quality down. The top
 // level (48MP) matches a modern phone's own camera sensor resolution, but a
 // canvas that large can silently exceed a browser's internal canvas-size
@@ -22803,7 +22811,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-07-20 20:32";
+const APP_BUILD = "2026-07-20 20:42";
 
 function App() {
   const canvasRef    = useRef(null);
