@@ -21382,8 +21382,9 @@ function gridFracBoundaries(fracs, totalSize, gap) {
   for (let i = 0; i < fracs.length - 1; i++) { acc += fracs[i] * inner; bounds.push(acc + gap / 2); acc += gap; }
   return bounds;
 }
-// Film Reel: the same single-row/column strip as Filmstrip, but insets a
-// margin on each long edge for the decorative sprocket-hole bars
+// Film Reel: an adaptive single-row/column strip (like Rows/Columns, but
+// picking whichever axis matches the canvas), plus insets a margin on each
+// long edge for the decorative sprocket-hole bars
 // buildCollageCanvas paints afterward -- the geometry itself has to reserve
 // that space so the bars never sit on top of a photo.
 const FILM_REEL_BAR_FRAC = 0.045;
@@ -21427,15 +21428,6 @@ function applyBoxScales(cells, boxScales, skipMain) {
 // adjustment for the scattered layouts further down, which have no shared
 // column/row grid to hang a divider off of.
 function computeCollageLayout(mode, n, W, H, gap, manualFracs, manualSplitRatio, boxScales) {
-  if (mode === "filmstrip") {
-    const wide = W >= H;
-    if (wide) {
-      const colFracs = (manualFracs && manualFracs.colFracs && manualFracs.colFracs.length === n) ? manualFracs.colFracs : new Array(n).fill(1 / n);
-      return computeManualCells(n, W, H, gap, colFracs, [1]);
-    }
-    const rowFracs = (manualFracs && manualFracs.rowFracs && manualFracs.rowFracs.length === n) ? manualFracs.rowFracs : new Array(n).fill(1 / n);
-    return computeManualCells(n, W, H, gap, [1], rowFracs);
-  }
   if (mode === "filmReel") return computeFilmReelCells(n, W, H, gap, manualFracs);
   if (mode === "featured") return computeFeaturedCells(n, W, H, gap, manualSplitRatio);
   if (mode === "featuredRight") return computeFeaturedRightCells(n, W, H, gap, manualSplitRatio);
@@ -24778,7 +24770,6 @@ const COLLAGE_BG_COLORS = { white: "#ffffff", black: "#000000", grey: "#94a3b8" 
 const COLLAGE_MODES = [
   { id: "manual", label: "Manual Split" },
   { id: "grid", label: "Grid" },
-  { id: "filmstrip", label: "Filmstrip" },
   { id: "rows", label: "Rows" },
   { id: "columns", label: "Columns" },
   { id: "featured", label: "Featured" },
@@ -24876,7 +24867,7 @@ function CollageAgent({ initialOrder, files, onClose, onShareCollage }) {
 
   // Every layout's manual-adjustment shape, expressed as however many
   // columns/rows its OWN grid has -- Grid/Circle Grid/Heart/Manual Split
-  // share one cols x rows grid; Rows/Columns/Filmstrip are the 1-row/
+  // share one cols x rows grid; Rows/Columns are the 1-row/
   // 1-column special case of the same idea; Mosaic has its own totalSlots-
   // based grid (the 2x2 block spans it). Masonry is deliberately NOT
   // manually adjustable -- its columns pack items to different heights, so
@@ -24890,9 +24881,9 @@ function CollageAgent({ initialOrder, files, onClose, onShareCollage }) {
   if (COLLAGE_FULL_GRID_MODES.includes(mode)) {
     const d = computeManualGridDims(order.length, aspect.w / aspect.h);
     gridCols = d.cols; gridRows = d.rows;
-  } else if (mode === "rows" || ((mode === "filmstrip" || mode === "filmReel") && wide)) {
+  } else if (mode === "rows" || (mode === "filmReel" && wide)) {
     gridCols = order.length; gridRows = 1;
-  } else if (mode === "columns" || ((mode === "filmstrip" || mode === "filmReel") && !wide)) {
+  } else if (mode === "columns" || (mode === "filmReel" && !wide)) {
     gridCols = 1; gridRows = order.length;
   } else if (mode === "mosaic") {
     const d = computeMosaicGridDims(order.length, aspect.w, aspect.h);
@@ -24917,7 +24908,7 @@ function CollageAgent({ initialOrder, files, onClose, onShareCollage }) {
   // as a complement rather than a fixed list of mode ids, so a brand new
   // layout automatically gets adjustability (one way or the other) the
   // moment it's added, without this needing to be updated by hand.
-  const COLLAGE_ROW_MAJOR_MODES = ["rows", "columns", "filmstrip", "filmReel", "mosaic", "masonry"];
+  const COLLAGE_ROW_MAJOR_MODES = ["rows", "columns", "filmReel", "mosaic", "masonry"];
   const hasPerCardResize = !COLLAGE_FULL_GRID_MODES.includes(mode) && !COLLAGE_SPLIT_RATIO_MODES.includes(mode) && !COLLAGE_ROW_MAJOR_MODES.includes(mode);
   const boxScales = order.map(r => r._boxScale || 1);
   const previewCells = computeCollageLayout(mode, order.length, pW, pH, g1000, manualFracs, splitRatioValue, boxScales);
@@ -24953,12 +24944,12 @@ function CollageAgent({ initialOrder, files, onClose, onShareCollage }) {
   const colDividerBottomPct = (gridLastRowPartial && manualRowBoundaries.length)
     ? (manualRowBoundaries[manualRowBoundaries.length - 1] / pH * 100)
     : null;
-  // Rows/Columns/Filmstrip (single axis) and Mosaic/Masonry (cells that can
+  // Rows/Columns/Film Reel (single axis) and Mosaic/Masonry (cells that can
   // SPAN multiple columns/rows, so reading boundaries off any one cell's
   // edges wouldn't reliably capture every seam) instead compute divider
   // positions analytically straight from the fraction arrays.
-  const singleAxisIsCol = mode === "rows" || ((mode === "filmstrip" || mode === "filmReel") && wide);
-  const singleAxisIsRow = mode === "columns" || ((mode === "filmstrip" || mode === "filmReel") && !wide);
+  const singleAxisIsCol = mode === "rows" || (mode === "filmReel" && wide);
+  const singleAxisIsRow = mode === "columns" || (mode === "filmReel" && !wide);
   const singleAxisColBoundaries = singleAxisIsCol ? gridFracBoundaries(effectiveColFracs, pW, g1000) : [];
   const singleAxisRowBoundaries = singleAxisIsRow ? gridFracBoundaries(effectiveRowFracs, pH, g1000) : [];
   const mosaicColBoundaries = mode === "mosaic" ? gridFracBoundaries(effectiveColFracs, pW, g1000) : [];
@@ -25174,7 +25165,7 @@ function CollageAgent({ initialOrder, files, onClose, onShareCollage }) {
   };
 
   // Grid divider drag (used by every grid-shaped layout's col/row dividers --
-  // Grid, Circle Grid, Heart, Rows, Columns, Filmstrip, Mosaic, Masonry,
+  // Grid, Circle Grid, Heart, Rows, Columns, Film Reel, Mosaic, Masonry,
   // Manual Split): redistributes the two fractions straddling the dragged
   // line, clamped so neither neighbor collapses to a sliver.
   const dragDivider = (axis, i) => (e) => {
@@ -25304,7 +25295,7 @@ function CollageAgent({ initialOrder, files, onClose, onShareCollage }) {
         React.createElement("button", { onClick: () => !busy && onClose(), disabled: busy, "aria-label": "Close", style: { flexShrink: 0, width: 44, height: 44, marginRight: -6, borderRadius: "50%", border: "1px solid " + BORD, background: "rgba(255,255,255,0.08)", color: "#cbd5e1", fontSize: 24, lineHeight: 1, cursor: busy ? "not-allowed" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", opacity: busy ? 0.5 : 1 } }, "×")),
       // Live preview -- percentage-positioned thumbs in a container locked to
       // the chosen aspect ratio, so the composition previews instantly.
-      React.createElement("div", { ref: previewWrapRef, style: { position: "relative", width: "100%", aspectRatio: aspect.w + "/" + aspect.h, background: COLLAGE_BG_COLORS[bgId], borderRadius: 10, overflow: "hidden", marginBottom: 6, border: "1px solid " + BORD, touchAction: "none", clipPath: mode === "heart" ? "polygon(" + heartPolygonPercent(16) + ")" : mode === "star" ? "polygon(" + starPolygonPercent() + ")" : "none" } },
+      React.createElement("div", { ref: previewWrapRef, style: { position: "relative", width: "auto", maxWidth: "100%", height: "auto", maxHeight: "42dvh", aspectRatio: aspect.w + "/" + aspect.h, margin: "0 auto", background: COLLAGE_BG_COLORS[bgId], borderRadius: 10, overflow: "hidden", marginBottom: 6, border: "1px solid " + BORD, touchAction: "none", clipPath: mode === "heart" ? "polygon(" + heartPolygonPercent(16) + ")" : mode === "star" ? "polygon(" + starPolygonPercent() + ")" : "none" } },
         order.map((r, i) => {
           const c = previewCells[i]; if (!c) return null;
           const picked = pickedIdx === i;
