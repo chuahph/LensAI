@@ -20820,13 +20820,19 @@ async function fullRenderAgent(file, adj, stats, crop) {
 }
 
 // Renders for social sharing at a capped longest edge instead of true full
-// resolution. Facebook (and other social targets) re-encode uploads down to
-// ~2048px anyway, so rendering a 12000px original per photo is wasted work --
-// and doing that sequentially for a multi-photo selection is exactly what
-// made "share several photos" feel stuck. Capping keeps each render an order
-// of magnitude cheaper in both time and memory while still posting at full
-// social quality. Shares one photo (single "f") or a whole selection.
-const SHARE_MAX_DIM = 2048;
+// resolution -- rendering a 12000px original per photo is wasted work, and
+// doing that sequentially for a multi-photo selection is exactly what made
+// "share several photos" feel stuck. But the cap needs to clear whatever
+// quality tier the receiving app applies, or that app's own re-compression
+// does the damage instead: WhatsApp in particular re-encodes anything it
+// receives, and only offers its "HD" tier (much less aggressive compression)
+// above roughly the resolution a 2048px source landed at -- so a 2048px
+// image was quietly always going out through WhatsApp's lossier "Standard"
+// path. 4096px comfortably clears that HD threshold on every major target
+// (WhatsApp, Facebook, Instagram, Messages) while still keeping each render
+// an order of magnitude cheaper than a true full-res original. Shares one
+// photo (single "f") or a whole selection.
+const SHARE_MAX_DIM = 4096;
 async function shareRenderAgent(file, adj, stats, crop) {
   const image = await decodeAgent(file);
   let w = image.width, h = image.height;
@@ -20843,13 +20849,13 @@ async function shareRenderAgent(file, adj, stats, crop) {
 // === Auto Collage ======================================================
 // Composites several already-corrected batch photos into one shareable image.
 // Set to the highest quality this app's memory budget can reasonably take.
-// Deliberately NOT tied to SHARE_MAX_DIM (2048) -- that cap exists because a
-// single shared photo is re-encoded down to ~2048px by the social target
-// anyway, but a collage output canvas goes up to 48MP (COLLAGE_MAX_AREA_LEVELS
-// below), and a single- or few-photo layout can give one cell nearly the
-// whole canvas -- at 48MP that's up to ~9240px on the long edge (16:9/9:16).
-// Capping the source at 2048px there would mean upscaling a soft 2048px
-// image back out to ~9240px, throwing away real detail the original photo
+// Deliberately NOT tied to SHARE_MAX_DIM -- that cap exists to clear the
+// receiving app's own HD-quality threshold for a single shared photo, but a
+// collage output canvas goes up to 48MP (COLLAGE_MAX_AREA_LEVELS below), and
+// a single- or few-photo layout can give one cell nearly the whole canvas --
+// at 48MP that's up to ~9240px on the long edge (16:9/9:16). Capping the
+// source at SHARE_MAX_DIM there would mean upscaling an already-softened
+// copy back out to ~9240px, throwing away real detail the original photo
 // still has. 10000px comfortably covers that worst case (and virtually
 // every consumer camera's native resolution) while still bounding memory
 // for pathological inputs (e.g. 100MP+ scans), since only one decoded photo
@@ -22811,7 +22817,7 @@ if (!document.getElementById("lensai-css")) {
 // Bump this on every merge to main so the build date/time is visible in
 // the UI (header, next to the logo) -- update to today's date and the
 // merge time whenever a change lands on main.
-const APP_BUILD = "2026-07-20 22:58";
+const APP_BUILD = "2026-08-07 22:56";
 
 function App() {
   const canvasRef    = useRef(null);
