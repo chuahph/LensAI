@@ -22822,6 +22822,7 @@ const APP_BUILD = "2026-08-23 16:01";
 function App() {
   const canvasRef    = useRef(null);
   const compareWrapRef = useRef(null);
+  const frameRef     = useRef(null);
   const fileRef      = useRef(null);
   const toastRef     = useRef(null);
   const modalAutoCloseRef = useRef(null);
@@ -22834,6 +22835,9 @@ function App() {
   const enhancedAdjRef = useRef(null); // adj snapshot right after Enhance (corrections + HDR look)
 
   const [img,       setImg]       = useState(null);
+  // Explicit pixel size (not CSS auto-sizing) for the photo wrapper -- see
+  // the ResizeObserver effect below for why.
+  const [frameFit,  setFrameFit]  = useState(null);
   const [adj,       setAdj]       = useState(blankAdj());
   const [activeAdj, setActiveAdj] = useState(null);
   const [fixes,     setFixes]     = useState({});
@@ -22916,6 +22920,42 @@ function App() {
     });
     return ()=>{ cancelled = true; cancelAnimationFrame(raf); };
   },[displayAdj,img]);
+
+  // Sizes the photo wrapper with an explicit pixel width/height instead of
+  // leaning on the canvas's own `max-width:100%; max-height:100%; width:
+  // auto; height:auto` CSS to simultaneously respect both axes. That combo
+  // needs every ancestor in the percentage-height chain to resolve to a
+  // "definite" size, and on iOS Safari inside this flex layout it doesn't
+  // reliably -- the canvas can end up taller than the actual available
+  // area, and since the area has overflow:hidden and centers its content,
+  // the excess gets silently clipped equally off the top AND bottom. That's
+  // invisible for a photo whose subject is centered, but for a photo with
+  // sky at the top and a car at the bottom (exactly the "top and bottom
+  // both look shorter than the original" reports) it trims real content
+  // with no visual sign anything was cut. Measuring the available box in
+  // JS and setting the wrapper's size in pixels sidesteps the whole
+  // ambiguity -- the wrapper is never larger than its container, so there's
+  // nothing for overflow:hidden to clip.
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame || !img) { setFrameFit(null); return; }
+    const ratio = img.width / img.height;
+    const fit = () => {
+      const cw = frame.clientWidth, ch = frame.clientHeight;
+      if (!cw || !ch) return;
+      let w = cw, h = cw / ratio;
+      if (h > ch) { h = ch; w = ch * ratio; }
+      setFrameFit({ w: Math.round(w), h: Math.round(h) });
+    };
+    fit();
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(fit);
+      ro.observe(frame);
+      return () => ro.disconnect();
+    }
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [img && img.width, img && img.height]);
 
   const showToast=useCallback((msg)=>{
     clearTimeout(toastRef.current);
@@ -23541,7 +23581,7 @@ return (React.createElement("div",{style:{display:"flex",flexDirection:"column",
             React.createElement("span",{style:{fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:8,background:activePre.color+"22",color:activePre.color,border:"1px solid "+activePre.color+"44",flexShrink:0}},"HDR",activePre.label)
           )),React.createElement("div",{style:{display:"flex",gap:6,alignItems:"center",overflowX:"auto",overflowY:"hidden",scrollbarWidth:"none",minWidth:0,flexShrink:1,flexGrow:1}},analyzed&&analysis&&(
             React.createElement("button",{onClick:()=>{clearTimeout(modalAutoCloseRef.current);setModal(true);},title:"Show analyze & correction summary",style:{padding:"5px 11px",borderRadius:9,border:"1px solid rgba(99,102,241,0.35)",background:"rgba(99,102,241,0.08)",color:"#a5b4fc",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:5}},React.createElement("span",{style:{width:5,height:5,borderRadius:"50%",background:"#a5b4fc",display:"inline-block"}}),"Summary")
-          ),React.createElement(Btn,{onClick:undo,disabled:!history.length},"Undo"),React.createElement(Btn,{onClick:reset,disabled:!img},"Reset"),false),React.createElement("div",{style:{flexShrink:0,marginLeft:"auto",display:"flex",alignItems:"center",gap:10}},img&&React.createElement("button",{onClick:backToMenu,title:"Back to menu","aria-label":"Back to menu",style:{flexShrink:0,width:44,height:44,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"←"),img&&React.createElement("button",{onClick:openShare,disabled:!(analyzed||hasEnhanced)||shareBusy,title:"Share to Facebook","aria-label":"Share to Facebook",style:{flexShrink:0,width:44,height:44,borderRadius:"50%",border:"1px solid rgba(59,89,152,0.6)",background:"rgba(59,89,152,0.15)",color:(analyzed||hasEnhanced)&&!shareBusy?"#9db2e8":"#475569",fontSize:17,fontWeight:900,lineHeight:1,cursor:(analyzed||hasEnhanced)&&!shareBusy?"pointer":"not-allowed",fontFamily:"Georgia,'Times New Roman',serif",display:"flex",alignItems:"center",justifyContent:"center"}},shareBusy?React.createElement(Spin,null):"f"),React.createElement(Btn,{onClick:saveImg,disabled:!img||!(analyzed||hasEnhanced),accent:true},"Save"),React.createElement("button",{onClick:closeApp,title:"Close LensAI","aria-label":"Close LensAI",style:{flexShrink:0,width:44,height:44,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:18,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×"))),React.createElement("div",{style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden",background:"radial-gradient(circle at 50% 38%, rgba(99,102,241,0.14), rgba(2,4,8,0.98) 55%, #020408 100%)",cursor:!img?"pointer":"default",minHeight:0},onClick:!img?()=>fileRef.current&&fileRef.current.click():undefined},React.createElement("div",{ref:compareWrapRef,style:{position:"relative",display:img?"inline-block":"none",maxWidth:"100%",maxHeight:"100%"}},React.createElement("canvas",{ref:canvasRef,style:{maxWidth:"100%",maxHeight:"100%",height:"auto",width:"auto",display:"block",borderRadius:3}}),img&&viewMode&&React.createElement("div",{style:{position:"absolute",top:8,left:8,background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:9,fontWeight:800,letterSpacing:"0.1em",padding:"3px 8px",borderRadius:6,pointerEvents:"none"}},viewMode==="original"?"ORIGINAL":viewMode==="analyzed"?"CORRECTION":"HDR"),img&&React.createElement(TransformOverlay,{crop,setCrop,rotation:adj.rotation||0,onRotation:v=>setAdj(p=>({...p,rotation:v})),perspective:adj.perspective||0,onPerspective:v=>setAdj(p=>({...p,perspective:v})),hidden:!!viewMode}),img&&analyzed&&React.createElement("div",{style:{position:"absolute",bottom:10,left:"50%",transform:"translateX(-50%)",display:"flex",gap:6,zIndex:3}},
+          ),React.createElement(Btn,{onClick:undo,disabled:!history.length},"Undo"),React.createElement(Btn,{onClick:reset,disabled:!img},"Reset"),false),React.createElement("div",{style:{flexShrink:0,marginLeft:"auto",display:"flex",alignItems:"center",gap:10}},img&&React.createElement("button",{onClick:backToMenu,title:"Back to menu","aria-label":"Back to menu",style:{flexShrink:0,width:44,height:44,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:16,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"←"),img&&React.createElement("button",{onClick:openShare,disabled:!(analyzed||hasEnhanced)||shareBusy,title:"Share to Facebook","aria-label":"Share to Facebook",style:{flexShrink:0,width:44,height:44,borderRadius:"50%",border:"1px solid rgba(59,89,152,0.6)",background:"rgba(59,89,152,0.15)",color:(analyzed||hasEnhanced)&&!shareBusy?"#9db2e8":"#475569",fontSize:17,fontWeight:900,lineHeight:1,cursor:(analyzed||hasEnhanced)&&!shareBusy?"pointer":"not-allowed",fontFamily:"Georgia,'Times New Roman',serif",display:"flex",alignItems:"center",justifyContent:"center"}},shareBusy?React.createElement(Spin,null):"f"),React.createElement(Btn,{onClick:saveImg,disabled:!img||!(analyzed||hasEnhanced),accent:true},"Save"),React.createElement("button",{onClick:closeApp,title:"Close LensAI","aria-label":"Close LensAI",style:{flexShrink:0,width:44,height:44,borderRadius:"50%",border:"1px solid "+BORD,background:"rgba(255,255,255,0.05)",color:"#94a3b8",fontSize:18,lineHeight:1,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}},"×"))),React.createElement("div",{ref:frameRef,style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden",background:"radial-gradient(circle at 50% 38%, rgba(99,102,241,0.14), rgba(2,4,8,0.98) 55%, #020408 100%)",cursor:!img?"pointer":"default",minHeight:0},onClick:!img?()=>fileRef.current&&fileRef.current.click():undefined},React.createElement("div",{ref:compareWrapRef,style:frameFit?{position:"relative",display:img?"inline-block":"none",width:frameFit.w,height:frameFit.h}:{position:"relative",display:img?"inline-block":"none",maxWidth:"100%",maxHeight:"100%"}},React.createElement("canvas",{ref:canvasRef,style:frameFit?{width:"100%",height:"100%",display:"block",borderRadius:3}:{maxWidth:"100%",maxHeight:"100%",height:"auto",width:"auto",display:"block",borderRadius:3}}),img&&viewMode&&React.createElement("div",{style:{position:"absolute",top:8,left:8,background:"rgba(0,0,0,0.6)",color:"#fff",fontSize:9,fontWeight:800,letterSpacing:"0.1em",padding:"3px 8px",borderRadius:6,pointerEvents:"none"}},viewMode==="original"?"ORIGINAL":viewMode==="analyzed"?"CORRECTION":"HDR"),img&&React.createElement(TransformOverlay,{crop,setCrop,rotation:adj.rotation||0,onRotation:v=>setAdj(p=>({...p,rotation:v})),perspective:adj.perspective||0,onPerspective:v=>setAdj(p=>({...p,perspective:v})),hidden:!!viewMode}),img&&analyzed&&React.createElement("div",{style:{position:"absolute",bottom:10,left:"50%",transform:"translateX(-50%)",display:"flex",gap:6,zIndex:3}},
             React.createElement("button",{onClick:()=>setViewMode(v=>v==="original"?null:"original"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="original"?"#a5b4fc":BORD),background:viewMode==="original"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="original"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"Original"),
             React.createElement("button",{onClick:()=>setViewMode(v=>v==="analyzed"?null:"analyzed"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="analyzed"?"#a5b4fc":BORD),background:viewMode==="analyzed"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="analyzed"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"Correction"),
             hasEnhanced&&React.createElement("button",{onClick:()=>setViewMode(v=>v==="enhanced"?null:"enhanced"),style:{padding:"6px 12px",borderRadius:14,border:"1px solid "+(viewMode==="enhanced"?"#a5b4fc":BORD),background:viewMode==="enhanced"?"rgba(99,102,241,0.25)":"rgba(6,8,15,0.78)",color:viewMode==="enhanced"?"#fff":"#94a3b8",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",backdropFilter:"blur(8px)"}},"HDR")
