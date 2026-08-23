@@ -2,6 +2,16 @@
 
 Single-file React PWA at `index.html` (no build step, no bundler — React/ReactDOM source and the app itself are inlined directly).
 
+## Auto-merge
+
+The user has authorized auto-merging: once a code fix on a feature branch is
+pushed and verified (tests pass, no regressions), merge it into `main`
+immediately without waiting for the user to say "Merge" first. This applies
+to all upcoming fixes/changes, not just a one-off. Still follow the merge
+checklist below on every merge, and still ask before any other kind of
+risky/destructive action (force-push, history rewrite, etc.) — this
+authorization only covers the normal feature-branch → `main` merge flow.
+
 ## Merge checklist
 
 Before every merge of a feature branch into `main`, update the build label so it reflects when `main` was last updated:
