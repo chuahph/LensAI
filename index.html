@@ -22923,88 +22923,83 @@ function App() {
     toastRef.current=setTimeout(()=>setToast(null),2500);
   },[]);
 
-  const loadImage=useCallback((src)=>{
-    const image=new Image();
-    image.onload=()=>{
-      const origW=image.width, origH=image.height;
-
-      // Full-resolution pixels are NOT materialized here any more -- they used
-      // to be drawn to a full-size canvas and getImageData'd immediately on
-      // load (a 48MP photo is ~192MB) and kept resident in fullResRef for the
-      // ENTIRE editing session, whether or not the user ever saves. That
-      // constant, avoidable footprint (on top of everything else the editor
-      // holds) was enough on its own to crash a memory-tight mobile tab just
-      // from loading a large photo. buildEditedExport now decodes the ORIGINAL
-      // FILE fresh, on demand, only when Save/Share actually needs it -- see
-      // its own comment for the rest of the reasoning. The capped export
-      // dimensions are still cheap to compute here (pure arithmetic, no canvas)
-      // since the Auto HDR toast below reports them.
-      const FULL_MAX=12000;
-      let fw=origW, fh=origH;
-      if(fw>FULL_MAX){fh=Math.round(fh*FULL_MAX/fw);fw=FULL_MAX;}
-      if(fh>FULL_MAX){fw=Math.round(fw*FULL_MAX/fh);fh=FULL_MAX;}
-
-      // -- Downscale to preview (max 1200px) for fast real-time editing
-      const PREV_MAX=1200;
-      let pw=origW, ph=origH;
-      if(pw>PREV_MAX){ph=Math.round(ph*PREV_MAX/pw);pw=PREV_MAX;}
-      if(ph>PREV_MAX){pw=Math.round(pw*PREV_MAX/ph);ph=PREV_MAX;}
-      const cv=canvasRef.current; cv.width=pw; cv.height=ph;
-      const ctx=cv.getContext("2d"); ctx.drawImage(image,0,0,pw,ph);
-      const prevData=ctx.getImageData(0,0,pw,ph);
-
-      // Analyze from preview (fast). Aggregate statistics (contrast,
-      // average brightness, sky ratio, white-balance estimate, etc.) are
-      // stable across resolution -- a 1200px downscale gives essentially
-      // identical numbers to the full-res original since these are all
-      // statistical/averaged measures, not pixel-exact ones. Re-running
-      // the entire 5-pass analysis pipeline on a 12000px image just for
-      // near-identical numbers wasted real time and memory on mobile, so
-      // the full-res stats now simply reuse the already-computed preview
-      // stats instead of re-scanning the whole image a second time.
-      const stats=analyzeImage(prevData);
-      statsRef.current=stats;
-      setImgStats(stats);
-
-      const bestHDR=autoSelectHDR(stats);
-      setAutoHDR(bestHDR);
-
-      setImg(prevData); setAdj(blankAdj()); setFixes({}); setAnalysis(null);
-      setCrop({ x: 0, y: 0, w: 1, h: 1 });
-      setAnalyzed(false); setHistory([]); setActiveAdj(null);
-      setActiveHDR(null); hdrRef.current=null;
-      setViewMode(null); setHasEnhanced(false);
-      analyzedAdjRef.current=null; enhancedAdjRef.current=null;
-
-      const preset=HDR_PRESETS.find(h=>h.id===bestHDR);
-      const mpx=((fw*fh)/1000000).toFixed(1);
-      showToast("Auto HDR: "+((preset&&preset.label)||bestHDR)+" -- "+fw+"x"+fh+" ("+mpx+"MP)");
-    };
-    // Previously missing: if the browser can't decode the image data at
-    // all (truncated/corrupted file, an exotic format like HEIC that some
-    // browser/OS combinations refuse to decode inline, etc.), onload
-    // simply never fires and onerror fires instead -- with no handler
-    // here that failure was completely silent, leaving the UI stuck on
-    // the placeholder with no feedback, which is exactly the kind of gap
-    // that can surface as a generic uncaught error with no useful detail.
-    image.onerror=()=>{
+  const loadImage=useCallback(async(file)=>{
+    // Decoded the same way the export path decodes this same file
+    // (decodeAgent -- createImageBitmap with imageOrientation:"from-image",
+    // falling back to a plain <img> only where createImageBitmap is
+    // unsupported). Previously this used a bare `new Image()` here while
+    // decodeFullRes/decodeAgent handled the eventual Save/Share render --
+    // two different decoders for the same file is exactly the kind of split
+    // that can silently disagree on EXIF orientation on a given browser,
+    // which would show as the live preview's aspect ratio not matching the
+    // photo's real shape even though the file itself decodes fine at export.
+    let image;
+    try { image = await decodeAgent(file); }
+    catch (err) {
       showToast("Could not load that image -- try a different photo or format");
-    };
-    image.src=src;
+      return;
+    }
+    const origW=image.width, origH=image.height;
+
+    // Full-resolution pixels are NOT materialized here any more -- they used
+    // to be drawn to a full-size canvas and getImageData'd immediately on
+    // load (a 48MP photo is ~192MB) and kept resident in fullResRef for the
+    // ENTIRE editing session, whether or not the user ever saves. That
+    // constant, avoidable footprint (on top of everything else the editor
+    // holds) was enough on its own to crash a memory-tight mobile tab just
+    // from loading a large photo. buildEditedExport now decodes the ORIGINAL
+    // FILE fresh, on demand, only when Save/Share actually needs it -- see
+    // its own comment for the rest of the reasoning. The capped export
+    // dimensions are still cheap to compute here (pure arithmetic, no canvas)
+    // since the Auto HDR toast below reports them.
+    const FULL_MAX=12000;
+    let fw=origW, fh=origH;
+    if(fw>FULL_MAX){fh=Math.round(fh*FULL_MAX/fw);fw=FULL_MAX;}
+    if(fh>FULL_MAX){fw=Math.round(fw*FULL_MAX/fh);fh=FULL_MAX;}
+
+    // -- Downscale to preview (max 1200px) for fast real-time editing
+    const PREV_MAX=1200;
+    let pw=origW, ph=origH;
+    if(pw>PREV_MAX){ph=Math.round(ph*PREV_MAX/pw);pw=PREV_MAX;}
+    if(ph>PREV_MAX){pw=Math.round(pw*PREV_MAX/ph);ph=PREV_MAX;}
+    const cv=canvasRef.current; cv.width=pw; cv.height=ph;
+    const ctx=cv.getContext("2d"); ctx.drawImage(image,0,0,pw,ph);
+    if (typeof image.close === "function") image.close();
+    const prevData=ctx.getImageData(0,0,pw,ph);
+
+    // Analyze from preview (fast). Aggregate statistics (contrast,
+    // average brightness, sky ratio, white-balance estimate, etc.) are
+    // stable across resolution -- a 1200px downscale gives essentially
+    // identical numbers to the full-res original since these are all
+    // statistical/averaged measures, not pixel-exact ones. Re-running
+    // the entire 5-pass analysis pipeline on a 12000px image just for
+    // near-identical numbers wasted real time and memory on mobile, so
+    // the full-res stats now simply reuse the already-computed preview
+    // stats instead of re-scanning the whole image a second time.
+    const stats=analyzeImage(prevData);
+    statsRef.current=stats;
+    setImgStats(stats);
+
+    const bestHDR=autoSelectHDR(stats);
+    setAutoHDR(bestHDR);
+
+    setImg(prevData); setAdj(blankAdj()); setFixes({}); setAnalysis(null);
+    setCrop({ x: 0, y: 0, w: 1, h: 1 });
+    setAnalyzed(false); setHistory([]); setActiveAdj(null);
+    setActiveHDR(null); hdrRef.current=null;
+    setViewMode(null); setHasEnhanced(false);
+    analyzedAdjRef.current=null; enhancedAdjRef.current=null;
+
+    const preset=HDR_PRESETS.find(h=>h.id===bestHDR);
+    const mpx=((fw*fh)/1000000).toFixed(1);
+    showToast("Auto HDR: "+((preset&&preset.label)||bestHDR)+" -- "+fw+"x"+fh+" ("+mpx+"MP)");
   },[showToast]);
 
   const onFile=(e)=>{
     const f=e.target.files[0]; if(!f) return;
     setOrigFileName(f.name||null);
     srcFileRef.current=f; // retained for share's EXIF-location lookup
-    const r=new FileReader();
-    r.onload=ev=>loadImage(ev.target.result);
-    // Previously missing: without this, a file the browser fails to read
-    // (corrupted data, permission issue, an exotic format some browsers
-    // reject outright) failed completely silently -- no toast, no console
-    // message a user could act on, just a stuck UI. This surfaces it.
-    r.onerror=()=>{ showToast("Could not read that file -- try a different photo"); };
-    r.readAsDataURL(f);
+    loadImage(f);
     e.target.value="";
   };
 
