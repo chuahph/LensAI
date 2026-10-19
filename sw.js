@@ -18,7 +18,10 @@
 // (notably on iOS Safari), which made the on-device food/object recognition
 // silently fail even on a working Wi-Fi connection. Third-party requests now
 // bypass the worker entirely and go straight to the network.
-const CACHE_NAME = 'lensai-shell-v5';
+// v6: UI refresh (light/dark theme, before/after slider, crop shortcuts,
+// My Presets, export options) -- bumped so installed phones drop the old
+// cached index.html and pick up the new one.
+const CACHE_NAME = 'lensai-shell-v6';
 
 const SHELL_FILES = [
   './',
